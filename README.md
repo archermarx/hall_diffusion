@@ -154,8 +154,6 @@ The configs also have options for sampling/generating from the model.
 To run the sampler, just run `python/sampler.py`.
 The results will be placed in the config's specified output dirs.
 
-
-
 ## References
-\[1\]: https://arxiv.org/abs/2206.00364
-\[2\]: https://arxiv.org/abs/2312.02696
+- \[1\]: https://arxiv.org/abs/2206.00364
+- \[2\]: https://arxiv.org/abs/2312.02696
