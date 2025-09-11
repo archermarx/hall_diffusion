@@ -1,17 +1,22 @@
-# Diffusion modeling for Hall thruster inverse problems
+# Diffusion modeling for inverse problems in crossed-field plasmas
+
+Author: Thomas Marks (https://thomasmarks.space)
+License: GNU GPLv3 (except for python/models/edm2.py, which is reproduced under the terms of the CC-BY-NC-SA) license.
+Copyright 2025 Regents of the University of Michigan.
 
 ## Directory structure
 
 - `configs`: Model specification and configuration files for multiple model sizes
-- `workflows`
+- `python`
     - `test_train_split.py`: Splits generated data into test and validation sets
     - `train.py`: Trains a model from a given config
     - `sample.py`: Samples (conditionally or unconditionally) from a given model. 
-- `utils`
-    - `thruster_data.py`: Functions and types for loading, interacting with, and plotting thruster data.
-- `models`
-    - `edm2.py`: Diffusion model we currently employ, lightly modified from the EDM2 baseline\[1,2\].
-    - `ema.py`: Implementation of the exponential moving average functionality which can sometimes improve performance by smoothing weight updates.
+    - `utils`
+        - `utils.py`: Other utility functions, currently just one for finding the dir in which a script is being run.
+        - `thruster_data.py`: Functions and types for loading, interacting with, and plotting thruster data.
+    - `models`
+        - `edm2.py`: Diffusion model we currently employ, lightly modified from the EDM2 baseline\[1,2\].
+        - `ema.py`: Implementation of the exponential moving average functionality which can sometimes improve performance by smoothing weight updates.
 - `julia`
     -  Code used to run HallThruster.jl and generate data. For size reasons, we do not bundle the data in this repo.
     - `generate_data.jl`: Script and functions for running Hall thruster simulations with random params.
@@ -117,12 +122,12 @@ Again, you should change these arguments as needed to fit your workflow.
 By default, each field is normalized to have a std deviation (`target_std`) of 1, but we may want to change that. For example, the EDM2 model expects a standard deviation of 0.5.
 After normalization, the data is stored with two metadata files indicating the normalization factors used (norm_params.csv, norm_data.csv).
 
-Once the data have been generated, you can use the `workflows/test_train_split.py` script to create a test/train split.
+Once the data have been generated, you can use the `python/test_train_split.py` script to create a test/train split.
 This script produces two validation sets, one large and one small. 
 Here's an example of running the script with `uv`
 
 ```
-$ uv run workflows/test_train_split.py data_normalized --val-dir-small=val_small --val-dir-large=val_large --frac-small=0.002 --frac-large=0.1
+$ uv run python/test_train_split.py data_normalized --val-dir-small=val_small --val-dir-large=val_large --frac-small=0.002 --frac-large=0.1
 ```
 
 This will create two new directories (`val_small` and `val_large`) with 0.2 and 10% of the generated data, respectively 
@@ -136,9 +141,16 @@ This will create two new directories (`val_small` and `val_large`) with 0.2 and 
 The model is presently set up to run on CPU or CUDA. Other backends may require some minor modifications to the code.
 First, you need to create a config file, or just use one of the ones already in the `configs` dir.
 We provide several of different sizes and have documented the meanings of the parameters in the files themselves.
+Once you have a config, just run the training script (`python/train.py`) with your config file as the only argument.
+With `uv` and the small config, you would do:
 
+```
+$ uv run python/train.py config_small.toml
+```
 
 ## Sampling
+
+
 
 ## References
 \[1\]: https://arxiv.org/abs/2206.00364

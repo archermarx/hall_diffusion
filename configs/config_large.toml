@@ -22,7 +22,7 @@ epochs = 10
 batch_size = 512
 # Weight decay rate
 weight_decay = 0.00
-# Frequency in iterations with which the model is tested on the validation set
+# Frequency in batches with which the model is tested on the validation set
 eval_freq = 100
 # Exponential moving average factor. Set to 1 to disable
 ema = 0.995
@@ -65,6 +65,6 @@ test_data_dir = "data/val_small"
 [training.checkpoints]
 # Whether to load from a checkpoint
 load_checkpoint = true
-# Frequency with which checkpoints are saved. Set to -1 to disable checkpointing
+# Frequency in batches with which checkpoints are saved. Set to -1 to disable checkpointing
 checkpoint_save_freq = 20
 

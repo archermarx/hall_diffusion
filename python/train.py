@@ -19,8 +19,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # Our dependencies
-from ..models.edm2 import Denoiser
-from ..models.ema import EMA
+from models.edm2 import Denoiser
+from models.ema import EMA
 from utils import utils, thruster_data
 
 # Device setup
@@ -47,6 +47,7 @@ ROOT_DIR = SCRIPT_DIR / ".."
 # Noise levels at which we plot progress during training
 NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 1.0]
 
+
 # ----------------------------------------------------------------------------
 # Learning rate decay schedule used in the paper "Analyzing and Improving the Training Dynamics of Diffusion Models". (EDM2)
 def learning_rate_schedule(
@@ -62,6 +63,7 @@ def learning_rate_schedule(
 
 # ----------------------------------------------------------------------------
 # Loss function for EDM2 model
+# Modified to include first- and second-deriviative losses to hopefully reduce noise
 class EDM2Loss:
     def __init__(self, P_mean=-0.4, P_std=1.0, sigma_data=0.5):
         self.P_mean = P_mean
@@ -85,7 +87,7 @@ class EDM2Loss:
         base_loss = (denoised - images) ** 2
 
         # "Step size": scale for diff loss
-        h = 0.25
+        h = 1.0
 
         # Derivative loss
         diff_denoised = torch.diff(denoised)
@@ -117,10 +119,10 @@ class EDM2Loss:
 def calc_loss(
     y,
     model,
+    noise_std=None,
     P_mean=-1.2,
     P_std=1.2,
     data_std=0.5,
-    noise_std=None,
     condition_vector=None,
     include_logvar=False,
 ):
@@ -139,7 +141,13 @@ def calc_loss(
 # The validation set is loaded by `val_loader`
 # Optionally, visualize progress on some validation set examples, with images saved to `out_folder`
 def validation_loss(
-    model, val_loader, visualize=False, epoch_idx=0, out_folder=Path("."), **loss_args
+    model,
+    val_loader,
+    visualize=False,
+    epoch_idx=0,
+    out_folder=Path("."),
+    data_dir: Path | str = "data/training",
+    **loss_args,
 ):
     # Set model into evaluation mode
     model.eval()
@@ -165,7 +173,7 @@ def validation_loss(
             noise_std[: len(fixed_noise), 0, 0] = fixed_noise
 
             _, _, noisy_im, denoise_pred = calc_loss(
-                y, model, condition_vector=vec, **loss_args
+                y, model, noise_std, condition_vector=vec, **loss_args
             )
 
             suptitle = f"Epoch: {epoch_idx + 1:04d}, Loss: {loss:.4f}"
@@ -180,7 +188,11 @@ def validation_loss(
             plt.close(fig)
 
             visualize_denoising_1d(
-                noisy_im.cpu(), denoise_pred.cpu(), y.cpu(), folder=out_folder
+                noisy_im.cpu(),
+                denoise_pred.cpu(),
+                y.cpu(),
+                folder=out_folder,
+                data_dir=data_dir,
             )
 
     return loss
@@ -229,9 +241,13 @@ def visualize_denoising(N, noisy_image, denoised_prediction, ground_truth, title
 # ----------------------------------------------------------------------------
 # Plot 1D plasma properties with and without noise for a few example simulations
 def visualize_denoising_1d(
-    noisy_image, denoised_prediction, ground_truth, folder=Path(".")
+    noisy_image,
+    denoised_prediction,
+    ground_truth,
+    folder=Path("."),
+    data_dir: Path | str = "data/training",
 ):
-    dataset = thruster_data.ThrusterDataset("data/training", None, 1)
+    dataset = thruster_data.ThrusterDataset(Path(data_dir), None, 1)
     colors = ["tab:blue", "tab:blue", "black"]
     alphas = [0.25, 1.0, 1.0]
     for i, sigma in enumerate(NOISE_LEVELS_FOR_PLOTTING):
@@ -325,6 +341,7 @@ def train(args):
     train_data_dir = Path(dir_args["train_data_dir"])
     test_data_dir = Path(dir_args["test_data_dir"])
     os.makedirs(out_dir, exist_ok=True)
+    log_file = out_dir / train_args["log_file"]
 
     # Set up training and test data loaders
     train_dataset = thruster_data.ThrusterDataset(train_data_dir)
@@ -366,7 +383,7 @@ def train(args):
     opt_args = train_args["optimizer"]
     ref_lr = opt_args["lr"]
     min_lr = opt_args["min_lr"]
-    decay_epochs = opt_args["decay_epochs"]
+    decay_epochs = opt_args["lr_decay_start_epochs"]
 
     checkpoint_file = out_dir / "checkpoint.pth.tar"
     old_checkpoint = out_dir / "checkpoint_prev.pth.tar"
@@ -384,9 +401,9 @@ def train(args):
 
     # ---------------------------------------------
     # Checkpoint configuration
-    checkpoint_args = train_args["checkpoint"]
+    checkpoint_args = train_args["checkpoints"]
     checkpoint_iters = checkpoint_args["checkpoint_save_freq"]
-    load_checkpoint = checkpoint_args["load_checkpoint"]
+    load_checkpoint = checkpoint_args["load_checkpoint"] and not args.restart
 
     # Load checkpoint if found
     if load_checkpoint and os.path.exists(checkpoint_file):
@@ -415,20 +432,52 @@ def train(args):
     best_training_params = None
     best_training_loss = math.inf
 
-    val_losses = []
-    ema_losses = []
-    train_losses = []
-    grad_norms = []
-    learning_rates = []
+    # Read loss file if it exists, otherwise create it
+    header = ",".join(
+        [
+            "example_idx",
+            "batch_idx",
+            "epoch_idx",
+            "train_loss",
+            "val_loss",
+            "ema_loss",
+            "grad_norm",
+            "learning_rate",
+        ]
+    )
+    if log_file.exists() and load_checkpoint:
+        log_file_contents = np.genfromtxt(log_file, skip_header=1, delimiter=",")
+        num_examples = list(log_file_contents[:, 0].astype(int))
+        example_idx = num_examples[-1]
+        batch_idx = int(log_file_contents[-1, 1])
+        epoch_idx = int(log_file_contents[-1, 2]) - 1
+        train_losses = list(log_file_contents[:, 3])
+        val_losses = list(log_file_contents[:, 4])
+        ema_losses = list(log_file_contents[:, 5])
+        grad_norms = list(log_file_contents[:, 6])
+        learning_rates = list(log_file_contents[:, 7])
+    else:
+        with open(log_file, "w") as fd:
+            print(header, file=fd)
+        num_examples = []
+        example_idx = -1
+        batch_idx = -1
+        epoch_idx = -1
+        val_losses = []
+        train_losses = []
+        ema_losses = []
+        grad_norms = []
+        learning_rates = []
 
-    batch_idx = -1
-    epoch_idx = -1
-
+    # Info for saving outliers
     outlier_inds = []
     outlier_losses = []
     outlier_batches = []
     outlier_vecs = []
     outliers = {}
+
+    val_loss = val_losses[-1] if len(val_losses) > 0 else np.inf
+    ema_loss = ema_losses[-1] if len(ema_losses) > 0 else np.inf
 
     # ---------------------------------------------
     # Main training loop
@@ -437,6 +486,7 @@ def train(args):
         progress = tqdm(train_loader)
         for filenames, vec, y in progress:
             batch_idx += 1
+            example_idx += batch_size
 
             progress.set_description(description(epoch_idx, batch_idx, "Training"))
 
@@ -452,6 +502,7 @@ def train(args):
                 use_amp=use_amp,
                 **loss_args,
             )
+            num_examples.append(example_idx)
             train_losses.append(batch_loss)
 
             # Update learning rate
@@ -508,14 +559,22 @@ def train(args):
                     test_loader,
                     visualize=True,
                     epoch_idx=epoch_idx,
-                    batch_idx=batch_idx,
                     out_folder=out_dir,
+                    data_dir=test_data_dir,
                 )
-                val_loss = validation_loss(model, test_loader)
-                val_losses.append(val_loss)
-                ema_losses.append(ema_loss)
+                val_loss = validation_loss(model, test_loader, data_dir=test_data_dir)
 
-            progress.set_postfix_str(f"{batch_loss=:.4f}, {val_loss=:.4f}")
+            val_losses.append(val_loss)
+            ema_losses.append(ema_loss)
+
+            progress.set_postfix_str(
+                f"batch_loss={train_losses[-1]:.4f}, val_loss={val_losses[-1]:.4f}"
+            )
+
+            # Update log file
+            with open(log_file, "a") as fd:
+                row = f"{example_idx},{batch_idx},{epoch_idx},{batch_loss},{val_loss},{ema_loss},{grad_norm},{lr}"
+                print(row, file=fd)
 
             # Exit if it's not time to checkpoint. Otherwise, continue to saving.
             if batch_idx % checkpoint_iters != 0:
@@ -542,11 +601,7 @@ def train(args):
             progress.set_description(description(epoch_idx, batch_idx, "Plotting"))
 
             # Plot diagnostics
-            fig, ax_grad = plt.subplots()
-            num_examples = batch_size * np.arange(batch_idx + 1)
-            num_examples_val = batch_size * np.arange(
-                0, batch_idx + 1, evaluation_iters
-            )
+            fig, ax_grad = plt.subplots(1, 1, constrained_layout=True)
 
             ax_grad.autoscale(axis="x", tight=True)
             ax_grad.plot(
@@ -569,32 +624,21 @@ def train(args):
 
             ax_loss = ax_grad.twinx()
             ax_loss.autoscale(axis="x", tight=True)
-            ax_loss.set_xlabel("Number of examples")
+            ax_loss.set(xlabel="Number of examples", yscale="log")
             ax_loss.set_ylabel("Loss", color="tab:blue")
-            ax_loss.set_yscale("log")
             ax_loss.tick_params(axis="y", labelcolor="tab:blue")
 
             ax_loss.scatter(
                 outlier_inds, outlier_losses, label="Outliers", color="black", zorder=8
             )
-            max_epoch_lines = (batch_idx * batch_size) // len(train_dataset)
-            for x in np.arange(max_epoch_lines + 1):
-                ax_loss.axvline(
-                    float(x * len(train_dataset)), color="gray", linestyle="--"
-                )
 
-            ax_loss.plot(num_examples, train_losses, label="Training loss", zorder=5)
-            ax_loss.plot(
-                num_examples_val, val_losses, label="Validation loss", zorder=6
-            )
-            ax_loss.plot(
-                num_examples_val, ema_losses, label="Validation loss (EMA)", zorder=7
-            )
+            ax_loss.plot(num_examples, train_losses, label="Train. loss", zorder=5)
+            ax_loss.plot(num_examples, val_losses, label="Val. loss", zorder=6)
+            ax_loss.plot(num_examples, ema_losses, label="Val. loss (EMA)", zorder=7)
             ax_loss.grid(which="both")
             ax_loss.legend(loc="upper left", ncols=2).set_zorder(10)
             ax_grad.tick_params(axis="y", labelcolor="tab:red")
 
-            fig.tight_layout()
             fig.savefig(out_dir / "loss_prog.png", dpi=200)
             plt.close(fig)
 
@@ -605,5 +649,10 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str, nargs="?")
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Whether to restart the training procedure, discarding the old checkpoint file. This can also be done by setting load_checkpoint=false in the config file",
+    )
     args = parser.parse_args()
     train(args)

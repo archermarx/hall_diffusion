@@ -22,12 +22,15 @@ epochs = 10
 batch_size = 512
 # Weight decay rate
 weight_decay = 0.00
-# Frequency in iterations with which the model is tested on the validation set
+# Frequency in batches with which the model is tested on the validation set
 eval_freq = 100
 # Exponential moving average factor. Set to 1 to disable
 ema = 0.995
 # Whether to use automatic mixed precision (float16 where possible)
 use_amp = true
+# File to which we save training log
+# Will be appended to if it exists and not loading from a checkpoint. Otherwise we create it.
+log_file = "training_log.csv" 
 
 # Loss function configuration
 [training.loss]
@@ -57,14 +60,14 @@ weight_decay = 0.00
 # Folder to save results in
 out_dir = "saved_models/medium"
 # Training data folder
-train_data_dir = "data/normalized"
+train_data_dir = "../gendata/data/training"
 # test data folder
-test_data_dir = "data/val_small"
+test_data_dir = "../gendata/data/val_small"
 
 # Checkpoint configuration. Checkpoints are saved to and loaded from `out_dir`/checkpoint.pth.tar
 [training.checkpoints]
 # Whether to load from a checkpoint
 load_checkpoint = true
-# Frequency with which checkpoints are saved. Set to -1 to disable checkpointing
+# Frequency in batches with which checkpoints are saved. Set to -1 to disable checkpointing
 checkpoint_save_freq = 20
 

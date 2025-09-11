@@ -4,3 +4,4 @@
 build
 data/
 saved_models/
+__pycache__
