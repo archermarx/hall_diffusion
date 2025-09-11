@@ -5,7 +5,6 @@ To run, load a `julia` prompt and type `include("normalize_data.jl")`. From ther
 
 using Serialization: deserialize
 using HallThruster: HallThruster as het
-using CairoMakie: CairoMakie as mk
 using Statistics
 using NPZ
 using ProgressMeter
@@ -50,9 +49,9 @@ function load_single_sim(file)
     # Fix some issues in the input data.
     # 1. The thrust and current cannot be negative.
     I_MAX = 150.0   # A
-    I_MIN = 1e-3    # A
+    I_MIN = 1.0e-3    # A
     T_MAX = 10      # N
-    T_MIN = 1e-3    # N
+    T_MIN = 1.0e-3    # N
 
     I_itp = max.(I_itp, I_MIN)
     T_itp = max.(T_itp, T_MIN)
@@ -72,13 +71,13 @@ function load_single_sim(file)
 
     # 4. Throw out sims with too-low or too-high anomalous transport
     # This should be handled better during sampling in the future
-    NU_MAX_MIN = 1e9    # maximum of the minimum
-    NU_MIN_MAX = 1e6    # minimum of the maximum
-    NU_MIN_MIN = 1e4    # minimum of the minimum
-    NU_MAX_MAX = 1e11   # maximum of the maximum
+    NU_MAX_MIN = 1.0e9    # maximum of the minimum
+    NU_MIN_MAX = 1.0e6    # minimum of the maximum
+    NU_MIN_MIN = 1.0e4    # minimum of the minimum
+    NU_MAX_MAX = 1.0e11   # maximum of the maximum
     nu_an = raw[:space][:nu_an]
     nu_min, nu_max = extrema(nu_an)
-    if !((NU_MIN_MAX < nu_max < NU_MAX_MAX ) && (NU_MIN_MIN < nu_min < NU_MAX_MIN))
+    if !((NU_MIN_MAX < nu_max < NU_MAX_MAX) && (NU_MIN_MIN < nu_min < NU_MAX_MIN))
         return nothing
     end
 
@@ -86,7 +85,7 @@ function load_single_sim(file)
     raw[:space][:nu_e] = max.(raw[:space][:nu_an], raw[:space][:nu_e])
 
     tensor_row_names = [:B, :nu_e, :nu_an, :nn, :ne, :ni_1, :ni_2, :ni_3, :ui_1, :ui_2, :ui_3, :ue, :phi, :E, :Tev, :pe, :∇pe, :Id, :T]
-    
+
     # Lay out quantities one per row into a tensor/matrix.
     # The order corresponds to the the list of names above.
     tensor_rows = Vector{Float32}[]
@@ -137,7 +136,7 @@ function load_single_sim(file)
             param_vec[i] = log(param_vec[i])
         end
     end
-            
+
     return param_names, param_vec, tensor_row_names, tensor
 end
 
@@ -184,7 +183,7 @@ function get_data_normalization(sims; target_std = 1.0)
     param_stds = [std(param_mat[i, :]) for i in 1:num_params] ./ target_std
     tensor_stds = [std(tensor_block[:, i, :]) for i in 1:num_rows] ./ target_std
 
-    return (;names=param_names, means=param_means, stds=param_stds), (names=tensor_row_names, means=tensor_means, stds=tensor_stds)
+    return (; names = param_names, means = param_means, stds = param_stds), (names = tensor_row_names, means = tensor_means, stds = tensor_stds)
 end
 
 """
@@ -198,10 +197,15 @@ Given a list of files, normalizes them and saves them disk in numpy npz format.
 - target_std: Standard deviation that each QoI should have after normalization
 - subset_size: Size of the random subset of the data that is used to compute the normalization factors.
 """
-function normalize_data(files, out_dir; target_std = 1.0, subset_size = 100_000)
+function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset_size = 100_000)
     # Get normalization factors from a subset of the total dataset, to avoid needing to pass over the entire dataset twice.
     # TODO: this can be done more elegantly.
-    param_norm, tensor_norm = get_data_normalization(load_data(rand(files, subset_size)); std = target_std)
+    subset_files = if subset_size > length(files)
+        files
+    else
+        rand(files, subset_size)
+    end
+    param_norm, tensor_norm = get_data_normalization(load_data(subset_files); target_std = target_std)
 
     # Create necessary directories
     data_dir = joinpath(out_dir, "data")
@@ -224,7 +228,7 @@ function normalize_data(files, out_dir; target_std = 1.0, subset_size = 100_000)
     for (labels, norm, id) in zip([param_labels, row_labels], [param_norm, tensor_norm], ["params", "data"])
         matrix = [[string(lbl) for lbl in labels] ;; norm.means;; norm.stds;; [lbl in LOG_VARS for lbl in labels]]
         matrix = [["Field";; "Mean";; "Std";;"Log" ] ; matrix]
-        open(joinpath(out_dir,  "norm_$(id).csv"), "w") do f
+        open(joinpath(out_dir, "norm_$(id).csv"), "w") do f
             writedlm(f, matrix, ',')
         end
     end
@@ -233,7 +237,7 @@ function normalize_data(files, out_dir; target_std = 1.0, subset_size = 100_000)
     progress = Progress(length(files))
     num_discarded = Threads.Atomic{Int}(0)
     num_accepted = Threads.Atomic{Int}(0)
-    
+
     # Process data in a multithreaded manner
     Threads.@threads for file in files
         _s = load_single_sim(file)
@@ -265,4 +269,10 @@ function normalize_data(files, out_dir; target_std = 1.0, subset_size = 100_000)
 
     println()
     println("Discarded $(num_discarded[])/$(length(files)) simulations.")
+    return nothing
+end
+
+function normalize_data(dir::String, out_dir; target_std = 1.0, subset_size = 100_000)
+    files = readdir(dir, join = true)
+    return normalize_data(files, out_dir; target_std, subset_size)
 end

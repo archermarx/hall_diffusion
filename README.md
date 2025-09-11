@@ -35,6 +35,7 @@ Type `activate .` to active the project environment, followed by `instantiate` t
 ### Python dependencies
 
 The procedure to install the dependencies depends on which python dependency manager you use.
+I use `uv`, so that is the most well-tested way to install and run this project.
 I include instructions for a few below, but you may need to do some research to find out the best method for your use case.
 
 #### uv
@@ -54,14 +55,88 @@ Then, type `pip install .` to install the required dependencies
 
 The data generation has two parts. First, we run `generate_data.jl` to produce a large number of simulations.
 These have random parameters taken from distributions specified in that script.
-Second, we run the `normalize_data` function from `normalize_data.jl`.
-The normalization is per-quantity, and we store some quantities in terms of their natural logarithms.
+This should be done multithreaded for speed.
+To check how many threads Julia can use, open the `julia` prompt and type
+
+```julia-repl
+julia> Threads.nthreads()
+```
+
+On my system, this prints 24, but it depends on your CPU. Something like 8-12 is more common.
+If this prints 1, you should explicitly launch Julia with the number of threads you want to use using the -t command line argument.
+
+```
+julia> 
+❯ julia -t 8
+               _
+   _       _ _(_)_     |  Documentation: https://docs.julialang.org
+  (_)     | (_) (_)    |
+   _ _   _| |_  __ _   |  Type "?" for help, "]?" for Pkg help.
+  | | | | | | |/ _` |  |
+  | | |_| | | | (_| |  |  Version 1.11.6 (2025-07-09)
+ _/ |\__'_|_|_|\__'_|  |  Official https://julialang.org/ release
+|__/                   |
+
+julia> Threads.nthreads()
+8 
+```
+
+Once you have verified that Julia is running multithreaded as required, you can generate the training data.
+First, make sure the `hall_diffusion` environment is active by typing `]` to enter the packaging REPL.
+If the `pkg>` prompt is not preceded by `hall_diffusion`, type `activate .` to activate the environment.
+Next, `include` the file by typing
+
+```julia-repl
+julia> include("julia/generate_data.jl")
+```
+
+Then, call the `gen_data_multithreaded` function as follows:
+
+```julia-repl
+julia> gen_data_multithreaded(128; save_dir = "data_unnormalized")
+```
+
+This will run 128 simulations, multithreaded, saving the result to "data_unnormalized".
+You can and should change these arguments based on your needs.
+Once the data has been generated, we need to normalize it.
+The normalization is based on z-scores per-quantity, and we store some quantities in terms of their natural logarithms.
+To normalize, we first include the needed file:
+
+```julia-repl
+julia> include("julia/normalize_data.jl")
+```
+
+Then, we run the `normalize_data` function.
+
+```julia-repl
+julia> normalize_data("data_unnormalized", "data_normalized"; target_std=1.0)
+```
+
+The first argument points to the data directory, and the second to the place where the normalized data should be stored.
+Again, you should change these arguments as needed to fit your workflow.
+By default, each field is normalized to have a std deviation (`target_std`) of 1, but we may want to change that. For example, the EDM2 model expects a standard deviation of 0.5.
 After normalization, the data is stored with two metadata files indicating the normalization factors used (norm_params.csv, norm_data.csv).
 
 Once the data have been generated, you can use the `workflows/test_train_split.py` script to create a test/train split.
 This script produces two validation sets, one large and one small. 
+Here's an example of running the script with `uv`
+
+```
+$ uv run workflows/test_train_split.py data_normalized --val-dir-small=val_small --val-dir-large=val_large --frac-small=0.002 --frac-large=0.1
+```
+
+This will create two new directories (`val_small` and `val_large`) with 0.2 and 10% of the generated data, respectively 
+
+### TODO:
+- [ ] Master script for generating + normalizing
+- [ ] Command line arguments for scripts so we don't need to manually enter the Julia REPL
 
 ## Training the model
+
+The model is presently set up to run on CPU or CUDA. Other backends may require some minor modifications to the code.
+First, you need to create a config file, or just use one of the ones already in the `configs` dir.
+We provide several of different sizes and have documented the meanings of the parameters in the files themselves.
+
 
 ## Sampling
 

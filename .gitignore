@@ -2,3 +2,5 @@
 .vscode
 *.egg-info
 build
+data/
+saved_models/

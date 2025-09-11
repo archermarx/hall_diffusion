@@ -195,23 +195,23 @@ function save_sim(sim, params; avg_start_time = 5e-4)
 
     out_dict = Dict(
         :space => Dict(
-            :B => avg[:B][inds] .|> Float32,
-            :nu_an => avg[:νan][][inds] .|> Float32,
-            :nu_e => avg[:νe][][inds] .|> Float32,
+            :B => avg[:B][][inds] .|> Float32,
+            :nu_an => avg[:nu_an][][inds] .|> Float32,
+            :nu_e => avg[:nu_e][][inds] .|> Float32,
             :E => avg[:E][][inds] .|> Float32,
-            :phi => avg[:ϕ][][inds] .|> Float32,
+            :phi => avg[:potential][][inds] .|> Float32,
             :ue => avg[:ue][][inds] .|> Float32,
-            :ui_1 => avg[:ui, 1][][inds] .|> Float32,
-            :ui_2 => avg[:ui, 2][][inds] .|> Float32,
-            :ui_3 => avg[:ui, 3][][inds] .|> Float32,
+            :ui_1 => avg[:ui][][1, inds] .|> Float32,
+            :ui_2 => avg[:ui][][2, inds] .|> Float32,
+            :ui_3 => avg[:ui][][3, inds] .|> Float32,
             :ne => avg[:ne][][inds] .|> Float32,
-            :ni_1 => avg[:ni, 1][][inds] .|> Float32,
-            :ni_2 => avg[:ni, 2][][inds] .|> Float32,
-            :ni_3 => avg[:ni, 3][][inds] .|> Float32,
+            :ni_1 => avg[:ni][][1, inds] .|> Float32,
+            :ni_2 => avg[:ni][][2, inds] .|> Float32,
+            :ni_3 => avg[:ni][][3, inds] .|> Float32,
             :nn => avg[:nn][][inds] .|> Float32,
             :Tev => avg[:Tev][][inds] .|> Float32,
             :pe => avg[:pe][][inds] .|> Float32,
-            :∇pe => avg[:∇pe][][inds] .|> Float32,
+            :∇pe => avg[:grad_pe][][inds] .|> Float32,
             :A => avg[:channel_area][][inds] .|> Float32,
         ),
         :time => Dict(
@@ -245,6 +245,8 @@ function gen_data_single(; num_cells = 128, save_dir = "julia/data")
             serialize(f, sim_dict)
         end
     end
+
+    return nothing
 end
 
 """
@@ -253,7 +255,7 @@ gen_data_multithreaded(num_sims; num_cells, save_dir = "data", statusfile = noth
 Generate `num_sims` simulations, each with `num_cells` cells. Outputs are saved to `save_dir`.
 If statusfile is not nothing, we write the status of data generation to that file in addition to displaying it in terminal.
 """
-function gen_data_multithreaded(num_sims; num_cells, save_dir = "data", statusfile = nothing)
+function gen_data_multithreaded(num_sims; num_cells = 128, save_dir = "data", statusfile = nothing)
     mkpath(save_dir)
     p = Progress(
         num_sims;
@@ -298,7 +300,8 @@ end
 """
 Generate a number of simulations according to the first command line argument, or else six times the number of threads.
 """
-if abspath(PROGRAM_FILE) == @__FILE__ # Equiv. of `if __name__ == "__main__"`
+# Equiv. of `if __name__ == "__main__"`
+if abspath(PROGRAM_FILE) == @__FILE__ 
     num_sims = if length(ARGS) > 0
         parse(Int, ARGS[1])
     else
