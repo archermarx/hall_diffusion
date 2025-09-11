@@ -1,31 +1,67 @@
-from model_edm2 import Denoiser2
+# Python deps
+import argparse
+import copy
+import math
+import json
+import os
 import shutil
+import tomllib
+
+# External deps
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+# Pytorch deps
 import torch
 import torch.optim as optim
-import argparse
-from tqdm import tqdm
-import utils
-import numpy as np
-import math
-import copy
-import os
 from torch.utils.data import DataLoader
-from ema import EMA
-import matplotlib.pyplot as plt
-import json
-import tomllib
-from pathlib import Path
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Our dependencies
+from ..models.edm2 import Denoiser
+from ..models.ema import EMA
+from utils import utils, thruster_data
 
+# Device setup
+if torch.backends.mps.is_available():
+    # Apple metal performance shaders
+    DEVICE = torch.device("mps")
+elif torch.cuda.is_available():
+    # NVIDIA CUDA (or AMD ROCM)
+    DEVICE = torch.device("cuda")
+elif torch.xpu.is_available():
+    # Intel XPU
+    DEVICE = torch.device("xpu")
+else:
+    DEVICE = torch.device("cpu")
+
+# Set RNG seed and save initial seeded RNG state
 torch.manual_seed(100)
 start_state = torch.get_rng_state()
 
+# Get directory in which script is being run as well as the root directory of the project.
 SCRIPT_DIR = utils.get_script_dir()
 ROOT_DIR = SCRIPT_DIR / ".."
-NOISE_LEVELS = [0.05, 0.1, 0.5, 1.0]
+
+# Noise levels at which we plot progress during training
+NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 1.0]
+
+# ----------------------------------------------------------------------------
+# Learning rate decay schedule used in the paper "Analyzing and Improving the Training Dynamics of Diffusion Models". (EDM2)
+def learning_rate_schedule(
+    cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3, rampup_batches=0
+):
+    lr = ref_lr
+    if ref_batches > 0:
+        lr /= np.sqrt(max(cur_nimg / (ref_batches * batch_size), 1))
+    if rampup_batches > 0:
+        lr *= min(cur_nimg / (rampup_batches * batch_size), 1)
+    return lr
 
 
+# ----------------------------------------------------------------------------
+# Loss function for EDM2 model
 class EDM2Loss:
     def __init__(self, P_mean=-0.4, P_std=1.0, sigma_data=0.5):
         self.P_mean = P_mean
@@ -63,8 +99,10 @@ class EDM2Loss:
         diff_loss_2 = (diff2_denoised - diff2_images) ** 2
         diff_loss_2 = torch.nn.functional.pad(diff_loss_2, (1, 1))
 
-        total_weight = 1 + 1/h + 1/h**2
-        loss = weight * (base_loss + diff_loss_1 / h + diff_loss_2 / h**2) / total_weight
+        total_weight = 1 + 1 / h + 1 / h**2
+        loss = (
+            weight * (base_loss + diff_loss_1 / h + diff_loss_2 / h**2) / total_weight
+        )
         base_loss = loss.mean().item()
 
         # Weight by homoscedastic uncertainty
@@ -75,31 +113,43 @@ class EDM2Loss:
 
 
 # ----------------------------------------------------------------------------
-# Learning rate decay schedule used in the paper "Analyzing and Improving
-# the Training Dynamics of Diffusion Models".
+# Create and evaluatate an instance of the loss function for the EDM2 model
+def calc_loss(
+    y,
+    model,
+    P_mean=-1.2,
+    P_std=1.2,
+    data_std=0.5,
+    noise_std=None,
+    condition_vector=None,
+    include_logvar=False,
+):
+    loss_fn = EDM2Loss(P_mean, P_std, data_std)
+    return loss_fn(
+        model,
+        y,
+        noise_std=noise_std,
+        labels=condition_vector,
+        include_logvar=include_logvar,
+    )
 
 
-def learning_rate_schedule(cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3, rampup_batches=0):
-    lr = ref_lr
-    if ref_batches > 0:
-        lr /= np.sqrt(max(cur_nimg / (ref_batches * batch_size), 1))
-    if rampup_batches > 0:
-        lr *= min(cur_nimg / (rampup_batches * batch_size), 1)
-    return lr
-
-
-def calc_loss(y, model, noise_std=None, condition_vector=None, include_logvar=False):
-    loss_fn = EDM2Loss(-1.2, 1.2, 1.0)
-    return loss_fn(model, y, noise_std=noise_std, labels=condition_vector, include_logvar=include_logvar)
-
-
-def validation_loss(model, loader, visualize=False, epoch_idx=0, batch_idx=0, folder=Path(".")):
+# ----------------------------------------------------------------------------
+# Evaluate the loss on the validation set.
+# The validation set is loaded by `val_loader`
+# Optionally, visualize progress on some validation set examples, with images saved to `out_folder`
+def validation_loss(
+    model, val_loader, visualize=False, epoch_idx=0, out_folder=Path("."), **loss_args
+):
+    # Set model into evaluation mode
     model.eval()
+
+    # Iterate through dataset and compute the loss on each batch
     losses = []
-    for _, (_, vec, x) in enumerate(loader):
+    for _, (_, vec, x) in enumerate(val_loader):
         with torch.no_grad():
-            x = x.float().to(device)
-            vec = vec.float().to(device)
+            x = x.float().to(DEVICE)
+            vec = vec.float().to(DEVICE)
             _, loss, *_ = calc_loss(x, model, condition_vector=vec)
             losses.append(loss)
     loss = np.mean(losses)
@@ -107,49 +157,64 @@ def validation_loss(model, loader, visualize=False, epoch_idx=0, batch_idx=0, fo
     if visualize:
         # Load first batch with fixed noise to visualize results
         with torch.no_grad():
-            _, vec, y = next(iter(loader))
-            vec = vec.float().to(device)
-            y = y.float().to(device)
-            noise_std = torch.rand((y.shape[0], 1, 1), device=device)
-            fixed_noise = torch.tensor(NOISE_LEVELS, device=device)
+            _, vec, y = next(iter(val_loader))
+            vec = vec.float().to(DEVICE)
+            y = y.float().to(DEVICE)
+            noise_std = torch.rand((y.shape[0], 1, 1), device=DEVICE)
+            fixed_noise = torch.tensor(NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
             noise_std[: len(fixed_noise), 0, 0] = fixed_noise
 
-            _, _, noisy_im, denoise_pred = calc_loss(y, model, noise_std, condition_vector=vec)
+            _, _, noisy_im, denoise_pred = calc_loss(
+                y, model, condition_vector=vec, **loss_args
+            )
 
             suptitle = f"Epoch: {epoch_idx + 1:04d}, Loss: {loss:.4f}"
             fig, _ = visualize_denoising(
                 len(fixed_noise),
-                noisy_im=noisy_im.cpu(),
-                denoise_pred=denoise_pred.cpu(),
-                actual=y.cpu(),
+                noisy_image=noisy_im.cpu(),
+                denoised_prediction=denoise_pred.cpu(),
+                ground_truth=y.cpu(),
                 title=suptitle,
             )
-            fig.savefig(folder / "denoise_2d.png")
+            fig.savefig(out_folder / "denoise_2d.png")
             plt.close(fig)
 
-            visualize_denoising_1d(noisy_im.cpu(), denoise_pred.cpu(), y.cpu(), folder=folder)
+            visualize_denoising_1d(
+                noisy_im.cpu(), denoise_pred.cpu(), y.cpu(), folder=out_folder
+            )
 
     return loss
 
 
-def visualize_denoising(N, noisy_im, denoise_pred, actual, title=""):
+# ----------------------------------------------------------------------------
+# Plot noised and denoised tensors for N noise levels
+def visualize_denoising(N, noisy_image, denoised_prediction, ground_truth, title=""):
     fig, axes = plt.subplots(3, N, constrained_layout=True, figsize=(7, 5.5))
 
-    data = (noisy_im, denoise_pred, actual)
+    data = (noisy_image, denoised_prediction, ground_truth)
 
     if title:
         fig.suptitle(title)
 
     fig.supxlabel("Noise std. dev")
 
-    titles = [f"$\\sigma = {sigma}$" for sigma in NOISE_LEVELS]
+    titles = [f"$\\sigma = {sigma}$" for sigma in NOISE_LEVELS_FOR_PLOTTING]
     ylabels = ["Noisy", "Denoised", "Original"]
 
     for irow, (row, dataset) in enumerate(zip(axes, data)):
         for icol, ax in enumerate(row):
-            ax.imshow(dataset[icol, ...], aspect="auto", vmin=-1.5, vmax=1.5, interpolation="none", cmap="gray")
+            ax.imshow(
+                dataset[icol, ...],
+                aspect="auto",
+                vmin=-1.5,
+                vmax=1.5,
+                interpolation="none",
+                cmap="gray",
+            )
             if icol == 0:
-                ax.set_ylabel(ylabels[irow], rotation="horizontal", va="center", ha="right")
+                ax.set_ylabel(
+                    ylabels[irow], rotation="horizontal", va="center", ha="right"
+                )
             if irow == 2:
                 ax.set_xlabel(titles[icol])
 
@@ -161,42 +226,71 @@ def visualize_denoising(N, noisy_im, denoise_pred, actual, title=""):
     return fig, axes
 
 
-def visualize_denoising_1d(noisy_im, denoise_pred, actual, title="", folder=Path(".")):
-    dataset = utils.ThrusterDataset("data/training", None, 1)
+# ----------------------------------------------------------------------------
+# Plot 1D plasma properties with and without noise for a few example simulations
+def visualize_denoising_1d(
+    noisy_image, denoised_prediction, ground_truth, folder=Path(".")
+):
+    dataset = thruster_data.ThrusterDataset("data/training", None, 1)
     colors = ["tab:blue", "tab:blue", "black"]
     alphas = [0.25, 1.0, 1.0]
-    for i, sigma in enumerate(NOISE_LEVELS):
-        plotter = utils.ThrusterPlotter1D(
-            dataset, [noisy_im[i], denoise_pred[i], actual[i]], colors=colors, alphas=alphas
+    for i, sigma in enumerate(NOISE_LEVELS_FOR_PLOTTING):
+        plotter = thruster_data.ThrusterPlotter1D(
+            dataset,
+            [noisy_image[i], denoised_prediction[i], ground_truth[i]],
+            colors=colors,
+            alphas=alphas,
         )
-        fig, axes = plotter.plot(["nu_an", "ui_1", "ni_1", "Tev", "phi", "Id"], denormalize=True, nrows=2)
+        fig, axes = plotter.plot(
+            ["nu_an", "ui_1", "ni_1", "Tev", "phi", "Id"], denormalize=True, nrows=2
+        )
         fig.savefig(folder / f"denoise_1d_{sigma}.png")
         plt.close(fig)
 
 
-def train_one_batch(y, model, optimizer, ema_model, ema, scaler, condition_vector=None, include_logvar=False, use_amp=False):
+# ----------------------------------------------------------------------------
+# Perform one step of the optimization procedure on a batch of data
+def train_one_batch(
+    y,
+    model,
+    optimizer,
+    ema_model,
+    ema,
+    scaler,
+    condition_vector=None,
+    use_amp=False,
+    **loss_args,
+):
+    # Set model to training mode and zero gradients
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
-    y = y.float().to(device)
+    # Tranfer conditioning vector and data to device
+    y = y.float().to(DEVICE)
     if condition_vector is not None:
-        condition_vector = condition_vector.to(device)
+        condition_vector = condition_vector.to(DEVICE)
 
+    # Compute loss function and do backwards pass
     if use_amp:
-        with torch.amp.autocast_mode.autocast(device.type):
-            loss, base_loss, *_ = calc_loss(y, model, condition_vector=condition_vector, include_logvar=include_logvar)
+        with torch.amp.autocast_mode.autocast(DEVICE.type):
+            loss, base_loss, *_ = calc_loss(
+                y,
+                model,
+                condition_vector=condition_vector,
+                **loss_args,
+            )
 
         scaler.scale(loss).backward()
     else:
-        loss, base_loss, *_ = calc_loss(y, model, condition_vector=condition_vector, include_logvar=include_logvar)
+        loss, base_loss, *_ = calc_loss(y, model, condition_vector=condition_vector)
         loss.backward()
-
 
     # Make sure gradients are finite
     for param in model.parameters():
         if param.grad is not None:
             torch.nan_to_num(param.grad, nan=0, posinf=0, neginf=0, out=param.grad)
 
+    # Step optimizer and EMA
     if use_amp:
         scaler.step(optimizer)
         scaler.update()
@@ -210,36 +304,39 @@ def train_one_batch(y, model, optimizer, ema_model, ema, scaler, condition_vecto
 
 def train(args):
     config_file = args.config
+
+    # Load config gile
     with open(config_file, "rb") as fp:
         config = tomllib.load(fp)
 
+    # ---------------------------------------------
+    # Training configuration
     train_args = config["training"]
-    folder = Path(train_args["folder"])
-    os.makedirs(folder, exist_ok=True)
-
-    ref_lr = train_args["lr"]
-    min_lr = train_args["min_lr"]
-    decay_epochs = train_args["decay_epochs"]
     max_epochs = train_args["epochs"]
     batch_size = train_args["batch_size"]
     evaluation_iters = train_args["eval_freq"]
-    checkpoint_iters = train_args["checkpoint_freq"]
     use_amp = train_args.get("use_amp", True)
+    ema_factor = train_args["ema"]
 
-    checkpoint_file = folder / "checkpoint.pth.tar"
-    old_checkpoint = folder / "checkpoint_prev.pth.tar"
+    # ---------------------------------------------
+    # Directory configuration
+    dir_args = train_args["directories"]
+    out_dir = Path(dir_args["out_dir"])
+    train_data_dir = Path(dir_args["train_data_dir"])
+    test_data_dir = Path(dir_args["test_data_dir"])
+    os.makedirs(out_dir, exist_ok=True)
 
-    dim = 1
-    train_dataset = utils.ThrusterDataset("data/training", dimension=dim)
-    test_dataset = utils.ThrusterDataset("data/val_small", dimension=dim)
+    # Set up training and test data loaders
+    train_dataset = thruster_data.ThrusterDataset(train_data_dir)
+    test_dataset = thruster_data.ThrusterDataset(test_data_dir)
 
-    pin = device.type == "cuda"
+    pin = DEVICE.type == "cuda"
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         pin_memory=pin,
-        pin_memory_device=device.type,
+        pin_memory_device=DEVICE.type,
         num_workers=2,
     )
     test_loader = DataLoader(
@@ -247,42 +344,74 @@ def train(args):
         batch_size=batch_size,
         shuffle=False,
         pin_memory=pin,
-        pin_memory_device=device.type,
+        pin_memory_device=DEVICE.type,
         num_workers=2,
     )
 
-    decay_batches = decay_epochs * len(train_dataset) // batch_size
+    # ---------------------------------------------
+    # Model configuration
+    # Load model from config file and print some summary statistics
+    model = Denoiser.from_config(config["model"]).to(DEVICE)
+    print(
+        "Number of parameters = ",
+        sum(p.numel() for p in model.parameters() if p.requires_grad),
+    )
 
-    # Load config file
-    model = Denoiser2.from_config(config["model"]).to(device)
-    print("Number of parameters = ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-
-    if "adam_beta" in config:
-        betas = (config["adam_beta"][0], config["adam_beta"][1])
-    else:
-        betas = (0.9, 0.995)
-
-    optimizer = optim.Adam(model.parameters(), lr=ref_lr, weight_decay=train_args["weight_decay"], betas=betas)
-    scaler = torch.amp.grad_scaler.GradScaler()
-
-    ema = EMA(beta=train_args["ema"], step_start=2000)
+    # Set up the exponential moving average
+    ema = EMA(ema_factor, step_start=2000)
     ema_model = copy.deepcopy(model).eval().requires_grad_(False)
 
+    # ---------------------------------------------
+    # Optimizer configuration
+    opt_args = train_args["optimizer"]
+    ref_lr = opt_args["lr"]
+    min_lr = opt_args["min_lr"]
+    decay_epochs = opt_args["decay_epochs"]
+
+    checkpoint_file = out_dir / "checkpoint.pth.tar"
+    old_checkpoint = out_dir / "checkpoint_prev.pth.tar"
+    betas = tuple(opt_args.get("adam_beta", [0.9, 0.995]))
+
+    decay_batches = decay_epochs * len(train_dataset) // batch_size
+
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=ref_lr,
+        weight_decay=train_args["weight_decay"],
+        betas=betas,
+    )
+    scaler = torch.amp.grad_scaler.GradScaler()
+
+    # ---------------------------------------------
+    # Checkpoint configuration
+    checkpoint_args = train_args["checkpoint"]
+    checkpoint_iters = checkpoint_args["checkpoint_save_freq"]
+    load_checkpoint = checkpoint_args["load_checkpoint"]
+
     # Load checkpoint if found
-    if train_args["use_checkpoint"] and os.path.exists(checkpoint_file):
+    if load_checkpoint and os.path.exists(checkpoint_file):
         state = torch.load(checkpoint_file, weights_only=False)
         model.load_state_dict(state["model"])
-        print("Model loaded")
+        print("Model loaded from checkpoint")
         optimizer.load_state_dict(state["optimizer"])
 
         if "ema" in state:
             ema_model.load_state_dict(state["ema"])
             ema.step_start = 0
-            print("EMA loaded")
+            print("EMA loaded from checkpoint")
 
+    # ---------------------------------------------
+    # Loss args
+    loss_args = train_args["loss"]
+
+    # ---------------------------------------------
+    # Print a string of the current epoch, batch, and stage
+    def description(epoch_idx, batch_idx, stage):
+        return f"Epoch {epoch_idx + 1}, batch {batch_idx + 1} ({stage})"
+
+    # ---------------------------------------------
+    # Training setup
     model.train()
-
-    # Specify training parameters
     best_training_params = None
     best_training_loss = math.inf
 
@@ -291,9 +420,6 @@ def train(args):
     train_losses = []
     grad_norms = []
     learning_rates = []
-
-    def description(epoch_idx, batch_idx, stage):
-        return f"Epoch {epoch_idx + 1}, batch {batch_idx + 1} ({stage})"
 
     batch_idx = -1
     epoch_idx = -1
@@ -304,6 +430,8 @@ def train(args):
     outlier_vecs = []
     outliers = {}
 
+    # ---------------------------------------------
+    # Main training loop
     while True:
         epoch_idx += 1
         progress = tqdm(train_loader)
@@ -321,20 +449,26 @@ def train(args):
                 ema,
                 scaler,
                 condition_vector=vec,
-                include_logvar=batch_idx < decay_batches,
                 use_amp=use_amp,
+                **loss_args,
             )
             train_losses.append(batch_loss)
 
             # Update learning rate
-            lr = learning_rate_schedule(batch_idx * batch_size, batch_size, ref_lr, decay_batches)
+            lr = learning_rate_schedule(
+                batch_idx * batch_size, batch_size, ref_lr, decay_batches
+            )
             lr = max(lr, min_lr)
             learning_rates.append(lr)
             for g in optimizer.param_groups:
                 g["lr"] = lr
 
             # Compute gradient norm
-            grads = [param.grad.detach().flatten().cpu() for param in model.parameters() if param.grad is not None]
+            grads = [
+                param.grad.detach().flatten().cpu()
+                for param in model.parameters()
+                if param.grad is not None
+            ]
             grad_norm = torch.concat(grads).norm().numpy()
             if not np.isfinite(grad_norm):
                 print(f"Non-finite grad norm at {grad_norm}")
@@ -357,16 +491,25 @@ def train(args):
                     total = outliers.get(f, 0)
                     outliers[f] = total + 1
 
-                sorted_outliers = dict(sorted(outliers.items(), key=lambda item: item[1], reverse=True))
+                sorted_outliers = dict(
+                    sorted(outliers.items(), key=lambda item: item[1], reverse=True)
+                )
 
-                with open(folder / "outliers.json", "w") as fd:
+                with open(out_dir / "outliers.json", "w") as fd:
                     json.dump(sorted_outliers, fd, indent=4)
 
             # Evaluate on test set, if it's time to do so
             if batch_idx % evaluation_iters == 0:
-                progress.set_description(description(epoch_idx, batch_idx, "Validating"))
+                progress.set_description(
+                    description(epoch_idx, batch_idx, "Validating")
+                )
                 ema_loss = validation_loss(
-                    ema_model, test_loader, visualize=True, epoch_idx=epoch_idx, batch_idx=batch_idx, folder=folder
+                    ema_model,
+                    test_loader,
+                    visualize=True,
+                    epoch_idx=epoch_idx,
+                    batch_idx=batch_idx,
+                    out_folder=out_dir,
                 )
                 val_loss = validation_loss(model, test_loader)
                 val_losses.append(val_loss)
@@ -401,11 +544,25 @@ def train(args):
             # Plot diagnostics
             fig, ax_grad = plt.subplots()
             num_examples = batch_size * np.arange(batch_idx + 1)
-            num_examples_val = batch_size * np.arange(0, batch_idx + 1, evaluation_iters)
+            num_examples_val = batch_size * np.arange(
+                0, batch_idx + 1, evaluation_iters
+            )
 
             ax_grad.autoscale(axis="x", tight=True)
-            ax_grad.plot(num_examples, grad_norms, label="Gradient norm", zorder=4, color="tab:red")
-            ax_grad.plot(num_examples, learning_rates, label="Learning rate", color="tab:orange", linestyle="--")
+            ax_grad.plot(
+                num_examples,
+                grad_norms,
+                label="Gradient norm",
+                zorder=4,
+                color="tab:red",
+            )
+            ax_grad.plot(
+                num_examples,
+                learning_rates,
+                label="Learning rate",
+                color="tab:orange",
+                linestyle="--",
+            )
             ax_grad.set_yscale("log")
             ax_grad.tick_params(axis="y", labelcolor="tab:red")
             ax_grad.set_ylabel("Gradient norm", color="tab:red")
@@ -416,22 +573,29 @@ def train(args):
             ax_loss.set_ylabel("Loss", color="tab:blue")
             ax_loss.set_yscale("log")
             ax_loss.tick_params(axis="y", labelcolor="tab:blue")
-            # ax_loss.set_yscale("symlog")
 
-            ax_loss.scatter(outlier_inds, outlier_losses, label="Outliers", color="black", zorder=8)
+            ax_loss.scatter(
+                outlier_inds, outlier_losses, label="Outliers", color="black", zorder=8
+            )
             max_epoch_lines = (batch_idx * batch_size) // len(train_dataset)
             for x in np.arange(max_epoch_lines + 1):
-                ax_loss.axvline(float(x * len(train_dataset)), color="gray", linestyle="--")
+                ax_loss.axvline(
+                    float(x * len(train_dataset)), color="gray", linestyle="--"
+                )
 
             ax_loss.plot(num_examples, train_losses, label="Training loss", zorder=5)
-            ax_loss.plot(num_examples_val, val_losses, label="Validation loss", zorder=6)
-            ax_loss.plot(num_examples_val, ema_losses, label="Validation loss (EMA)", zorder=7)
+            ax_loss.plot(
+                num_examples_val, val_losses, label="Validation loss", zorder=6
+            )
+            ax_loss.plot(
+                num_examples_val, ema_losses, label="Validation loss (EMA)", zorder=7
+            )
             ax_loss.grid(which="both")
             ax_loss.legend(loc="upper left", ncols=2).set_zorder(10)
             ax_grad.tick_params(axis="y", labelcolor="tab:red")
 
             fig.tight_layout()
-            fig.savefig(folder / "loss_prog.png", dpi=200)
+            fig.savefig(out_dir / "loss_prog.png", dpi=200)
             plt.close(fig)
 
         if max_epochs > 0 and epoch_idx >= max_epochs - 1:
@@ -440,6 +604,6 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("config", type=str, nargs="?", default="config_small.toml")
+    parser.add_argument("config", type=str, nargs="?")
     args = parser.parse_args()
     train(args)

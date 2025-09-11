@@ -5,10 +5,6 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
-import sys
-
-def get_script_dir():
-    return Path(os.path.dirname(os.path.realpath(sys.argv[0])))
 
 class ThrusterDataset(Dataset):
     def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, dimension=1, files=None):

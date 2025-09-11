@@ -9,11 +9,11 @@ Given a directory containing normalized training data, the program extracts enou
 The small set is intended for use during training for monitoring the validation accuracy, while the large set should be the main validation set for other downstream tasks.
 """) 
 
-parser.add_argument("train-dir", type=Path, default=Path("data/training"), help = "Directory containing training data")
-parser.add_argument("--val-small-dir", type=Path, default = Path("data/val_small"), help = "Directory to put small validation set")
-parser.add_argument("--val-large-dir", type=Path, default = Path("data/val_large"), help = "Directory to put large validation set")
-parser.add_argument("--val_small-frac", type=float, default = 0.0002, help = "Fraction of training data to put in small validation set")
-parser.add_argument("--val_large-frac", type=float, default = 0.1, help = "Fraction of training to put in large validation set")
+parser.add_argument("train_dir", type=Path, default=Path("data/training"), help = "Directory containing training data")
+parser.add_argument("--val-dir-small", type=Path, default = Path("data/val_small"), help = "Directory to put small validation set")
+parser.add_argument("--val-dir-large", type=Path, default = Path("data/val_large"), help = "Directory to put large validation set")
+parser.add_argument("--frac-small", type=float, default = 0.002, help = "Fraction of training data to put in small validation set")
+parser.add_argument("--frac-large", type=float, default = 0.1, help = "Fraction of training to put in large validation set")
 
 def make_split(train_dir, test_dir, num_to_split):
     """
@@ -43,8 +43,8 @@ if __name__ == "__main__":
 
     # Calculate number of files for each validaiton set
     train_files = os.listdir(train_dir / "data")
-    num_to_split_small = round(args.val_frac_small * len(train_files))
-    num_to_split_large = round(args.val_frac_large * len(train_files))
+    num_to_split_small = round(args.frac_small * len(train_files))
+    num_to_split_large = round(args.frac_large * len(train_files))
 
     # Split each
     make_split(train_dir, test_dir_small, num_to_split_small)

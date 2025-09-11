@@ -350,7 +350,8 @@ class UNet(torch.nn.Module):
 
 # ----------------------------------------------------------------------------
 # Preconditioning and uncertainty estimation.
-class Denoiser2(torch.nn.Module):
+
+class Denoiser(torch.nn.Module):
     def __init__(
         self,
         resolution,  # Image resolution.
@@ -404,7 +405,7 @@ class Denoiser2(torch.nn.Module):
         batch_size = 1024
         label_dim = 8
         for dim in (1,):
-            model = Denoiser2(resolution=resolution, in_channels=channels, data_std=1.0, condition_dim=label_dim)
+            model = Denoiser(resolution=resolution, in_channels=channels, data_std=1.0, condition_dim=label_dim)
             cond_vec = torch.randn((batch_size, label_dim))
             x = torch.rand((batch_size, channels) + (resolution,) * dim)
             noise_std = torch.rand((batch_size, 1) + (1,) * dim)
@@ -415,7 +416,7 @@ class Denoiser2(torch.nn.Module):
     @staticmethod
     @torch.no_grad
     def from_config(config):
-        return Denoiser2(
+        return Denoiser(
             in_channels=config["in_channels"],
             resolution=config["resolution"],
             base_channels=config["base_channels"],
@@ -429,9 +430,9 @@ class Denoiser2(torch.nn.Module):
     def from_config_file(config_file):
         with open(config_file, "rb") as fp:
             config = tomllib.load(fp)
-        return Denoiser2.from_config(config["model"])
+        return Denoiser.from_config(config["model"])
 
 
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
-    Denoiser2.check_shape(resolution=128, channels=14)
+    Denoiser.check_shape(resolution=128, channels=14)
