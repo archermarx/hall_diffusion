@@ -1,7 +1,9 @@
 # Diffusion modeling for inverse problems in crossed-field plasmas
 
 Author: Thomas Marks (https://thomasmarks.space)
+ 
 License: GNU GPLv3 (except for python/models/edm2.py, which is reproduced under the terms of the CC-BY-NC-SA) license.
+
 Copyright 2025 Regents of the University of Michigan.
 
 ## Directory structure
