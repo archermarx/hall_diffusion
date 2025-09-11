@@ -150,6 +150,10 @@ $ uv run python/train.py config_small.toml
 
 ## Sampling
 
+The configs also have options for sampling/generating from the model.
+To run the sampler, just run `python/sampler.py`.
+The results will be placed in the config's specified output dirs.
+
 
 
 ## References

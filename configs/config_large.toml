@@ -15,6 +15,8 @@ label_dim = 9
 # The number of grid cells in the simulations
 resolution = 192
 
+#=======================================================================================================================
+
 [training]
 # Number of complete passes through the training data to complete
 epochs = 10
@@ -68,3 +70,19 @@ load_checkpoint = true
 # Frequency in batches with which checkpoints are saved. Set to -1 to disable checkpointing
 checkpoint_save_freq = 20
 
+#=======================================================================================================================
+
+# Sampling configuration
+[sampling]
+# Which plasma properties should be held constant during sampling
+fields_to_keep = ["nu_an", "B"]
+# Whether to use the saved weights of the EMA model instead of the base weights
+use_ema = true
+# Number of independent sample traces to generate
+num_samples = 32
+# Number of sampling steps to take
+num_step = 128
+# Strength of observation guidance
+observation_guidance = 500.0
+# Output directory for generations. Will be created as a subdirectory of the main output directory
+out_dir = "samples"
