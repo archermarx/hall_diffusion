@@ -1,0 +1,22 @@
+[model]
+num_blocks = 3
+channel_mult = [1, 2, 3, 4, 5]
+data_std = 0.5
+label_dim = 9
+resolution = 128
+in_channels = 19
+base_channels = 128
+
+[training]
+epochs = 10
+decay_epochs = 2
+lr = 3e-4
+min_lr = 1e-5
+eval_freq = 100
+ema = 0.995
+checkpoint_freq = 20
+use_checkpoint = true
+folder = "medium"
+batch_size = 512
+weight_decay = 0.00
+adam_betas = [0.9, 0.995]
