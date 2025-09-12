@@ -443,7 +443,7 @@ def infer(args):
     # Switch model to evaluation mode and sample
     model.eval()
     generate_conditionally(
-        model, data_dir=dir_args["train_data_dir"], model_dir=out_dir, **sampling_args
+        model, data_dir=dir_args["test_data_dir"], model_dir=out_dir, **sampling_args
     )
 
 

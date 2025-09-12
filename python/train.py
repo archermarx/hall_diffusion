@@ -479,6 +479,8 @@ def train(args):
     val_loss = val_losses[-1] if len(val_losses) > 0 else np.inf
     ema_loss = ema_losses[-1] if len(ema_losses) > 0 else np.inf
 
+    start_epoch = max_epochs
+
     # ---------------------------------------------
     # Main training loop
     while True:
@@ -642,7 +644,7 @@ def train(args):
             fig.savefig(out_dir / "loss_prog.png", dpi=200)
             plt.close(fig)
 
-        if max_epochs > 0 and epoch_idx >= max_epochs - 1:
+        if max_epochs > 0 and epoch_idx >= max_epochs + start_epoch:
             break
 
 
