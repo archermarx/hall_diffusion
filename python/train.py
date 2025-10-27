@@ -258,7 +258,7 @@ def visualize_denoising_1d(
             alphas=alphas,
         )
         fig, axes = plotter.plot(
-            ["nu_an", "ui_1", "ni_1", "Tev", "phi", "Id"], denormalize=True, nrows=2
+            ["nu_an", "ui_1", "ni_1", "Tev", "phi", "E"], denormalize=True, nrows=2
         )
         fig.savefig(folder / f"denoise_1d_{sigma}.png")
         plt.close(fig)

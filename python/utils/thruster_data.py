@@ -185,5 +185,5 @@ if __name__ == "__main__":
     sims = [sims[i] for i in range(batch_size)]
 
     plotter = ThrusterPlotter1D(dataset, sims)
-    fig, axes = plotter.plot(["nu_an", "ui_1", "ni_1", "E", "Tev", "Id"], denormalize=True, nrows=2)
+    fig, axes = plotter.plot(["nu_an", "ui_1", "ni_1", "E", "Tev", "nn"], denormalize=True, nrows=2)
     fig.savefig("test.png")

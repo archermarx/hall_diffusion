@@ -33,7 +33,7 @@ Otherwise, returns the following:
 - tensor_row_names: list of axially/temporally-resolved sim. output names
 - tensor: tensor containing data for above variables, laid out one quantity per row.
 """
-function load_single_sim(file)
+function load_single_sim(file; include_timevarying=false)
     raw = deserialize(file)
 
     resolution = length(raw[:space][:ne])
@@ -84,7 +84,30 @@ function load_single_sim(file)
     #. 5. The total collision frequency must be greater than or equal to the anomalous collision frequency
     raw[:space][:nu_e] = max.(raw[:space][:nu_an], raw[:space][:nu_e])
 
-    tensor_row_names = [:B, :nu_e, :nu_an, :nn, :ne, :ni_1, :ni_2, :ni_3, :ui_1, :ui_2, :ui_3, :ue, :phi, :E, :Tev, :pe, :∇pe, :Id, :T]
+    # TODO: get these automatically
+    tensor_row_names = [
+        :B,
+        :nu_e,
+        :nu_an,
+        :nn,
+        :ne,
+        :ni_1,
+        :ni_2,
+        :ni_3,
+        :ui_1,
+        :ui_2,
+        :ui_3,
+        :ue,
+        :phi,
+        :E,
+        :Tev,
+        :pe,
+        :∇pe,
+    ]
+
+    if include_timevarying
+        append!(tensor_row_names, [:Id, :T])
+    end
 
     # Lay out quantities one per row into a tensor/matrix.
     # The order corresponds to the the list of names above.
@@ -116,16 +139,17 @@ function load_single_sim(file)
     # Concatenate array of arrays into a matrix
     tensor = hcat(tensor_rows...)
 
+    # TODO: get these automatically
     param_names = [
-        :background_pressure_torr,
+        #:background_pressure_torr,
         :anode_mass_flow_rate_kg_s,
         :discharge_voltage_v,
         :magnetic_field_scale,
         :cathode_coupling_voltage_v,
         :neutral_velocity_m_s,
-        :neutral_ingestion_scale,
+        #:neutral_ingestion_scale,
         :wall_loss_scale,
-        :anom_shift_scale,
+        #:anom_shift_scale,
     ]
 
     param_vec = [raw[:params][param] for param in param_names]

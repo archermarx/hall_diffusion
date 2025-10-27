@@ -19,23 +19,23 @@ Specify the distributions of the paramters of interest, so we can sample from th
 function param_distributions()
     return Dict(
         # Main anom parameters
-        :anom_minimum => Truncated(LogNormal(log(0.01), log(10)), 0.0, 1.0),
-        :anom_width => Truncated(Normal(0.5, 0.5), 0, Inf),
+        :anom_minimum => Truncated(LogNormal(log(0.05), log(10)), 0.0, 1.0),
+        :anom_width => Truncated(Normal(0.3, 0.5), 0, Inf),
         :anom_slope => Uniform(0.0, 1.0),
         :anom_step => Uniform(0.0, 1.0),
-        :anom_scale => LogNormal(log(0.0625), log(10)),
-        :anom_center => Truncated(Normal(1, 1/3), 0, 2),
+        :anom_scale => LogNormal(log(0.1), log(5)),
+        :anom_center => Truncated(Normal(1.1, 1/3), 0, 2),
         # Pressure-dependent parameters
-        :anom_shift_scale => Truncated(Normal(0.25, 0.1), 0.0, Inf),
-        :neutral_ingestion_scale => Truncated(Normal(4, 2), 1, 6),
+        #:anom_shift_scale => Truncated(Normal(0.25, 0.1), 0.0, Inf),
+        #:neutral_ingestion_scale => Truncated(Normal(4, 2), 1, 6),
         # Other parameters
-        :neutral_velocity_m_s => Truncated(Normal(300, 50), 0.0, Inf),
-        :wall_loss_scale => Truncated(Normal(1, 0.5), 0, 2),
+        :neutral_velocity_m_s => Truncated(Normal(300, 100), 0.0, Inf),
+        :wall_loss_scale => Truncated(Normal(1, 0.5), 0, Inf),
         # Operating conditions
         :magnetic_field_scale => Uniform(0.5, 1.5),
         :discharge_voltage_v => Uniform(200.0, 600.0),
         :anode_mass_flow_rate_kg_s => Uniform(3e-6, 7e-6),
-        :background_pressure_torr => LogNormal(log(1e-5), log(10)),
+        #:background_pressure_torr => LogNormal(log(1e-5), log(10)),
         :cathode_coupling_voltage_v => Uniform(0.0, 50.0),
     )
 end
@@ -135,21 +135,25 @@ run_sim(params; num_cells = 128)
 Run a simulation with the speficied parameter dictionary and number of cells.
 See the source code of `param_distributions()` for a listing of parameters.
 """
-function run_sim(params; num_cells = 128)
-    z = LinRange(0, 3, num_cells * 2)
+function run_sim(params; num_cells = 128, perturbation_scale = 1.0)
+
     thruster = het.SPT_100
     geom = thruster.geometry
-    z_bfield = thruster.magnetic_field.z
-    B = params[:magnetic_field_scale] * thruster.magnetic_field.B
+
+    Bfield_base = het.MagneticField(file = "julia/bfield_spt100.csv")
+    het.load_magnetic_field!(Bfield_base)
+    B = params[:magnetic_field_scale] * Bfield_base.B
     thruster = het.Thruster(
         "SPT-100",
         geom,
-        het.MagneticField("", z_bfield, B),
+        het.MagneticField("", Bfield_base.z, B),
         false,
     ) 
 
-    z_dimensional = z .* thruster.geometry.channel_length
-    f_anom = anom_model(z, params, perturbation_scale=0.5)
+    domain = (0.0, 0.08)
+    z_dimensional = LinRange(domain[1], domain[2], num_cells*2)
+    z = z_dimensional ./ thruster.geometry.channel_length
+    f_anom = anom_model(z, params; perturbation_scale)
 
     config = het.Config(
         ncharge = 3,
@@ -157,16 +161,10 @@ function run_sim(params; num_cells = 128)
         domain = (0.0, 0.08),
         discharge_voltage = params[:discharge_voltage_v],
         anode_mass_flow_rate = params[:anode_mass_flow_rate_kg_s],
-        cathode_coupling_voltage = params[:cathode_coupling_voltage_v],
-        anom_model = het.SimpleLogisticShift(
-            model = het.MultiLogBohm(z_dimensional, f_anom),
-            shift_length = params[:anom_shift_scale],
-        ),
+        anom_model = het.MultiLogBohm(z_dimensional, f_anom),
         wall_loss_model = het.WallSheath(het.BNSiO2, params[:wall_loss_scale]),
         ion_wall_losses = true,
         neutral_velocity = params[:neutral_velocity_m_s],
-        neutral_ingestion_multiplier = params[:neutral_ingestion_scale],
-        background_pressure_Torr = params[:background_pressure_torr],
     )
 
     sim = het.SimParams(
@@ -244,6 +242,7 @@ function gen_data_single(; num_cells = 128, save_dir = "julia/data")
         open(filename, "w") do f
             serialize(f, sim_dict)
         end
+        return sim_dict
     end
 
     return nothing

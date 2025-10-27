@@ -2,7 +2,7 @@
 # Number of up/down blocks at each level of the unet
 num_blocks = 3
 # Input channnels (number of rows in tensor)
-in_channels = 19
+in_channels = 17
 # Channels at top level
 base_channels = 128
 # Increase in channel count at each level
@@ -11,7 +11,7 @@ channel_mult = [1, 2, 3, 4, 5]
 # The model works best if the data is normalized to a std of 0.5 and this argument is left untouched
 data_std = 0.5
 # Dimension of class labels (in our case, the other random scalar parameters)
-label_dim = 9
+label_dim = 6
 # The number of grid cells in the simulations
 resolution = 128
 
@@ -19,7 +19,7 @@ resolution = 128
 
 [training]
 # Number of complete passes through the training data to complete
-epochs = 10
+epochs = 1
 # Training mini-batch size
 batch_size = 512
 # Weight decay rate
@@ -49,11 +49,11 @@ include_logvar = false
 # Parameters for Adam optimizer
 adam_betas = [0.9, 0.995]
 # Initial learning rate
-lr = 3e-4
+lr = 1e-4
 # Minimum learning rate, if LR decay enabled
 min_lr = 1e-4
 # Epochs after which learning rate decay begins. Set to -1 to disable.
-lr_decay_start_epochs = 2
+lr_decay_start_epochs = -1
 # Weight decay rate
 weight_decay = 0.00
 
@@ -62,9 +62,9 @@ weight_decay = 0.00
 # Folder to save results in
 out_dir = "saved_models/medium"
 # Training data folder
-train_data_dir = "../gendata/data/training"
+train_data_dir = "data/batch_3/normalized"
 # test data folder
-test_data_dir = "../gendata/data/val_small"
+test_data_dir = "data/batch_3/normalized_test_small"
 
 # Checkpoint configuration. Checkpoints are saved to and loaded from `out_dir`/checkpoint.pth.tar
 [training.checkpoints]
@@ -78,13 +78,13 @@ checkpoint_save_freq = 20
 # Sampling configuration
 [sampling]
 # Which plasma properties should be held constant during sampling
-fields_to_keep = ["nu_an", "B"]
+fields_to_keep = ["ui_1", "B"]
 # Whether to use the saved weights of the EMA model instead of the base weights
 use_ema = true
 # Number of independent sample traces to generate
 num_samples = 32
 # Number of sampling steps to take
-num_step = 128
+num_steps = 128
 # Strength of observation guidance
 observation_guidance = 500.0
 # Output directory for generations. Will be created as a subdirectory of the main output directory

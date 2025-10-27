@@ -271,7 +271,7 @@ def save_ims(
     plotter.alphas = [0.1] * (num_1d_samples) + [1.0]
 
     fig, *_ = plotter.plot(
-        ["nu_an", "ui_1", "ne", "E", "phi", "nn", "Tev", "Id", "T"],
+        ["nu_an", "ui_1", "ne", "E", "phi", "nn", "Tev"],
         denormalize=True,
         nrows=3,
         obs_fields=obs_fields,
@@ -325,12 +325,13 @@ def generate_conditionally(
     fields_to_keep=None,
     num_samples=32,
     num_steps=128,
-    obs_strength=500.0,
+    observation_guidance=500.0,
     **extras,
 ):
+
     # change these to determine what fields we should keep
     if fields_to_keep is None:
-        fields_to_keep = ["ui_1", "B", "Id", "T"]
+        fields_to_keep = ["ui_1", "B"]
 
     # Observation locations (grid point indices)
     obs_locations = np.arange(0, 128)
@@ -349,11 +350,11 @@ def generate_conditionally(
     )
 
     # Uncomment to use random seed
-    # seed = torch.randint(0, 1_000_000_000, (1,))[0]
-    # print(f"{seed=}")
+    #seed = torch.randint(0, 1_000_000_000, (1,))[0]
+    #print(f"{seed=}")
 
     # Fixed seed
-    seed = 507442293
+    seed = 123113385
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -361,11 +362,8 @@ def generate_conditionally(
     indices_to_keep = [dataset.fields[field] for field in fields_to_keep]
 
     # Uncomment to use random data idx
-    # data_idx = np.random.randint(0, len(dataset))
-    # print(f"{data_idx=}")
-
-    # Fixed validation dataset
-    data_idx = 36675
+    data_idx = 434
+    print(f"{data_idx=}")
     _, data_vec, data = dataset[data_idx]
 
     data_params = dataset.vec_to_params(data_vec)
@@ -396,7 +394,7 @@ def generate_conditionally(
         im_masks=(data_tiled, mask),
         showprogress=True,
         condition_vec=condition_vec,
-        obs_strength=obs_strength,
+        obs_strength=observation_guidance,
         pde_strength=0.0,
     )
 
@@ -439,6 +437,8 @@ def infer(args):
             model.load_state_dict(state["ema"])
         else:
             model.load_state_dict(state["best"])
+
+    print(f"{sampling_args=}")
 
     # Switch model to evaluation mode and sample
     model.eval()
