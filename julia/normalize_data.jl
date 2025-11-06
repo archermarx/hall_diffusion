@@ -48,15 +48,15 @@ function load_single_sim(file; include_timevarying=false)
 
     # Fix some issues in the input data.
     # 1. The thrust and current cannot be negative.
-    I_MAX = 150.0   # A
-    I_MIN = 1.0e-3    # A
-    T_MAX = 10      # N
-    T_MIN = 1.0e-3    # N
+    const I_MAX = 150.0   # A
+    const I_MIN = 1.0e-3    # A
+    const T_MAX = 10      # N
+    const T_MIN = 1.0e-3    # N
 
     I_itp = max.(I_itp, I_MIN)
     T_itp = max.(T_itp, T_MIN)
 
-    # 2. Throw out sims for which mean(I) > 500
+    # 2. Throw out sims for which mean(I) > I_max
     if mean(I_raw) > I_MAX || mean(T_raw) > T_MAX
         return nothing
     end
@@ -65,7 +65,6 @@ function load_single_sim(file; include_timevarying=false)
     phi = raw[:space][:phi]
     V_d = raw[:params][:discharge_voltage_v]
     if abs(minimum(phi)) > 0.5 * V_d || maximum(abs.(phi)) > 1.5 * V_d
-        #@show minimum(phi), maximum(abs.(phi)), V_d
         return nothing
     end
 
@@ -210,6 +209,17 @@ function get_data_normalization(sims; target_std = 1.0)
     return (; names = param_names, means = param_means, stds = param_stds), (names = tensor_row_names, means = tensor_means, stds = tensor_stds)
 end
 
+function read_normalization_file(file)
+    contents = readdlm(file, ',')[2:end, :]
+
+    return (;
+        names = Symbol.(contents[1:end, 1]),
+        means = Float64.(contents[1:end, 2]),
+        stds = Float64.(contents[1:end, 3]),
+        use_log = Bool.(contents[1:end, 4])
+    )
+end
+
 """
 normalize_data(files, out_dir; target_std = 1.0)
 
@@ -221,15 +231,27 @@ Given a list of files, normalizes them and saves them disk in numpy npz format.
 - target_std: Standard deviation that each QoI should have after normalization
 - subset_size: Size of the random subset of the data that is used to compute the normalization factors.
 """
-function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset_size = 100_000)
-    # Get normalization factors from a subset of the total dataset, to avoid needing to pass over the entire dataset twice.
-    # TODO: this can be done more elegantly.
-    subset_files = if subset_size > length(files)
-        files
+function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset_size = 100_000, norm_file_data = nothing, norm_file_params = nothing)
+
+    if (norm_file_data === nothing || norm_file_params === nothing)
+        # Calculate normalization details from scratch
+
+        # Get normalization factors from a subset of the total dataset, to avoid needing to pass over the entire dataset twice.
+        # TODO: this can be done more elegantly.
+        subset_files = if subset_size > length(files)
+            files
+        else
+            rand(files, subset_size)
+        end
+
+        println("Calculating normalization factors")
+        param_norm, tensor_norm = get_data_normalization(load_data(subset_files); target_std = target_std)
     else
-        rand(files, subset_size)
+        # Load normalization info from file
+        println("Reading normalization data from files")
+        param_norm = read_normalization_file(norm_file_params)
+        tensor_norm = read_normalization_file(norm_file_data)
     end
-    param_norm, tensor_norm = get_data_normalization(load_data(subset_files); target_std = target_std)
 
     # Create necessary directories
     data_dir = joinpath(out_dir, "data")
@@ -296,7 +318,7 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
     return nothing
 end
 
-function normalize_data(dir::String, out_dir; target_std = 1.0, subset_size = 100_000)
+function normalize_data(dir::String, out_dir; target_std = 1.0, subset_size = 100_000, norm_file_data = nothing, norm_file_params = nothing)
     files = readdir(dir, join = true)
-    return normalize_data(files, out_dir; target_std, subset_size)
+    return normalize_data(files, out_dir; target_std, subset_size, norm_file_data, norm_file_params)
 end

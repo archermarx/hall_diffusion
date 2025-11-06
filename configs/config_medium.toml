@@ -47,11 +47,11 @@ include_logvar = false
 # Optimizer configuration
 [training.optimizer]
 # Parameters for Adam optimizer
-adam_betas = [0.9, 0.995]
+adam_betas = [0.9, 0.999]
 # Initial learning rate
-lr = 1e-4
+lr = 3e-4
 # Minimum learning rate, if LR decay enabled
-min_lr = 1e-4
+min_lr = 3e-4
 # Epochs after which learning rate decay begins. Set to -1 to disable.
 lr_decay_start_epochs = -1
 # Weight decay rate

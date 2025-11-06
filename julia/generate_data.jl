@@ -40,6 +40,20 @@ function param_distributions()
     )
 end
 
+function get_params(sim)
+    B_ref = maximum(het.load_magnetic_field("julia/bfield_spt100.csv").B)
+    config = sim.config
+    return Dict(
+        :neutral_velocity_m_s => config.propellants[1].velocity_m_s,
+        :wall_loss_scale => config.wall_loss_model.loss_scale,
+        :discharge_voltage_v => config.discharge_voltage,
+        :anode_mass_flow_rate_kg_s => config.propellants[1].flow_rate_kg_s,
+        :cathode_coupling_voltage_v => config.cathode_coupling_voltage,
+        :magnetic_field_scale => maximum(config.thruster.magnetic_field.B) / B_ref,
+        #:background_pressure_torr => config.background_pressure_torr,
+    )
+end
+
 """
 sample_params()
 
@@ -186,7 +200,11 @@ Save a simulation to a dictionary after averaging it in time for the specified i
 In addition to axially-resolved fields, we also write out certain time-dependent global quantities (thrust, current)
 as well as the params with which the simulation was run.
 """
-function save_sim(sim, params; avg_start_time = 5e-4)
+function save_sim(sim, params = nothing; avg_start_time = 5e-4)
+    if (params === nothing)
+        params = get_params(sim)
+    end
+
     avg = het.time_average(sim, avg_start_time)
     N = length(avg[:z])
     inds = 2:N-1
@@ -223,6 +241,14 @@ function save_sim(sim, params; avg_start_time = 5e-4)
     return out_dict
 end
 
+function save_sim(file::String, args...; kwargs...)
+    sim_dict = save_sim(args..., kwargs...)
+    open(file, "w") do f
+        serialize(f, sim_dict)
+    end
+    return sim_dict
+end
+
 """
 gen_data_single(; num_cells = 128, save_dir = "julia/data")
 
@@ -237,12 +263,8 @@ function gen_data_single(; num_cells = 128, save_dir = "julia/data")
     mkpath(save_dir)
 
     if sim.retcode == :success
-        sim_dict = save_sim(sim, params)
         filename = joinpath(save_dir, string(uuid4()))
-        open(filename, "w") do f
-            serialize(f, sim_dict)
-        end
-        return sim_dict
+        return save_sim(filename, sim, params)
     end
 
     return nothing

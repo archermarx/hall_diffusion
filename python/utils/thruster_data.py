@@ -99,6 +99,22 @@ class ThrusterPlotter1D:
         self.labels.append(label)
 
     def get_field(self, field, denormalize=False):
+
+        if field == "inverse_hall":
+            ys = []
+            nu_an = self.get_field("nu_an", denormalize=denormalize)
+            B = self.get_field("B", denormalize=denormalize)
+            # nu_an and B are both stored as logs
+            for _nu, _B in zip(nu_an, B):
+                if denormalize:
+                    wce = np.log(1.6e-19) + _B - np.log(9.1e-31)
+                else:
+                    wce = _B 
+                
+                ys.append(_nu - wce)
+
+            return ys
+        
         field_map = {field: i for (i, field) in enumerate(self.metadata["Field"])}
         df_field = self.metadata.set_index("Field")
 
@@ -129,7 +145,11 @@ class ThrusterPlotter1D:
             ax.set_xlabel("Axial location [channel lengths]")
 
         df_field = self.metadata.set_index("Field")
-        log = df_field["Log"][field]
+
+        if field == "inverse_hall":
+            log = True
+        else:
+            log = df_field["Log"][field]
 
         ys = self.get_field(field, denormalize=denormalize)
 
@@ -156,7 +176,7 @@ class ThrusterPlotter1D:
         ncols = math.ceil(len(fields) / nrows)
 
         width = 3 * ncols
-        height = 3 * nrows
+        height = 2.8 * nrows
 
         fig = plt.figure(figsize=(width, height), constrained_layout=True)
 

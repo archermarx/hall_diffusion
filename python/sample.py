@@ -268,12 +268,15 @@ def save_ims(
 
     plotter = ThrusterPlotter1D(dataset, sims, obs_locations=obs_locations)
     plotter.colors = ["black"] * num_1d_samples + ["red"]
-    plotter.alphas = [0.1] * (num_1d_samples) + [1.0]
+    plotter.alphas = [0.25/np.cbrt(num_1d_samples)] * (num_1d_samples) + [1.0]
+    
+    #fields_to_plot = ["nu_an", "ui_1", "E", "ne", "nn", "Tev"]
+    fields_to_plot = ["ui_1", "Tev", "ne", "inverse_hall", "phi", "E"]
 
     fig, *_ = plotter.plot(
-        ["nu_an", "ui_1", "ne", "E", "phi", "nn", "Tev"],
+        fields_to_plot,
         denormalize=True,
-        nrows=3,
+        nrows=math.ceil(len(fields_to_plot) / 3),
         obs_fields=obs_fields,
         obs_locations=None,
     )
@@ -326,6 +329,7 @@ def generate_conditionally(
     num_samples=32,
     num_steps=128,
     observation_guidance=500.0,
+    condition_file=None,
     **extras,
 ):
 
@@ -350,25 +354,28 @@ def generate_conditionally(
     )
 
     # Uncomment to use random seed
-    #seed = torch.randint(0, 1_000_000_000, (1,))[0]
-    #print(f"{seed=}")
+    seed = torch.randint(0, 1_000_000_000, (1,))[0]
+    print(f"{seed=}")
 
     # Fixed seed
-    seed = 123113385
+    # seed = 123113385
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    dataset = ThrusterDataset(data_dir)
+    if condition_file is None:
+        dataset = ThrusterDataset(data_dir)
+        data_idx = torch.randint(0, len(dataset.files), (1,))[0]
+        print(f"{data_idx=}")
+        _, data_vec, data = dataset[data_idx]
+    else:
+        # TODO: make ThrusterDataset take a list of files
+        dataset = ThrusterDataset(condition_file)
+        _, data_vec, data = dataset[0]
+
+    
     indices_to_keep = [dataset.fields[field] for field in fields_to_keep]
-
-    # Uncomment to use random data idx
-    data_idx = 434
-    print(f"{data_idx=}")
-    _, data_vec, data = dataset[data_idx]
-
     data_params = dataset.vec_to_params(data_vec)
-    base_params["discharge_voltage_v"] = data_params["discharge_voltage_v"]
-    condition_vec = torch.tensor(dataset.params_to_vec(base_params), device=device)
+    condition_vec = torch.tensor(dataset.params_to_vec(data_params), device=device)
 
     data = torch.tensor(data, device=device)
     (num_channels, resolution) = data.shape
@@ -441,6 +448,9 @@ def infer(args):
     print(f"{sampling_args=}")
 
     # Switch model to evaluation mode and sample
+    if "condition_file" not in sampling_args:
+        sampling_args["condition_file"] = None
+
     model.eval()
     generate_conditionally(
         model, data_dir=dir_args["test_data_dir"], model_dir=out_dir, **sampling_args
