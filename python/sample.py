@@ -20,23 +20,22 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 VAL_DATASET = "data/val_large"
 
-def observation_loss(y, x, mask):
-    diff = (y - x) ** 2
-    return torch.mean(((1 - mask) * diff))
+def observation_loss(y, x, mask, obs_variance):
+    diff = (y - x)**2 / obs_variance
+    return torch.sum(mask * diff) / 2
 
-
-def pde_loss(x):
+def pde_loss(x, strength):
     loss = (0.0 * x).mean()
     # UNIMPLEMENTED
-    return loss
+    return strength * loss
 
 
-def guidance_loss(y, x, mask, obs_strength=0.0, pde_strength=0.0, **kwargs):
+def guidance_loss(y, x, mask, obs_variance = 0.0, pde_strength=0.0, **kwargs):
     # weighted average of observation and PDE losses
-    return obs_strength * observation_loss(y, x, mask) + pde_strength * pde_loss(
-        x, **kwargs
-    )
+    _obs_loss = observation_loss(x, y, mask, obs_variance)
+    _pde_loss = pde_loss(x, pde_strength, **kwargs)
 
+    return _obs_loss + _pde_loss
 
 class EDMDiffusionProcess:
     def __init__(
@@ -94,7 +93,7 @@ class EDMDiffusionProcess:
         masks,
         gamma=0.0,
         condition_vec=None,
-        obs_strength=0.0,
+        obs_variance=None,
         pde_strength=0.0,
         step_scale=1.0,
     ):
@@ -125,20 +124,22 @@ class EDMDiffusionProcess:
                 d1 = (x1 - D) / t
                 x1 = x_0 + dt * 0.5 * (d0 + d1)
 
-        # Guidance
-        for batch_idx in range(b):
-            batch_D = D[batch_idx, ...]
-            batch_D.requires_grad = True
-            loss_obs = guidance_loss(
-                ims[batch_idx, ...],
-                batch_D,
-                masks[batch_idx, ...],
-                obs_strength=obs_strength,
-                pde_strength=pde_strength,
-            )
-            loss_obs.backward()
+        # Guidance loss
+        if obs_variance is not None:
+            for batch_idx in range(b):
+                batch_D = D[batch_idx, ...]
+                batch_D.requires_grad = True
+                
+                loss_obs = guidance_loss(
+                    ims[batch_idx, ...],
+                    batch_D,
+                    masks[batch_idx, ...],
+                    obs_variance=obs_variance,
+                    pde_strength=pde_strength,
+                )
+                loss_obs.backward()
 
-            x1[batch_idx, ...] -= batch_D.grad
+                x1[batch_idx, ...] -= batch_D.grad
 
         return x1
 
@@ -150,7 +151,7 @@ class EDMDiffusionProcess:
         im_masks=None,
         showprogress=False,
         condition_vec=None,
-        obs_strength=0.0,
+        obs_variance=None,
         pde_strength=0.0,
     ):
         """
@@ -161,7 +162,7 @@ class EDMDiffusionProcess:
             x: a tensor containing standard Gaussian noise. The dimension of this tensor should be (b, c, w)
                 where b is the batch size, c is the number of channels, and w is the width
             im_masks: An optimal tuple of (data, mask) to apply during generation. These should have the same shape as x.
-                When provided, the model will infill areas where the mask is set to 1.
+                When provided, the model will infill areas where the mask is set to 0.
             showprogress: whether we should print a tqdm progress bar.
         Returns:
         """
@@ -180,7 +181,7 @@ class EDMDiffusionProcess:
             ims, masks = im_masks
         else:
             # If no mask provided, then we use a mask of all ones and a blank reference image
-            masks = torch.ones_like(x, device=x.device)
+            masks = torch.zeros_like(x, device=x.device)
             ims = torch.zeros_like(x, device=x.device)
 
         ims.requires_grad = False
@@ -211,14 +212,14 @@ class EDMDiffusionProcess:
                 masks,
                 gamma,
                 condition_vec=condition_vec,
-                obs_strength=obs_strength,
+                obs_variance=obs_variance,
                 pde_strength=pde_strength,
                 step_scale=step_scale,
             )
 
             # Add masked and noised reference image at the same noise level
-            # Commented out in favor of other observationnoise conditioning method
-            # x = masks * x + (1 - masks) * forward[step_idx]
+            # Commented out in favor of other conditioning method
+            # x = (1 - masks) * x + masks * forward[step_idx]
             output[step_idx, ...] = x
 
         output[-1, ...] = x
@@ -282,44 +283,6 @@ def save_ims(
     )
     fig.savefig(path_1d)
 
-
-def sample(
-    model,
-    channels,
-    data_dir: Path | str,
-    steps=32,
-    im_masks=None,
-    path_2d="reverse.png",
-    path_1d="test.png",
-    showprogress=True,
-):
-    r"""
-    Sample stepwise by going backward one timestep at a time.
-    We save the x0 predictions
-    """
-
-    num_samples = 16
-    im_size = 128
-    seed = torch.randint(0, 1_000_000_000, (1,))[0]
-    print(f"{seed=}")
-    # seed = 902503797
-    # torch.manual_seed(seed)
-
-    process = EDMDiffusionProcess(exponent=7)
-
-    xt = (
-        torch.randn((num_samples, channels, im_size), device=device) * process.noise_max
-    )
-
-    output = process.reverse(
-        model, xt, steps, im_masks=im_masks, showprogress=showprogress
-    )
-
-    final = output[-1, ...]
-
-    save_ims(final, data_dir=data_dir, rows=4, path_2d=path_1d, path_1d="test.png")
-
-
 def generate_conditionally(
     model,
     model_dir: Path | str,
@@ -328,7 +291,7 @@ def generate_conditionally(
     fields_to_keep=None,
     num_samples=32,
     num_steps=128,
-    observation_guidance=500.0,
+    observation_stddev=1.0,
     condition_file=None,
     **extras,
 ):
@@ -339,19 +302,6 @@ def generate_conditionally(
 
     # Observation locations (grid point indices)
     obs_locations = np.arange(0, 128)
-
-    # Scalar params for conditioning
-    base_params = dict(
-        anode_mass_flow_rate_kg_s=5e-6,
-        discharge_voltage_v=300.0,
-        magnetic_field_scale=1.0,
-        cathode_coupling_voltage_v=25.0,
-        wall_loss_scale=1.0,
-        anom_shift_scale=0.25,
-        neutral_velocity_m_s=300.0,
-        neutral_ingestion_scale=4.0,
-        background_pressure_torr=1e-5,
-    )
 
     # Uncomment to use random seed
     seed = torch.randint(0, 1_000_000_000, (1,))[0]
@@ -371,7 +321,6 @@ def generate_conditionally(
         # TODO: make ThrusterDataset take a list of files
         dataset = ThrusterDataset(condition_file)
         _, data_vec, data = dataset[0]
-
     
     indices_to_keep = [dataset.fields[field] for field in fields_to_keep]
     data_params = dataset.vec_to_params(data_vec)
@@ -387,9 +336,17 @@ def generate_conditionally(
         torch.randn((num_samples, num_channels, resolution), device=device)
         * process.noise_max
     )
-    mask = torch.ones((num_samples, num_channels, resolution), device=device)
+    mask = torch.zeros((num_samples, num_channels, resolution), device=device)
     for i in indices_to_keep:
-        mask[:, i, obs_locations] = 0.0
+        mask[:, i, obs_locations] = 1.0
+
+    # Assign observation variances
+    obs_variance = torch.ones((num_channels, resolution), device=device)
+    if isinstance(observation_stddev, list):
+        for (i, index) in enumerate(indices_to_keep):
+            obs_variance[index, :] = observation_stddev[i]**2
+    else:
+        obs_variance *= observation_stddev**2
 
     data_tiled = data.unsqueeze(0).repeat(num_samples, 1, 1)
     assert data_tiled.shape == xt.shape
@@ -401,7 +358,7 @@ def generate_conditionally(
         im_masks=(data_tiled, mask),
         showprogress=True,
         condition_vec=condition_vec,
-        obs_strength=observation_guidance,
+        obs_variance=obs_variance,
         pde_strength=0.0,
     )
 
