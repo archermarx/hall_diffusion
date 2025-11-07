@@ -77,16 +77,15 @@ checkpoint_save_freq = 20
 # Sampling configuration
 [sampling]
 # Which plasma properties should be held constant during sampling. An empty list gives unconditional samples.
-fields_to_keep = ["B", "ui_1", "Tev"]
+fields_to_keep = ["B", "ui_1"]
 # Observation std deviation
-observation_stddev = [2.0, 5.0, 5.0]
+observation_stddev = 0.8
 # Whether to use the saved weights of the EMA model instead of the base weights
 use_ema = false
 # Number of independent sample traces to generate
 num_samples = 64
 # Number of sampling steps to take
-num_steps = 1024
-
+num_steps = 128
 # Output directory for generations. Will be created as a subdirectory of the main output directory
 out_dir = "samples"
 # File containing (normalized) simulation info to condition on. If not provided, we generate one randomly from the test dataset.

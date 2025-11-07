@@ -43,19 +43,10 @@ class EDMDiffusionProcess:
         noise_min=0.002,
         noise_max=80,
         exponent=7,
-        reverse_stochastic=False,
-        S_churn=40,
-        S_min=0.002,
-        S_max=50,
     ):
         self.exponent = exponent
         self.noise_min = noise_min
         self.noise_max = noise_max
-
-        self.reverse_stochastic = reverse_stochastic
-        self.S_churn = S_churn
-        self.S_min = S_min
-        self.S_max = S_max
 
     def get_timesteps(self, N):
         rho = self.exponent
@@ -82,66 +73,80 @@ class EDMDiffusionProcess:
             steps /= torch.clamp(timesteps, 1, torch.inf)
 
         return steps
+    
+    @staticmethod
+    def guidance_score(x, deriv, t, obs_variance, pde_strength, ims, masks):
+        (batch_size, width, height) = x.shape
+
+        grad = torch.full_like(x, 0.0, device=x.device)
+        #process_stddev = torch.norm(deriv) * t / (width * height)
+
+        #obs_stddev = 0.01
+        #obs_variance = obs_stddev**2
+
+        for b in range(batch_size):
+            batch_x0 = x[b, ...]
+            batch_x0.requires_grad = True
+            
+            loss_obs = guidance_loss(
+                ims[b, ...],
+                batch_x0,
+                masks[b, ...],
+                obs_variance=obs_variance, #+ process_stddev**2,
+                pde_strength=pde_strength,
+            )
+            loss_obs.backward()
+            grad[b,...] = batch_x0.grad
+        
+        return grad
+
 
     def reverse_step(
         self,
         denoiser,
-        x_0,
+        x_t,
         t_prev,
         t,
         ims,
         masks,
-        gamma=0.0,
         condition_vec=None,
         obs_variance=None,
         pde_strength=0.0,
-        step_scale=1.0,
     ):
-        if gamma > 0:
-            # If gamma > 0, we inject some stochasticity into the reverse process
-            # We step from t_prev back to a previous time t_noise by injecting noise (t_noise**2 - t_prev**2)
-            # We then proceed as normal, stepping from t_noise to t
-            S_noise = 1.003
-            t_noise = (1 + gamma) * t_prev
-            noise_std = torch.sqrt(t_noise**2 - t_prev**2)
-            gaussian_noise = torch.randn_like(x_0).to(x_0.device)
-            x_0 += noise_std * S_noise * gaussian_noise
-            t_prev = t_noise
+        (b, c, w) = x_t.shape
 
-        (b, c, w) = x_0.shape
         ones = torch.ones((b, 1, 1), device=device)
 
-        # Predictor step
-        dt = step_scale * (t - t_prev)
-        with torch.no_grad():
-            D = denoiser(x_0, t_prev * ones, condition_vector=condition_vec)
-            d0 = (x_0 - D) / t_prev
-            x1 = x_0 + dt * d0
+        dt = (t - t_prev)
+        t_mid = 0.5 * (t + t_prev)
 
-            if t > 0:
-                # Corrector step
-                D = denoiser(x1, t * ones, condition_vector=condition_vec)
-                d1 = (x1 - D) / t
-                x1 = x_0 + dt * 0.5 * (d0 + d1)
+        step_scale = 1.1
+
+        # Predictor step
+        with torch.no_grad():
+            x_0 = denoiser(x_t, t_prev * ones, condition_vector=condition_vec)
+            d0 = -(x_0 - x_t) / t_prev
+            x_1 = x_t + step_scale * 0.5 * dt * d0
+            
+        # Guidance loss
+        # if obs_variance is not None:
+        #      _obs_score = EDMDiffusionProcess.guidance_score(x_0, d0, t_prev, obs_variance, pde_strength, ims, masks)
+        #      x_1 += 0.5 * dt * t_prev * _obs_score
+        #      #x_1 -= 0.5 * _obs_score
+
+        # Corrector step
+        with torch.no_grad():
+            x_0 = denoiser(x_1, t_mid * ones, condition_vector=condition_vec)
+            d1 = -(x_0 - x_1) / t_mid
+            x_1 = x_t + step_scale * dt * d1 # 0.5 * (d0 + d1)
 
         # Guidance loss
         if obs_variance is not None:
-            for batch_idx in range(b):
-                batch_D = D[batch_idx, ...]
-                batch_D.requires_grad = True
-                
-                loss_obs = guidance_loss(
-                    ims[batch_idx, ...],
-                    batch_D,
-                    masks[batch_idx, ...],
-                    obs_variance=obs_variance,
-                    pde_strength=pde_strength,
-                )
-                loss_obs.backward()
+            _obs_score = EDMDiffusionProcess.guidance_score(x_0, d1, t_mid, obs_variance, pde_strength, ims, masks)
+            #x_1 += dt * t_mid * _obs_score
+            x_1 -= _obs_score
 
-                x1[batch_idx, ...] -= batch_D.grad
-
-        return x1
+        return x_1
 
     def reverse(
         self,
@@ -172,8 +177,6 @@ class EDMDiffusionProcess:
         output[0, ...] = x
 
         timesteps = self.get_timesteps(steps)
-        # print(timesteps)
-        gamma_0 = min(self.S_churn / steps, math.sqrt(2) - 1)
 
         # Conditional diffusion/infill
         # Provide images to infill as well as mask indicating the area to be infilled
@@ -186,22 +189,12 @@ class EDMDiffusionProcess:
 
         ims.requires_grad = False
         masks.requires_grad = False
-        # Step reference image through the forward process
-        # forward = self.forward(ims, steps)
-        step_scale_max = 1.1
 
         for step_idx, t in enumerate(tqdm(timesteps, disable=(not showprogress))):
             if step_idx == 0:
                 continue
 
-            if not self.reverse_stochastic or t < self.S_min or t > self.S_max:
-                gamma = 0.0
-            else:
-                gamma = gamma_0
-
             t_prev = timesteps[step_idx - 1]
-
-            step_scale = step_scale_max
 
             x = self.reverse_step(
                 denoiser,
@@ -210,17 +203,19 @@ class EDMDiffusionProcess:
                 t,
                 ims,
                 masks,
-                gamma,
                 condition_vec=condition_vec,
                 obs_variance=obs_variance,
                 pde_strength=pde_strength,
-                step_scale=step_scale,
             )
 
             # Add masked and noised reference image at the same noise level
-            # Commented out in favor of other conditioning method
-            # x = (1 - masks) * x + masks * forward[step_idx]
             output[step_idx, ...] = x
+
+        # for i in range(5):
+        #     # A few extra consistency steps
+        #     x = self.reverse_step(
+        #         denoiser, x, 0.0, 0.0, ims, masks, condition_vec=condition_vec, obs_variance=obs_variance, pde_strength=pde_strength, step_scale=step_scale
+        #     )
 
         output[-1, ...] = x
 
@@ -270,9 +265,8 @@ def save_ims(
     plotter = ThrusterPlotter1D(dataset, sims, obs_locations=obs_locations)
     plotter.colors = ["black"] * num_1d_samples + ["red"]
     plotter.alphas = [0.25/np.cbrt(num_1d_samples)] * (num_1d_samples) + [1.0]
-    
-    #fields_to_plot = ["nu_an", "ui_1", "E", "ne", "nn", "Tev"]
-    fields_to_plot = ["ui_1", "Tev", "ne", "inverse_hall", "phi", "E"]
+
+    fields_to_plot = ["ui_1", "Tev", "ne", "inverse_hall", "phi", "E"] #, "nn", "pe", "∇pe"]
 
     fig, *_ = plotter.plot(
         fields_to_plot,
