@@ -10,6 +10,7 @@ using Serialization: serialize, deserialize
 using UUIDs: uuid4
 using ProgressMeter
 using Distributions: Normal, LogNormal, Uniform, LogUniform, Truncated, MvNormal, sample
+using JSON3
 
 """
 param_distributions()
@@ -193,6 +194,126 @@ function run_sim(params; num_cells = 128, perturbation_scale = 1.0)
     return het.run_simulation(config, sim)
 end
 
+function frame_from_dict(frame, config)
+
+    species_dict = Dict(
+        prop.gas.short_name => prop.gas for prop in config.propellants
+    )
+
+    n = length(frame["Tev"])
+
+    neutrals = het.OrderedDict{Symbol, het.SpeciesState}()
+    for (sym, dict) in frame["neutrals"]
+        m = species_dict[sym].m
+        state = het.SpeciesState(n, m, 0)
+        state.n .= dict["n"]
+        state.nu .= dict["nu"]
+        state.u .= dict["u"]
+        neutrals[sym] = state
+    end
+
+    ions = het.OrderedDict{Symbol, Vector{het.SpeciesState}}()
+    for (sym, arr) in frame["ions"]
+        vec = het.SpeciesState[]
+        for (Z, dict) in enumerate(arr)
+            m = species_dict[sym].m
+            state = het.SpeciesState(n, m, Z)
+            state.n .= dict["n"]
+            state.nu .= dict["nu"]
+            state.u .= dict["u"]
+            push!(vec, state)
+        end
+        ions[sym] = vec
+    end
+
+
+    Id = frame["discharge_current"]
+    ue = frame["ue"]
+    ne = frame["ne"]
+    je = -het.e .* ne .* ue
+    ji = Id .- je
+
+    nu_an = frame["nu_anom"]
+    nu_class = frame["nu_class"]
+    nu_e = nu_class .+ nu_an
+
+    A_ch = het.channel_area(config.thruster)
+
+    return het.Frame(
+        neutrals=neutrals,
+        ions=ions,
+        B = frame["B"],
+        ne = frame["ne"],
+        ue = frame["ue"],
+        ji = ji,
+        E = frame["E"],
+        Tev = frame["Tev"],
+        pe = frame["pe"],
+        grad_pe = frame["grad_pe"],
+        potential = frame["potential"],
+        mobility = frame["mobility"],
+        nu_an = nu_an,
+        nu_en = frame["nu_en"],
+        nu_ei = frame["nu_ei"],
+        nu_wall = zeros(n),
+        nu_class = nu_class,
+        nu_iz = zeros(n),
+        nu_ex = zeros(n),
+        nu_e = nu_e,
+        channel_area = ones(n) .* A_ch,
+        dA_dz = zeros(n),
+        tan_div_angle = zeros(n),
+        anom_variables = [zeros(n)],
+        anom_multiplier = fill(0.0),
+        discharge_current = fill(Id),
+        dt = fill(0.0),
+    )
+end
+
+function sim_from_json(json_file)
+    contents = JSON3.read(read(json_file))
+    config = het.deserialize(het.Config, contents["input"]["config"])
+    simparams = het.deserialize(het.SimParams, contents["input"]["simulation"])
+    postprocess = het.deserialize(het.Postprocess, contents["input"]["postprocess"])
+    output = contents["output"]
+
+    error = output["error"]
+    retcode = Symbol(output["retcode"])
+
+    grid = het.generate_grid(simparams.grid, config.thruster.geometry, config.domain)
+
+    times = Float64[]
+    frames = het.Frame[]
+
+    if haskey(output, "frames")
+        for frame_dict in output["frames"]
+            push!(frames, frame_from_dict(frame_dict, config))
+            push!(times, frame["t"])
+        end
+    else
+        @assert(haskey(output, "average"))
+        avg = output["average"]
+        push!(frames, frame_from_dict(avg, config))
+        push!(times, avg["t"])
+    end
+
+    return het.Solution(times, frames, grid, config, simparams, postprocess, retcode, error)
+end
+
+function process_jsons(dir, output_dir)
+    files = readdir(dir, join=true)
+
+    mkpath(output_dir)
+
+    @showprogress for file in files
+        output_file = joinpath(output_dir, splitpath(file)[end])
+        sim = sim_from_json(file)
+        if sim.retcode == :success
+            save_sim(output_file, sim)
+        end
+    end 
+end
+
 """
 save_sim(sim, params; avg_start_time = 5e-4)
 
@@ -205,9 +326,43 @@ function save_sim(sim, params = nothing; avg_start_time = 5e-4)
         params = get_params(sim)
     end
 
-    avg = het.time_average(sim, avg_start_time)
+    avg = if length(sim.frames) > 1
+        het.time_average(sim, avg_start_time)
+    else
+        sim
+    end
+
     N = length(avg[:z])
     inds = 2:N-1
+
+    ui = avg[:ui][]
+    ncharge = size(ui)[1]
+
+    ni = avg[:ni][]
+
+    ui_2 = if ncharge >= 2 
+        ui[2, inds] .|> Float32
+    else
+        zeros(Float32, N-2)
+    end
+
+    ui_3 = if ncharge >= 3
+        ui[3, inds] .|> Float32
+    else
+        zeros(Float32, N-2)
+    end
+
+    ni_2 = if ncharge >= 2 
+        ni[2, inds] .|> Float32
+    else
+        zeros(Float32, N-2)
+    end
+
+    ni_3 = if ncharge >= 3
+        ni[3, inds] .|> Float32
+    else
+        zeros(Float32, N-2)
+    end
 
     out_dict = Dict(
         :space => Dict(
@@ -217,13 +372,13 @@ function save_sim(sim, params = nothing; avg_start_time = 5e-4)
             :E => avg[:E][][inds] .|> Float32,
             :phi => avg[:potential][][inds] .|> Float32,
             :ue => avg[:ue][][inds] .|> Float32,
-            :ui_1 => avg[:ui][][1, inds] .|> Float32,
-            :ui_2 => avg[:ui][][2, inds] .|> Float32,
-            :ui_3 => avg[:ui][][3, inds] .|> Float32,
+            :ui_1 => ui[1, inds] .|> Float32,
+            :ui_2 => ui_2,
+            :ui_3 => ui_3,
             :ne => avg[:ne][][inds] .|> Float32,
-            :ni_1 => avg[:ni][][1, inds] .|> Float32,
-            :ni_2 => avg[:ni][][2, inds] .|> Float32,
-            :ni_3 => avg[:ni][][3, inds] .|> Float32,
+            :ni_1 => ni[1, inds] .|> Float32,
+            :ni_2 => ni_2,
+            :ni_3 => ni_3,
             :nn => avg[:nn][][inds] .|> Float32,
             :Tev => avg[:Tev][][inds] .|> Float32,
             :pe => avg[:pe][][inds] .|> Float32,

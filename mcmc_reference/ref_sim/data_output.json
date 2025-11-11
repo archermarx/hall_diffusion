@@ -471,7 +471,7 @@
         "postprocess": {
             "output_file": "data_fine.json",
             "average_start_time": 0.0005,
-            "save_time_resolved": false
+            "save_time_resolved": true
         }
     },
     "output": {

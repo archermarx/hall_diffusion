@@ -48,10 +48,10 @@ function load_single_sim(file; include_timevarying=false)
 
     # Fix some issues in the input data.
     # 1. The thrust and current cannot be negative.
-    const I_MAX = 150.0   # A
-    const I_MIN = 1.0e-3    # A
-    const T_MAX = 10      # N
-    const T_MIN = 1.0e-3    # N
+    I_MAX = 150.0   # A
+    I_MIN = 1.0e-3    # A
+    T_MAX = 10      # N
+    T_MIN = 1.0e-3    # N
 
     I_itp = max.(I_itp, I_MIN)
     T_itp = max.(T_itp, T_MIN)
