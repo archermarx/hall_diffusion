@@ -13,7 +13,8 @@ from tqdm import tqdm
 
 # Our deps
 from utils.thruster_data import ThrusterPlotter1D, ThrusterDataset
-from models.edm2 import Denoiser
+import models.edm
+import models.edm2
 
 CHECKPOINT = Path("checkpoint.pth.tar")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -79,10 +80,8 @@ class EDMDiffusionProcess:
         (batch_size, width, height) = x.shape
 
         grad = torch.full_like(x, 0.0, device=x.device)
-        #process_stddev = torch.norm(deriv) * t / (width * height)
-
-        #obs_stddev = 0.01
-        #obs_variance = obs_stddev**2
+        #process_variance = t**2 / (t**2 + 1)
+        process_variance = 0.0
 
         for b in range(batch_size):
             batch_x0 = x[b, ...]
@@ -92,7 +91,7 @@ class EDMDiffusionProcess:
                 ims[b, ...],
                 batch_x0,
                 masks[b, ...],
-                obs_variance=obs_variance, #+ process_stddev**2,
+                obs_variance=obs_variance + process_variance,
                 pde_strength=pde_strength,
             )
             loss_obs.backward()
@@ -128,11 +127,11 @@ class EDMDiffusionProcess:
             d0 = -(x_0 - x_t) / t_prev
             x_1 = x_t + step_scale * 0.5 * dt * d0
             
-        # Guidance loss
+        # # Guidance loss
         # if obs_variance is not None:
         #      _obs_score = EDMDiffusionProcess.guidance_score(x_0, d0, t_prev, obs_variance, pde_strength, ims, masks)
-        #      x_1 += 0.5 * dt * t_prev * _obs_score
-        #      #x_1 -= 0.5 * _obs_score
+        #      #x_1 += 0.5 * dt * t_prev * _obs_score
+        #      x_1 -= 0.5 * _obs_score
 
         # Corrector step
         with torch.no_grad():
@@ -378,7 +377,11 @@ def infer(args):
     with open(args.config_file, "rb") as fp:
         config = tomllib.load(fp)
 
-    model = Denoiser.from_config(config["model"]).to(device)
+    architecture = config["model"].get("architecture")
+    if architecture == "edm2":
+        model = models.edm2.Denoiser.from_config(config["model"]).to(device)
+    elif architecture == "edm":
+        model = models.edm.Denoiser.from_config(config["model"]).to(device)
 
     dir_args = config["training"]["directories"]
     sampling_args = config["sampling"]

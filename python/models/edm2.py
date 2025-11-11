@@ -11,7 +11,6 @@
 # Model modified from above to use 1D convolutions.
 
 import torch
-import torch.nn as nn
 import numpy as np
 import tomllib
 
@@ -161,25 +160,6 @@ class MPConv(torch.nn.Module):
 
 # ----------------------------------------------------------------------------
 # U-Net encoder/decoder block with optional self-attention (Figure 21).
-
-class SelfAttention1d(nn.Module):
-    def __init__(self, out_channels, num_heads):
-        super().__init__()
-
-        # Multihead attention
-        self.attention_norm = nn.GroupNorm(8, out_channels)
-        self.attention = nn.MultiheadAttention(out_channels, num_heads, batch_first=True)
-
-    def forward(self, x):
-        out = x
-        batch_size, channels, w = out.shape
-        in_attn = out.reshape(batch_size, channels, w)
-        in_attn = self.attention_norm(in_attn)
-        in_attn = in_attn.transpose(1, 2)
-        out_attn, _ = self.attention(in_attn, in_attn, in_attn)
-        out = out_attn.transpose(1, 2).reshape(batch_size, channels, w)
-
-        return out
 
 
 class Block(torch.nn.Module):
@@ -354,10 +334,10 @@ class UNet(torch.nn.Module):
 class Denoiser(torch.nn.Module):
     def __init__(
         self,
-        resolution,  # Image resolution.
-        in_channels,  # Image channels.
+        resolution,     # Image resolution.
+        in_channels,    # Image channels.
         condition_dim,  # Class label dimensionality. 0 = unconditional.
-        data_std=0.5,  # Expected standard deviation of the training data.
+        data_std=0.5,   # Expected standard deviation of the training data.
         logvar_channels=128,
         **unet_kwargs,  # Keyword arguments for UNet.
     ):

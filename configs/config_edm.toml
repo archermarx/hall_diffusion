@@ -1,0 +1,94 @@
+[model]
+# Architecture
+architecture = "edm"
+# Number of up/down blocks at each level of the unet
+num_blocks = 2
+# Input channnels (number of rows in tensor)
+in_channels = 17
+# Channels at top level
+base_channels = 64
+# Increase in channel count at each level
+channel_mult = [1, 2, 3, 4, 5]
+# Standard deviation of the data
+# The model works best if the data is normalized to a std of 0.5 and this argument is left untouched
+data_std = 0.5
+# Dimension of class labels (in our case, the other random scalar parameters)
+label_dim = 6
+# The number of grid cells in the simulations
+resolution = 128
+
+#=======================================================================================================================
+
+[training]
+# Number of complete passes through the training data to complete
+epochs = 80
+# Training mini-batch size
+batch_size = 1024
+# Weight decay rate
+weight_decay = 0.00
+# Frequency in batches with which the model is tested on the validation set
+eval_freq = 100
+# Exponential moving average factor. Set to 1 to disable
+ema = 0.995
+# Whether to use automatic mixed precision (float16 where possible)
+use_amp = true
+# Log file name
+log_file = "training.dat"
+
+# Loss function configuration
+[training.loss]
+# log(mean) of noise levels to sample
+P_mean = -1.2
+# log(std) of noise levels to sample
+P_std = 1.2
+# Whether to include the heterosceladic uncertainty component (`logvar`) in the training loss.
+# NOTE: This means the loss can go negative. When plotting loss, we omit this component for ease of visualization.
+include_logvar = false
+
+# Optimizer configuration
+[training.optimizer]
+# Parameters for Adam optimizer
+adam_betas = [0.9, 0.999]
+# Initial learning rate
+lr = 1e-4
+# Minimum learning rate, if LR decay enabled
+min_lr = 1e-4
+# Epochs after which learning rate decay begins. Set to -1 to disable.
+lr_decay_start_epochs = -1
+# Weight decay rate
+weight_decay = 0.00
+
+# Directory configuration
+[training.directories]
+# Folder to save results in
+out_dir = "saved_models/edm_small"
+# Training data folder
+train_data_dir = "data/batch_3/normalized_all"
+# test data folder
+test_data_dir = "data/batch_3/normalized_test_small"
+
+# Checkpoint configuration. Checkpoints are saved to and loaded from `out_dir`/checkpoint.pth.tar
+[training.checkpoints]
+# Whether to load from a checkpoint
+load_checkpoint = true
+# Frequency in batches with which checkpoints are saved. Set to -1 to disable checkpointing
+checkpoint_save_freq = 20
+
+#=======================================================================================================================
+
+# Sampling configuration
+[sampling]
+# Which plasma properties should be held constant during sampling. An empty list gives unconditional samples.
+fields_to_keep = ["B", "ui_1"]
+# Observation std deviation
+observation_stddev = 1.0
+# Whether to use the saved weights of the EMA model instead of the base weights
+use_ema = true
+# Number of independent sample traces to generate
+num_samples = 64
+# Number of sampling steps to take
+num_steps = 1024
+# Output directory for generations. Will be created as a subdirectory of the main output directory
+out_dir = "samples"
+# File containing (normalized) simulation info to condition on. If not provided, we generate one randomly from the test dataset.
+condition_file = "mcmc_reference/normalized"

@@ -19,7 +19,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # Our dependencies
-from models.edm2 import Denoiser
+import models.edm2
+import models.edm
+
 from models.ema import EMA
 from utils import utils, thruster_data
 
@@ -81,7 +83,12 @@ class EDM2Loss:
         weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
         noise = torch.randn_like(images) * sigma
         noisy_im = images + noise
-        denoised, logvar = net(noisy_im, sigma, labels, return_logvar=True)
+
+        if include_logvar:
+            denoised, logvar = net(noisy_im, sigma, labels, return_logvar=True)
+        else:
+            denoised = net(noisy_im, sigma, labels)
+            logvar = torch.tensor(0.0)
 
         # Base loss
         base_loss = (denoised - images) ** 2
@@ -95,7 +102,7 @@ class EDM2Loss:
         diff_loss_1 = (diff_denoised - diff_images) ** 2
         diff_loss_1 = torch.nn.functional.pad(diff_loss_1, (0, 1))
 
-        # Second derivatative loss
+        # Second derivative loss
         diff2_denoised = torch.diff(diff_denoised)
         diff2_images = torch.diff(diff_images)
         diff_loss_2 = (diff2_denoised - diff2_images) ** 2
@@ -302,9 +309,10 @@ def train_one_batch(
         loss.backward()
 
     # Make sure gradients are finite
-    for param in model.parameters():
-        if param.grad is not None:
-            torch.nan_to_num(param.grad, nan=0, posinf=0, neginf=0, out=param.grad)
+    # For some reason, this causes strange training dynamics (stair-stepping, grad norms approachz ero)
+    # for param in model.parameters():
+    #     if param.grad is not None:
+    #         torch.nan_to_num(param.grad, nan=0, posinf=0, neginf=0, out=param.grad)
 
     # Step optimizer and EMA
     if use_amp:
@@ -368,7 +376,12 @@ def train(args):
     # ---------------------------------------------
     # Model configuration
     # Load model from config file and print some summary statistics
-    model = Denoiser.from_config(config["model"]).to(DEVICE)
+    architecture = config["model"].get("architecture", "edm2")
+    if architecture == "edm2":
+        model = models.edm2.Denoiser.from_config(config["model"]).to(DEVICE)
+    else:
+        model = models.edm.Denoiser.from_config(config["model"]).to(DEVICE)
+
     print(
         "Number of parameters = ",
         sum(p.numel() for p in model.parameters() if p.requires_grad),
@@ -445,7 +458,8 @@ def train(args):
             "learning_rate",
         ]
     )
-    if log_file.exists() and load_checkpoint:
+
+    if log_file.exists() and load_checkpoint and os.path.getsize(log_file) > len(header)+1:
         log_file_contents = np.genfromtxt(log_file, skip_header=1, delimiter=",")
         num_examples = list(log_file_contents[:, 0].astype(int))
         example_idx = num_examples[-1]
@@ -457,8 +471,6 @@ def train(args):
         grad_norms = list(log_file_contents[:, 6])
         learning_rates = list(log_file_contents[:, 7])
     else:
-        with open(log_file, "w") as fd:
-            print(header, file=fd)
         num_examples = []
         example_idx = -1
         batch_idx = -1
@@ -524,7 +536,11 @@ def train(args):
             ]
             grad_norm = torch.concat(grads).norm().numpy()
             if not np.isfinite(grad_norm):
-                print(f"Non-finite grad norm at {grad_norm}")
+                # Without the grad checks, we still hit this occasionally.
+                # Despite that things seem to keep chugging along.
+                # Encountering these occasional non-finite gradients must have been the cause of the stair-steps
+                print(f"Non-finite grad norm: {grad_norm}")
+
             grad_norms.append(grad_norm)
 
             # Exit on encountering a non-finite batch loss
@@ -575,6 +591,10 @@ def train(args):
 
             # Update log file
             with open(log_file, "a") as fd:
+                if len(num_examples) == 1:
+                    # Print the header
+                    print(header, file=fd)
+                    
                 row = f"{example_idx},{batch_idx},{epoch_idx},{batch_loss},{val_loss},{ema_loss},{grad_norm},{lr}"
                 print(row, file=fd)
 
