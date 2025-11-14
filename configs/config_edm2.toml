@@ -7,6 +7,8 @@ num_blocks = 2
 in_channels = 17
 # Channels at top level
 base_channels = 64
+# Size of convolution kernel
+kernel_width = 5
 # Increase in channel count at each level
 channel_mult = [1, 2, 3, 4, 5]
 # Standard deviation of the data
@@ -61,7 +63,7 @@ weight_decay = 0.00
 # Directory configuration
 [training.directories]
 # Folder to save results in
-out_dir = "saved_models/edm2_small_old"
+out_dir = "saved_models/edm2_small"
 # Training data folder
 train_data_dir = "data/batch_3/normalized_all"
 # test data folder

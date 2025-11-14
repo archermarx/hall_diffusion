@@ -176,6 +176,7 @@ class Block(torch.nn.Module):
         res_balance=0.3,  # Balance between main branch (0) and residual branch (1).
         attn_balance=0.3,  # Balance between main branch (0) and self-attention (1).
         clip_act=256,  # Clip output activations. None = do not clip.
+        kernel_width=3,
     ):
         super().__init__()
         self.out_channels = out_channels
@@ -187,9 +188,9 @@ class Block(torch.nn.Module):
         self.attn_balance = attn_balance
         self.clip_act = clip_act
         self.emb_gain = torch.nn.Parameter(torch.zeros([]))
-        self.conv_res0 = MPConv(out_channels if flavor == "enc" else in_channels, out_channels, kernel=[3])
+        self.conv_res0 = MPConv(out_channels if flavor == "enc" else in_channels, out_channels, kernel=[kernel_width])
         self.emb_linear = MPConv(emb_channels, out_channels, kernel=[])
-        self.conv_res1 = MPConv(out_channels, out_channels, kernel=[3])
+        self.conv_res1 = MPConv(out_channels, out_channels, kernel=[kernel_width])
         self.conv_skip = MPConv(in_channels, out_channels, kernel=[1]) if in_channels != out_channels else None
         self.attn_qkv = MPConv(out_channels, out_channels * 3, kernel=[1]) if self.num_heads != 0 else None
         self.attn_proj = MPConv(out_channels, out_channels, kernel=[1]) if self.num_heads != 0 else None

@@ -7,6 +7,8 @@ num_blocks = 2
 in_channels = 17
 # Channels at top level
 base_channels = 64
+# Convolutional kernel width
+kernel_width=3
 # Increase in channel count at each level
 channel_mult = [1, 2, 3, 4, 5]
 # Standard deviation of the data
