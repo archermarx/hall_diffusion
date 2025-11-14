@@ -247,10 +247,10 @@ def save_samples(
         condition_vec = condition_vec.cpu().numpy()
     
     # write to file
-    if os.path.exists(path_tensors):
-        shutil.rmtree(path_tensors)
+    #if os.path.exists(path_tensors):
+    #    shutil.rmtree(path_tensors)
 
-    os.makedirs(path_tensors)
+    os.makedirs(path_tensors, exist_ok=True)
     for i in range(num):
         file = Path(path_tensors) / f"{uuid.uuid4()}.npz"
         tens = ims[i, :].cpu().numpy()

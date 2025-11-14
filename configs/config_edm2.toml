@@ -61,7 +61,7 @@ weight_decay = 0.00
 # Directory configuration
 [training.directories]
 # Folder to save results in
-out_dir = "saved_models/edm2_small"
+out_dir = "saved_models/edm2_small_old"
 # Training data folder
 train_data_dir = "data/batch_3/normalized_all"
 # test data folder
@@ -79,15 +79,15 @@ checkpoint_save_freq = 20
 # Sampling configuration
 [sampling]
 # Which plasma properties should be held constant during sampling. An empty list gives unconditional samples.
-fields_to_keep = ["B", "ui_1"]
+fields_to_keep = ["B", "ui_1", "Tev"]
 # Observation std deviation
 observation_stddev = 1.5
 # Whether to use the saved weights of the EMA model instead of the base weights
 use_ema = true
 # Number of independent sample traces to generate
-num_samples = 256
+num_samples = 128
 # Number of sampling steps to take
-num_steps = 4096
+num_steps = 1024
 # Output directory for generations. Will be created as a subdirectory of the main output directory
 out_dir = "samples"
 # File containing (normalized) simulation info to condition on. If not provided, we generate one randomly from the test dataset.
