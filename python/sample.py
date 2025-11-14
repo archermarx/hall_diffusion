@@ -4,6 +4,8 @@ import math
 import os
 from pathlib import Path
 import tomllib
+import uuid
+import shutil
 
 # External deps
 import matplotlib.pyplot as plt
@@ -119,7 +121,9 @@ class EDMDiffusionProcess:
         dt = (t - t_prev)
         t_mid = 0.5 * (t + t_prev)
 
-        step_scale = 1.1
+        t_max_guidance = 100
+
+        step_scale = 1.05
 
         # Predictor step
         with torch.no_grad():
@@ -127,11 +131,11 @@ class EDMDiffusionProcess:
             d0 = -(x_0 - x_t) / t_prev
             x_1 = x_t + step_scale * 0.5 * dt * d0
             
-        # # Guidance loss
-        # if obs_variance is not None:
-        #      _obs_score = EDMDiffusionProcess.guidance_score(x_0, d0, t_prev, obs_variance, pde_strength, ims, masks)
-        #      #x_1 += 0.5 * dt * t_prev * _obs_score
-        #      x_1 -= 0.5 * _obs_score
+        # Guidance loss
+        if obs_variance is not None and t_mid < t_max_guidance:
+             _obs_score = EDMDiffusionProcess.guidance_score(x_0, d0, t_prev, obs_variance, pde_strength, ims, masks)
+             #x_1 += 0.5 * dt * t_prev * _obs_score
+             x_1 -= 0.5 * _obs_score
 
         # Corrector step
         with torch.no_grad():
@@ -140,7 +144,7 @@ class EDMDiffusionProcess:
             x_1 = x_t + step_scale * dt * d1 # 0.5 * (d0 + d1)
 
         # Guidance loss
-        if obs_variance is not None:
+        if obs_variance is not None and t_mid < t_max_guidance:
             _obs_score = EDMDiffusionProcess.guidance_score(x_0, d1, t_mid, obs_variance, pde_strength, ims, masks)
             #x_1 += dt * t_mid * _obs_score
             x_1 -= _obs_score
@@ -221,18 +225,37 @@ class EDMDiffusionProcess:
         return output
 
 
-def save_ims(
+def save_samples(
     ims,
     rows,
     data_dir: Path | str,
     path_2d: Path | str,
     path_1d: Path | str = "test.png",
+    path_tensors: Path |str = "samples",
     num_1d_samples=4,
+    condition_vec = None,
     real: torch.Tensor | None = None,
     obs_locations=None,
     obs_fields=None,
 ):
     num = ims.shape[0]
+
+
+    if condition_vec is None:
+        condition_vec = np.zeros(1)
+    else:
+        condition_vec = condition_vec.cpu().numpy()
+    
+    # write to file
+    if os.path.exists(path_tensors):
+        shutil.rmtree(path_tensors)
+
+    os.makedirs(path_tensors)
+    for i in range(num):
+        file = Path(path_tensors) / f"{uuid.uuid4()}.npz"
+        tens = ims[i, :].cpu().numpy()
+        np.savez(file, data = tens, params = condition_vec) 
+    
     cols = math.ceil(num / rows)
     fig = plt.figure(constrained_layout=True)
 
@@ -294,7 +317,7 @@ def generate_conditionally(
         fields_to_keep = ["ui_1", "B"]
 
     # Observation locations (grid point indices)
-    obs_locations = np.arange(0, 128)
+    obs_locations = np.arange(0, 128, 1)
 
     # Uncomment to use random seed
     seed = torch.randint(0, 1_000_000_000, (1,))[0]
@@ -316,8 +339,7 @@ def generate_conditionally(
         _, data_vec, data = dataset[0]
     
     indices_to_keep = [dataset.fields[field] for field in fields_to_keep]
-    data_params = dataset.vec_to_params(data_vec)
-    condition_vec = torch.tensor(dataset.params_to_vec(data_params), device=device)
+    condition_vec = torch.tensor(data_vec, device=device)
 
     data = torch.tensor(data, device=device)
     (num_channels, resolution) = data.shape
@@ -331,6 +353,9 @@ def generate_conditionally(
     )
     mask = torch.zeros((num_samples, num_channels, resolution), device=device)
     for i in indices_to_keep:
+        if i == 0:
+            mask[:, i, :] = 1.0
+            continue
         mask[:, i, obs_locations] = 1.0
 
     # Assign observation variances
@@ -360,12 +385,14 @@ def generate_conditionally(
     sample_dir = Path(model_dir) / out_dir
     os.makedirs(sample_dir, exist_ok=True)
 
-    save_ims(
+    save_samples(
         final,
         rows=4,
         data_dir=Path(data_dir),
         path_2d=sample_dir / "conditional_2d.png",
         path_1d=sample_dir / "conditional_1d.png",
+        path_tensors = sample_dir / "tensors",
+        condition_vec = condition_vec,
         num_1d_samples=num_samples,
         real=data,
         obs_locations=obs_locations,
