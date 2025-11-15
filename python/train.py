@@ -32,11 +32,15 @@ if torch.backends.mps.is_available():
 elif torch.cuda.is_available():
     # NVIDIA CUDA (or AMD ROCM)
     DEVICE = torch.device("cuda")
+    print(f"Number of GPUs: {torch.cuda.device_count()}")
+    print(f"Current GPU name: {torch.cuda.get_device_name(0)}")
 elif torch.xpu.is_available():
     # Intel XPU
     DEVICE = torch.device("xpu")
 else:
     DEVICE = torch.device("cpu")
+
+print(f"Using device {DEVICE}")
 
 # Set RNG seed and save initial seeded RNG state
 torch.manual_seed(10)
@@ -48,6 +52,7 @@ ROOT_DIR = SCRIPT_DIR / ".."
 
 # Noise levels at which we plot progress during training
 NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 1.0]
+
 
 # ----------------------------------------------------------------------------
 # Learning rate decay schedule used in the paper "Analyzing and Improving the Training Dynamics of Diffusion Models". (EDM2)
@@ -71,7 +76,15 @@ class EDM2Loss:
         self.P_std = P_std
         self.sigma_data = sigma_data
 
-    def __call__(self, net, images, noise_std=None, labels=None, include_logvar=False):
+    def __call__(
+        self,
+        net,
+        images,
+        noise_std=None,
+        labels=None,
+        include_logvar=False,
+        deriv_h=1.0,
+    ):
         rnd_normal = torch.randn([images.shape[0], 1, 1], device=images.device)
 
         if noise_std is None:
@@ -93,7 +106,6 @@ class EDM2Loss:
         base_loss = (denoised - images) ** 2
 
         # "Step size": scale for diff loss
-        h = 1/128
 
         # Derivative loss
         diff_denoised = torch.diff(denoised)
@@ -107,9 +119,11 @@ class EDM2Loss:
         diff_loss_2 = (diff2_denoised - diff2_images) ** 2
         diff_loss_2 = torch.nn.functional.pad(diff_loss_2, (1, 1))
 
-        total_weight = 1 + 1 / h + 1 / h**2
+        total_weight = 1 + 1 / deriv_h + 1 / deriv_h**2
         loss = (
-            weight * (base_loss + diff_loss_1 / h + diff_loss_2 / h**2) / total_weight
+            weight
+            * (base_loss + diff_loss_1 / deriv_h + diff_loss_2 / deriv_h**2)
+            / total_weight
         )
         base_loss = loss.mean().item()
 
@@ -131,6 +145,7 @@ def calc_loss(
     data_std=0.5,
     condition_vector=None,
     include_logvar=False,
+    deriv_h=1.0,
 ):
     loss_fn = EDM2Loss(P_mean, P_std, data_std)
     return loss_fn(
@@ -139,6 +154,7 @@ def calc_loss(
         noise_std=noise_std,
         labels=condition_vector,
         include_logvar=include_logvar,
+        deriv_h=deriv_h,
     )
 
 
@@ -340,6 +356,7 @@ def train(args):
     evaluation_iters = train_args["eval_freq"]
     use_amp = train_args.get("use_amp", True)
     ema_factor = train_args["ema"]
+    load_workers = train_args.get("load_workers", 2)
 
     # ---------------------------------------------
     # Directory configuration
@@ -361,7 +378,7 @@ def train(args):
         shuffle=True,
         pin_memory=pin,
         pin_memory_device=DEVICE.type,
-        num_workers=2,
+        num_workers=load_workers,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -369,7 +386,7 @@ def train(args):
         shuffle=False,
         pin_memory=pin,
         pin_memory_device=DEVICE.type,
-        num_workers=2,
+        num_workers=load_workers,
     )
 
     # ---------------------------------------------
@@ -458,7 +475,11 @@ def train(args):
         ]
     )
 
-    if log_file.exists() and load_checkpoint and os.path.getsize(log_file) > len(header)+1:
+    if (
+        log_file.exists()
+        and load_checkpoint
+        and os.path.getsize(log_file) > len(header) + 1
+    ):
         log_file_contents = np.genfromtxt(log_file, skip_header=1, delimiter=",")
         num_examples = list(log_file_contents[:, 0].astype(int))
         example_idx = num_examples[-1]
@@ -593,7 +614,7 @@ def train(args):
                 if len(num_examples) == 1:
                     # Print the header
                     print(header, file=fd)
-                    
+
                 row = f"{example_idx},{batch_idx},{epoch_idx},{batch_loss},{val_loss},{ema_loss},{grad_norm},{lr}"
                 print(row, file=fd)
 
