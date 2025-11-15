@@ -172,7 +172,7 @@ class Block(torch.nn.Module):
         resample_mode="keep",  # Resampling: 'keep', 'up', or 'down'.
         resample_filter=[1, 1],  # Resampling filter.
         attention=False,  # Include self-attention?
-        channels_per_head=32,  # Number of channels per attention head.
+        channels_per_head=64,  # Number of channels per attention head.
         res_balance=0.3,  # Balance between main branch (0) and residual branch (1).
         attn_balance=0.3,  # Balance between main branch (0) and self-attention (1).
         clip_act=256,  # Clip output activations. None = do not clip.

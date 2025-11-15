@@ -8,7 +8,7 @@ in_channels = 17
 # Channels at top level
 base_channels = 64
 # Size of convolution kernel
-kernel_width = 5
+kernel_width = 3
 # Increase in channel count at each level
 channel_mult = [1, 2, 3, 4, 5]
 # Standard deviation of the data
@@ -18,6 +18,8 @@ data_std = 0.5
 label_dim = 6
 # The number of grid cells in the simulations
 resolution = 128
+# Channels per attention head
+channels_per_head = 32
 
 #=======================================================================================================================
 
@@ -25,7 +27,7 @@ resolution = 128
 # Number of complete passes through the training data to complete
 epochs = 200
 # Training mini-batch size
-batch_size = 1024
+batch_size = 2048
 # Weight decay rate
 weight_decay = 0.00
 # Frequency in batches with which the model is tested on the validation set
@@ -63,7 +65,7 @@ weight_decay = 0.00
 # Directory configuration
 [training.directories]
 # Folder to save results in
-out_dir = "saved_models/edm2_small"
+out_dir = "saved_models/edm2_kernel_5"
 # Training data folder
 train_data_dir = "data/batch_3/normalized_all"
 # test data folder

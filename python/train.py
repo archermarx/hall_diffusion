@@ -39,7 +39,7 @@ else:
     DEVICE = torch.device("cpu")
 
 # Set RNG seed and save initial seeded RNG state
-torch.manual_seed(100)
+torch.manual_seed(10)
 start_state = torch.get_rng_state()
 
 # Get directory in which script is being run as well as the root directory of the project.
@@ -48,7 +48,6 @@ ROOT_DIR = SCRIPT_DIR / ".."
 
 # Noise levels at which we plot progress during training
 NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 1.0]
-
 
 # ----------------------------------------------------------------------------
 # Learning rate decay schedule used in the paper "Analyzing and Improving the Training Dynamics of Diffusion Models". (EDM2)
@@ -94,7 +93,7 @@ class EDM2Loss:
         base_loss = (denoised - images) ** 2
 
         # "Step size": scale for diff loss
-        h = 1.0
+        h = 1/128
 
         # Derivative loss
         diff_denoised = torch.diff(denoised)
@@ -309,7 +308,7 @@ def train_one_batch(
         loss.backward()
 
     # Make sure gradients are finite
-    # For some reason, this causes strange training dynamics (stair-stepping, grad norms approachz ero)
+    # For some reason, this causes strange training dynamics (stair-stepping, grad norms approach zero)
     # for param in model.parameters():
     #     if param.grad is not None:
     #         torch.nan_to_num(param.grad, nan=0, posinf=0, neginf=0, out=param.grad)
