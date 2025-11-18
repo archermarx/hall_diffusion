@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import tomllib
 import uuid
-import shutil
 
 # External deps
 import matplotlib.pyplot as plt
@@ -23,9 +22,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 VAL_DATASET = "data/val_large"
 
+
 def observation_loss(y, x, mask, obs_variance):
-    diff = (y - x)**2 / obs_variance
+    diff = (y - x) ** 2 / obs_variance
     return torch.sum(mask * diff) / 2
+
 
 def pde_loss(x, strength):
     loss = (0.0 * x).mean()
@@ -33,12 +34,13 @@ def pde_loss(x, strength):
     return strength * loss
 
 
-def guidance_loss(y, x, mask, obs_variance = 0.0, pde_strength=0.0, **kwargs):
+def guidance_loss(y, x, mask, obs_variance=0.0, pde_strength=0.0, **kwargs):
     # weighted average of observation and PDE losses
     _obs_loss = observation_loss(x, y, mask, obs_variance)
     _pde_loss = pde_loss(x, pde_strength, **kwargs)
 
     return _obs_loss + _pde_loss
+
 
 class EDMDiffusionProcess:
     def __init__(
@@ -76,19 +78,19 @@ class EDMDiffusionProcess:
             steps /= torch.clamp(timesteps, 1, torch.inf)
 
         return steps
-    
+
     @staticmethod
     def guidance_score(x, deriv, t, obs_variance, pde_strength, ims, masks):
         (batch_size, width, height) = x.shape
 
         grad = torch.full_like(x, 0.0, device=x.device)
-        #process_variance = t**2 / (t**2 + 1)
+        # process_variance = t**2 / (t**2 + 1)
         process_variance = 0.0
 
         for b in range(batch_size):
             batch_x0 = x[b, ...]
             batch_x0.requires_grad = True
-            
+
             loss_obs = guidance_loss(
                 ims[b, ...],
                 batch_x0,
@@ -97,10 +99,9 @@ class EDMDiffusionProcess:
                 pde_strength=pde_strength,
             )
             loss_obs.backward()
-            grad[b,...] = batch_x0.grad
-        
-        return grad
+            grad[b, ...] = batch_x0.grad
 
+        return grad
 
     def reverse_step(
         self,
@@ -113,40 +114,43 @@ class EDMDiffusionProcess:
         condition_vec=None,
         obs_variance=None,
         pde_strength=0.0,
+        step_scale=1.0,
     ):
         (b, c, w) = x_t.shape
 
         ones = torch.ones((b, 1, 1), device=device)
 
-        dt = (t - t_prev)
+        dt = t - t_prev
         t_mid = 0.5 * (t + t_prev)
 
         t_max_guidance = 100
-
-        step_scale = 1.05
 
         # Predictor step
         with torch.no_grad():
             x_0 = denoiser(x_t, t_prev * ones, condition_vector=condition_vec)
             d0 = -(x_0 - x_t) / t_prev
             x_1 = x_t + step_scale * 0.5 * dt * d0
-            
+
         # Guidance loss
         if obs_variance is not None and t_mid < t_max_guidance:
-             _obs_score = EDMDiffusionProcess.guidance_score(x_0, d0, t_prev, obs_variance, pde_strength, ims, masks)
-             #x_1 += 0.5 * dt * t_prev * _obs_score
-             x_1 -= 0.5 * _obs_score
+            _obs_score = EDMDiffusionProcess.guidance_score(
+                x_0, d0, t_prev, obs_variance, pde_strength, ims, masks
+            )
+            # x_1 += 0.5 * dt * t_prev * _obs_score
+            x_1 -= 0.5 * _obs_score
 
         # Corrector step
         with torch.no_grad():
             x_0 = denoiser(x_1, t_mid * ones, condition_vector=condition_vec)
             d1 = -(x_0 - x_1) / t_mid
-            x_1 = x_t + step_scale * dt * d1 # 0.5 * (d0 + d1)
+            x_1 = x_t + step_scale * dt * d1  # 0.5 * (d0 + d1)
 
         # Guidance loss
         if obs_variance is not None and t_mid < t_max_guidance:
-            _obs_score = EDMDiffusionProcess.guidance_score(x_0, d1, t_mid, obs_variance, pde_strength, ims, masks)
-            #x_1 += dt * t_mid * _obs_score
+            _obs_score = EDMDiffusionProcess.guidance_score(
+                x_0, d1, t_mid, obs_variance, pde_strength, ims, masks
+            )
+            # x_1 += dt * t_mid * _obs_score
             x_1 -= _obs_score
 
         return x_1
@@ -161,6 +165,7 @@ class EDMDiffusionProcess:
         condition_vec=None,
         obs_variance=None,
         pde_strength=0.0,
+        step_scale=1.0,
     ):
         """
         Perform iterative denoising to generate a 1D image from Gaussian noise using a provided denoising model
@@ -209,6 +214,7 @@ class EDMDiffusionProcess:
                 condition_vec=condition_vec,
                 obs_variance=obs_variance,
                 pde_strength=pde_strength,
+                step_scale=step_scale,
             )
 
             # Add masked and noised reference image at the same noise level
@@ -231,31 +237,30 @@ def save_samples(
     data_dir: Path | str,
     path_2d: Path | str,
     path_1d: Path | str = "test.png",
-    path_tensors: Path |str = "samples",
+    path_tensors: Path | str = "samples",
     num_1d_samples=4,
-    condition_vec = None,
+    condition_vec=None,
     real: torch.Tensor | None = None,
     obs_locations=None,
     obs_fields=None,
 ):
     num = ims.shape[0]
 
-
     if condition_vec is None:
         condition_vec = np.zeros(1)
     else:
         condition_vec = condition_vec.cpu().numpy()
-    
+
     # write to file
-    #if os.path.exists(path_tensors):
+    # if os.path.exists(path_tensors):
     #    shutil.rmtree(path_tensors)
 
     os.makedirs(path_tensors, exist_ok=True)
     for i in range(num):
         file = Path(path_tensors) / f"{uuid.uuid4()}.npz"
         tens = ims[i, :].cpu().numpy()
-        np.savez(file, data = tens, params = condition_vec) 
-    
+        np.savez(file, data=tens, params=condition_vec)
+
     cols = math.ceil(num / rows)
     fig = plt.figure(constrained_layout=True)
 
@@ -286,9 +291,16 @@ def save_samples(
 
     plotter = ThrusterPlotter1D(dataset, sims, obs_locations=obs_locations)
     plotter.colors = ["black"] * num_1d_samples + ["red"]
-    plotter.alphas = [0.25/np.cbrt(num_1d_samples)] * (num_1d_samples) + [1.0]
+    plotter.alphas = [0.25 / np.cbrt(num_1d_samples)] * (num_1d_samples) + [1.0]
 
-    fields_to_plot = ["ui_1", "Tev", "ne", "inverse_hall", "phi", "E"] #, "nn", "pe", "∇pe"]
+    fields_to_plot = [
+        "ui_1",
+        "Tev",
+        "ne",
+        "inverse_hall",
+        "phi",
+        "E",
+    ]  # , "nn", "pe", "∇pe"]
 
     fig, *_ = plotter.plot(
         fields_to_plot,
@@ -298,6 +310,7 @@ def save_samples(
         obs_locations=None,
     )
     fig.savefig(path_1d)
+
 
 def generate_conditionally(
     model,
@@ -309,15 +322,15 @@ def generate_conditionally(
     num_steps=128,
     observation_stddev=1.0,
     condition_file=None,
+    step_scale=1.0,
     **extras,
 ):
-
     # change these to determine what fields we should keep
     if fields_to_keep is None:
         fields_to_keep = ["ui_1", "B"]
 
     # Observation locations (grid point indices)
-    obs_locations = np.arange(0, 128, 1)
+    obs_locations = np.arange(0, 128, 10)
 
     # Uncomment to use random seed
     seed = torch.randint(0, 1_000_000_000, (1,))[0]
@@ -337,7 +350,7 @@ def generate_conditionally(
         # TODO: make ThrusterDataset take a list of files
         dataset = ThrusterDataset(condition_file)
         _, data_vec, data = dataset[0]
-    
+
     indices_to_keep = [dataset.fields[field] for field in fields_to_keep]
     condition_vec = torch.tensor(data_vec, device=device)
 
@@ -361,8 +374,8 @@ def generate_conditionally(
     # Assign observation variances
     obs_variance = torch.ones((num_channels, resolution), device=device)
     if isinstance(observation_stddev, list):
-        for (i, index) in enumerate(indices_to_keep):
-            obs_variance[index, :] = observation_stddev[i]**2
+        for i, index in enumerate(indices_to_keep):
+            obs_variance[index, :] = observation_stddev[i] ** 2
     else:
         obs_variance *= observation_stddev**2
 
@@ -378,6 +391,7 @@ def generate_conditionally(
         condition_vec=condition_vec,
         obs_variance=obs_variance,
         pde_strength=0.0,
+        step_scale=step_scale,
     )
 
     final = output[-1, ...]
@@ -391,8 +405,8 @@ def generate_conditionally(
         data_dir=Path(data_dir),
         path_2d=sample_dir / "conditional_2d.png",
         path_1d=sample_dir / "conditional_1d.png",
-        path_tensors = sample_dir / "tensors",
-        condition_vec = condition_vec,
+        path_tensors=sample_dir / "tensors",
+        condition_vec=condition_vec,
         num_1d_samples=num_samples,
         real=data,
         obs_locations=obs_locations,
