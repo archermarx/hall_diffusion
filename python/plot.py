@@ -13,6 +13,7 @@ parser.add_argument("--ref", type=Path)
 parser.add_argument("--num-mcmc", type=int, default=2**14)
 parser.add_argument("-o", "--output", type=str, default="_plt.png")
 parser.add_argument("-m", "--mode", choices=["traces", "quantiles"], default="quantiles")
+parser.add_argument("-f", "--fields", nargs='+', required=True)
 
 matplotlib.rcParams["text.usetex"] = True
 matplotlib.rcParams["font.size"] = 15
@@ -290,7 +291,8 @@ if __name__ == "__main__":
     x = np.linspace(0, 0.08, samples_generated.shape[-1]) / 0.025
 
     row_height = 2.3
-    fields = ["ui_1", "Tev", "E", "inv_hall", "phi", "ne", "nn"]
+    #fields = ["ui_1", "Tev", "E", "inv_hall", "phi", "ne", "nn"]
+    fields = args.fields
     nfields = len(fields)
 
     fig, axes = plt.subplots(
