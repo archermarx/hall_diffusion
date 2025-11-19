@@ -25,22 +25,7 @@ import models.edm
 from models.ema import EMA
 from utils import utils, thruster_data
 
-# Device setup
-if torch.backends.mps.is_available():
-    # Apple metal performance shaders
-    DEVICE = torch.device("mps")
-elif torch.cuda.is_available():
-    # NVIDIA CUDA (or AMD ROCM)
-    DEVICE = torch.device("cuda")
-    print(f"Number of GPUs: {torch.cuda.device_count()}")
-    print(f"Current GPU name: {torch.cuda.get_device_name(0)}")
-elif torch.xpu.is_available():
-    # Intel XPU
-    DEVICE = torch.device("xpu")
-else:
-    DEVICE = torch.device("cpu")
-
-print(f"Using device {DEVICE}")
+DEVICE = utils.get_device()
 
 # Set RNG seed and save initial seeded RNG state
 torch.manual_seed(10)
@@ -52,7 +37,6 @@ ROOT_DIR = SCRIPT_DIR / ".."
 
 # Noise levels at which we plot progress during training
 NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 1.0]
-
 
 # ----------------------------------------------------------------------------
 # Learning rate decay schedule used in the paper "Analyzing and Improving the Training Dynamics of Diffusion Models". (EDM2)

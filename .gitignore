@@ -6,3 +6,5 @@ data/
 saved_models/
 __pycache__
 gendata.out
+samples/
+*.png
