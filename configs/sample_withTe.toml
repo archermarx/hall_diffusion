@@ -1,20 +1,20 @@
 # Which plasma properties should be held constant during sampling. An empty list gives unconditional samples.
 fields_to_keep = ["B", "ui_1", "Tev"]
 # Observation std deviation
-observation_stddev = 1.0
+observation_stddev = 1.5
 # Number of independent sample traces to generate
-num_samples = 64
+num_samples = 2048
 # Batch size of sample generation. If not provided, we do a single batch
-batch_size = 64
+batch_size = 256
 # Number of sampling steps to take
 num_steps = 1024
 # File containing (normalized) simulation info to condition on. If not provided, we sample unconditionally
 condition_file = "mcmc_reference/ref_sim/normalized"
 # Which model to load (ema, best, last)
-model_type = "ema"
+model_type = "last"
 # Output directory for generations.
 out_dir = "samples/withTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale=1.00
+step_scale = 1.05
