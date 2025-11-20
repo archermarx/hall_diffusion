@@ -6,6 +6,7 @@ import os
 import shutil
 import uuid
 import math
+import bisect
 
 # Third-party deps
 import torch
@@ -24,6 +25,28 @@ parser.add_argument("config", type=str)
 
 DEVICE = torch.device("cpu")
 
+def build_observation_operator(dataset, observations):
+
+    num_channels = len(dataset.fields)
+    resolution = len(dataset.grid)
+
+    obs_matrix = torch.zeros(num_channels, resolution)
+    grid = dataset.grid
+
+    for (obs_field, obs_data) in observations.items():
+        ind = dataset.fields[obs_field]
+        loc = obs_data.get("locs", "all")
+
+        if loc == "all":
+            obs_matrix[ind, :] = 1.0
+        elif isinstance(loc, list):
+            for z in loc:
+                j = bisect.bisect_left(grid, z)
+                obs_matrix[ind, j] = z
+
+
+    return obs_matrix.unsqueeze(0)
+
 
 def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     inv_rho = 1 / exponent
@@ -35,7 +58,7 @@ def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     return timesteps
 
 
-def guidance_score(x, obs_variance, pde_strength, observations, masks):
+def guidance_score(x, obs_variance, pde_strength, observations, mask, dataset):
     (batch_size, _, _) = x.shape
 
     grad = torch.full_like(x, 0.0, device=x.device)
@@ -44,11 +67,10 @@ def guidance_score(x, obs_variance, pde_strength, observations, masks):
         batch_x0 = x[b, ...]
         batch_x0.requires_grad = True
 
-        obs = observations[b, ...]
-        mask = masks[b, ...]
+        x_denorm = dataset.denormalize_tensor(batch_x0.unsqueeze(0))
 
-        obs_loss = torch.sum(mask * ((obs - batch_x0) ** 2 / obs_variance)) / 2
-        pde_loss = pde_strength * (0.0 * batch_x0).mean()
+        obs_loss = torch.sum(mask * ((observations - x_denorm) ** 2 / obs_variance)) / 2
+        pde_loss = pde_strength * (0.0 * x_denorm).mean()
         total_loss = obs_loss + pde_loss
 
         total_loss.backward()
@@ -64,6 +86,7 @@ def reverse_step(
     t,
     ims,
     masks,
+    dataset,
     obs_variance=None,
     pde_strength=0.0,
     step_scale=1.0,
@@ -85,7 +108,7 @@ def reverse_step(
 
     # Guidance loss
     if obs_variance is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_0, obs_variance, pde_strength, ims, masks)
+        obs_score = guidance_score(x_0, obs_variance, pde_strength, ims, masks, dataset)
         # x_1 += 0.5 * dt * t_prev * obs_score
         x_1 -= 0.5 * obs_score
 
@@ -97,14 +120,14 @@ def reverse_step(
 
     # Guidance loss
     if obs_variance is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_0, obs_variance, pde_strength, ims, masks)
+        obs_score = guidance_score(x_0, obs_variance, pde_strength, ims, masks, dataset)
         # x_1 += dt * t_mid * obs_score
         x_1 -= obs_score
 
     return x_1
 
 
-def reverse(D, x, timesteps, im_masks=None, showprogress=False, **kwargs):
+def reverse(D, x, timesteps, dataset, im_masks=None, showprogress=False, **kwargs):
     """
     Perform iterative denoising to generate a 1D image from Gaussian noise using a provided denoising model
 
@@ -140,7 +163,7 @@ def reverse(D, x, timesteps, im_masks=None, showprogress=False, **kwargs):
             continue
 
         t_prev = timesteps[step_idx - 1]
-        x = reverse_step(D, x, t_prev, t, ims, masks, **kwargs)
+        x = reverse_step(D, x, t_prev, t, ims, masks, dataset, **kwargs)
         output[step_idx, ...] = x
 
     output[-1, ...] = x
@@ -148,45 +171,50 @@ def reverse(D, x, timesteps, im_masks=None, showprogress=False, **kwargs):
 
 
 def sample(model, num_samples, args):
-    # Get fields to keep
+    # Load sampling arguments
     num_steps = args.get("num_steps", 256)
     noise_min = args.get("noise_min", 0.002)
     noise_max = args.get("noise_max", 80)
     exponent = args.get("step_exponent", 7)
-    observation_stddev = args.get("observation_stddev", 1.0)
     step_scale = args.get("step_scale", 1.0)
 
-    # TODO: make ThrusterDataset take a list of files
-    dataset = ThrusterDataset(args["condition_file"])
+    # Load observations
+    obs_args = args["observation"]
+    obs_fields = obs_args["fields"]
+    obs_file = Path(obs_args["file"])
+    obs_stddev_default = obs_args.get("std_dev", 1.0)
+    obs_stddev = []
+
+    for _, field_args in obs_fields.items():
+        obs_stddev.append(field_args.get("std_dev", obs_stddev_default))
+
+    # Load data
+    dataset = ThrusterDataset(obs_file)
     _, data_vec, data = dataset[0]
     condition_vec = torch.tensor(data_vec, device=DEVICE)
+    data = torch.tensor(data, device=DEVICE).unsqueeze(0)
 
-    # Load data and tile along batch dimension for
-    data = torch.tensor(data, device=DEVICE)
-    (num_channels, resolution) = data.shape
-    data = data.unsqueeze(0).repeat(num_samples, 1, 1)
-
-    # Initial noise samples
-    xt = torch.randn((num_samples, num_channels, resolution), device=DEVICE) * noise_max
-    assert data.shape == xt.shape
+    # Tile data
+    (_, num_channels, resolution) = data.shape
+    data_denorm = dataset.denormalize_tensor(data)
 
     # Observation conditioning
-    obs_locations = np.arange(0, resolution, 1)
-    indices_to_keep = [dataset.fields[field] for field in args["fields_to_keep"]]
-    mask = torch.zeros((num_samples, num_channels, resolution), device=DEVICE)
-    for i in indices_to_keep:
-        if i == 0:
-            mask[:, i, :] = 1.0
-            continue
-        mask[:, i, obs_locations] = 1.0
+    mask = build_observation_operator(dataset, obs_fields).to(DEVICE)
 
     # Assign observation variances
     obs_variance = torch.ones((num_channels, resolution), device=DEVICE)
-    if isinstance(observation_stddev, list):
-        for i, index in enumerate(indices_to_keep):
-            obs_variance[index, :] = observation_stddev[i] ** 2
-    else:
-        obs_variance *= observation_stddev**2
+    indices_to_keep = [dataset.fields[field] for field in obs_fields]
+    for i, index in enumerate(indices_to_keep):
+        # Get field scale
+        data_field = data_denorm[0, index, :]
+        field_scale = 1 / resolution * torch.norm(data_field)
+        obs_std = obs_stddev[i] * field_scale
+        print(obs_std)
+        obs_variance[index, :] = obs_std**2
+
+
+    # Initial noise samples
+    xt = torch.randn((num_samples, num_channels, resolution), device=DEVICE) * noise_max
 
     # Load timesteps
     steps = edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent)
@@ -199,7 +227,8 @@ def sample(model, num_samples, args):
         D,
         xt,
         steps,
-        im_masks=(data, mask),
+        dataset,
+        im_masks=(data_denorm, mask),
         showprogress=True,
         obs_variance=obs_variance,
         pde_strength=0.0,

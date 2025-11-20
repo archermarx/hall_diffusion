@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 import pandas as pd
@@ -64,22 +65,46 @@ class ThrusterDataset(Dataset):
     def normalize_tensor(self, tensor):
         mean = self.norm_tensor_mean
         std = self.norm_tensor_std
-        log = self.norm_tensor_log
+        log_inds = np.where(self.norm_tensor_log)[0]
 
-        log_inds = np.where(log)
-        norm = tensor
-        norm[:, log_inds, :] = np.log(tensor[:, log_inds, :])
-        norm = (norm - mean) / std
+        if isinstance(tensor, torch.Tensor):
+            mean = torch.tensor(mean, device=tensor.device)
+            std = torch.tensor(std, device=tensor.device)
+            log_inds = torch.tensor(log_inds, device=tensor.device)
+
+            norm = tensor
+            norm[:, log_inds, :] = torch.log(tensor[:, log_inds, :])
+            norm = (norm - mean) / std
+
+        elif isinstance(tensor, np.ndarray):
+            norm = tensor
+            norm[:, log_inds, :] = np.log(tensor[:, log_inds, :])
+            norm = (norm - mean) / std
+        else:
+            raise NotImplementedError()
+
         return norm
 
     def denormalize_tensor(self, tensor):
         mean = self.norm_tensor_mean
         std = self.norm_tensor_std
-        log = self.norm_tensor_log
+        log_inds = np.where(self.norm_tensor_log)[0]
 
-        denorm = tensor * std[..., None] + mean[..., None]
-        log_inds = np.where(log)
-        denorm[:, log_inds, :] = np.exp(denorm[:, log_inds, :])
+
+        if isinstance(tensor, torch.Tensor):
+            mean = torch.tensor(mean, device=tensor.device)
+            std = torch.tensor(std, device=tensor.device)
+            log_inds = torch.tensor(log_inds, device=tensor.device)
+
+            denorm = tensor * std[..., None] + mean[..., None]
+            denorm[:, log_inds, :] = torch.exp(denorm[:, log_inds, :])
+
+        elif isinstance(tensor, np.ndarray):
+            denorm = tensor * std[..., None] + mean[..., None]
+            denorm[:, log_inds, :] = np.exp(denorm[:, log_inds, :])
+        else:
+            raise NotImplementedError()
+        
         return denorm
 
     def normalize_params(self):

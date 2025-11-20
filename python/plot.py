@@ -5,6 +5,7 @@ from pathlib import Path
 import argparse
 import pandas as pd
 import matplotlib
+import tomllib
 
 from utils.thruster_data import ThrusterDataset
 
@@ -16,6 +17,7 @@ parser.add_argument("--num-mcmc", type=int, default=2**14)
 parser.add_argument("-o", "--output", type=str, default="_plt.png")
 parser.add_argument("-m", "--mode", choices=["traces", "quantiles"], default="quantiles")
 parser.add_argument("-f", "--fields", nargs='+', required=True)
+parser.add_argument("--observation", type=Path)
 
 matplotlib.rcParams["text.usetex"] = True
 matplotlib.rcParams["font.size"] = 15
@@ -23,8 +25,15 @@ matplotlib.rcParams["font.family"] = "serif"
 matplotlib.rcParams['font.serif'] = "Computer Modern"
 
 QUANTILES = [0.025, 0.25, 0.5, 0.75, 0.975]
+CHANNEL_LENGTH = 0.025
 
 field_info = {
+     "B": dict(
+        ylabel=r"Field strength (G)",
+        title="Magnetic field strength",
+        letter_pos = "top",
+        yscalefactor = 10_000,
+    ),
     "Tev": dict(
         ylabel=r"Electron temperature (eV)",
         title="Electron temperature",
@@ -148,11 +157,11 @@ def plot_quantiles(ax, x, qs, color=None, zorder=0):
 def plot_traces(ax, x, data, color, zorder=0):
 
     num_samples = data.shape[0]
-    N = 100
-    indices = np.random.choice(np.arange(num_samples), N)
+    N = 250
+    indices = np.arange(num_samples)
+    indices = np.random.choice(indices, N)
 
-    #factor = 0.5 * (1 + np.sqrt(1 - 4 * 0.5 / N))
-    alpha = 0.5 / (N / 10)
+    alpha = 0.3 / (N / 10)
 
     ax.plot(x, data[indices].T, color=color, alpha=alpha, zorder=zorder)
 
@@ -212,7 +221,8 @@ def plot_comparison(
     show_legend=True,
     show_xlabel=True,
     letters=None,
-    mode="quantiles"
+    mode="quantiles",
+    observation=None,
 ):
     fields_loaded = [get_field(field, field_names, s) for s in samples]
     if ref is None:
@@ -225,10 +235,24 @@ def plot_comparison(
     for i, (ax, y) in enumerate(zip(axes, fields_loaded)):
         plot_field(ax, x, y, mode=mode, **field_info[field])
         if field_ref is not None:
+
             ax.plot(
                 x, field_ref, color="black", linewidth=2, label="Data", linestyle="-."
             )
 
+            if observation is not None and field in observation:
+                locs = observation[field].get("locs", "all")
+                if isinstance(locs, list):
+                    locs = np.array(locs) / CHANNEL_LENGTH
+                    y = np.interp(locs, x, field_ref)
+                    ax.scatter(locs, y, color = "red", label = "Observation", zorder=10)
+                else:
+                    ax.plot(
+                        x, field_ref, color="red", linewidth=2, label="Observation", linestyle="-."
+                    )
+
+
+       
         if not show_xlabel:
             ax.set(xlabel="", xticklabels=[])
         if i > 0:
@@ -264,7 +288,7 @@ if __name__ == "__main__":
         samples_ref = None
 
 
-    x = dataset_gen.grid / 0.025
+    x = dataset_gen.grid / CHANNEL_LENGTH
     field_names = list(dataset_gen.fields.keys())
 
 
@@ -283,6 +307,12 @@ if __name__ == "__main__":
 
     letters = "abcdefghijklmnopqrstuvwxyz"
 
+    if args.observation is None:
+        observation = None
+    else:
+        with open(args.observation, "rb") as fp:
+            observation = tomllib.load(fp)["observation"]["fields"]
+
     for i, field in enumerate(fields):
         plot_comparison(
             axes[i, :],
@@ -296,6 +326,7 @@ if __name__ == "__main__":
             titles=(titles if i == 0 else None),
             letters=[letters[2 * i], letters[2 * i + 1]],
             mode=args.mode,
+            observation=observation,
         )
 
     fig.savefig(args.output)

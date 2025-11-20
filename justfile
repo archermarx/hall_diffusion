@@ -7,9 +7,10 @@ sample-noTe:
 sample-withTe:
     uv run python/sample.py {{ MODEL }} configs/sample_withTe.toml
 
-FIELDS := "ui_1 Tev E inv_hall ne"
+FIELDS := "B ui_1 Tev E inv_hall ne"
 
 MODE := "traces"
+NUM_MCMC := "1024"
 
 plot-noTe:
     uv run python/plot.py \
@@ -18,7 +19,9 @@ plot-noTe:
         --mode={{MODE}} \
         -o "mcmc_noTe.png" \
         -f {{ FIELDS }} \
-        --samples=samples/noTe 
+        --num-mcmc={{ NUM_MCMC }} \
+        --samples=samples/noTe \
+        --observation=configs/sample_noTe.toml
 
 plot-withTe:
     uv run python/plot.py \
@@ -27,4 +30,6 @@ plot-withTe:
         --mode={{MODE}} \
         -o "mcmc_withTe.png" \
         -f {{ FIELDS }} \
-        --samples=samples/withTe 
+        --num-mcmc={{ NUM_MCMC }} \
+        --samples=samples/withTe \
+        --observation=configs/sample_withTe.toml
