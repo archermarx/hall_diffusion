@@ -9,11 +9,13 @@ sample-withTe:
 
 FIELDS := "ui_1 Tev E inv_hall ne"
 
+MODE := "traces"
+
 plot-noTe:
     uv run python/plot.py \
         --mcmc=mcmc_reference/results_noTe/normalized \
         --ref=mcmc_reference/ref_sim/normalized \
-        --mode=quantiles \
+        --mode={{MODE}} \
         -o "mcmc_noTe.png" \
         -f {{ FIELDS }} \
         --samples=samples/noTe 
@@ -22,7 +24,7 @@ plot-withTe:
     uv run python/plot.py \
         --mcmc=mcmc_reference/results_withTe/normalized \
         --ref=mcmc_reference/ref_sim/normalized \
-        --mode=quantiles \
+        --mode={{MODE}} \
         -o "mcmc_withTe.png" \
         -f {{ FIELDS }} \
         --samples=samples/withTe 
