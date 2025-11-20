@@ -366,6 +366,7 @@ function save_sim(sim, params = nothing; avg_start_time = 5e-4)
 
     out_dict = Dict(
         :space => Dict(
+            :z => avg[:z] .|> Float32
             :B => avg[:B][][inds] .|> Float32,
             :nu_an => avg[:nu_an][][inds] .|> Float32,
             :nu_e => avg[:nu_e][][inds] .|> Float32,

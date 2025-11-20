@@ -6,6 +6,8 @@ import argparse
 import pandas as pd
 import matplotlib
 
+from utils.thruster_data import ThrusterDataset
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--samples", type=Path)
 parser.add_argument("--mcmc", type=Path)
@@ -18,7 +20,7 @@ parser.add_argument("-f", "--fields", nargs='+', required=True)
 matplotlib.rcParams["text.usetex"] = True
 matplotlib.rcParams["font.size"] = 15
 matplotlib.rcParams["font.family"] = "serif"
-# matplotlib.rcParams['font.serif'] = "Computer Modern"
+matplotlib.rcParams['font.serif'] = "Computer Modern"
 
 QUANTILES = [0.025, 0.25, 0.5, 0.75, 0.975]
 
@@ -88,40 +90,21 @@ def letter_args(pos, pad):
 
     return dict(xy=(x,y), ha=ha, va=va, xycoords="axes fraction", fontsize=25)
 
-
-def denormalize(tensor, norm_file):
-    # TODO: use same denormalization arch as we use for sampling
-    normalization_info = pd.read_csv(norm_file)
-
-    names = normalization_info["Field"].to_list()
-    mean = normalization_info["Mean"].to_numpy()
-    std = normalization_info["Std"].to_numpy()
-    log = normalization_info["Log"].to_numpy()
-
-    denorm = tensor * std[..., None] + mean[..., None]
-    log_inds = np.where(log)
-    denorm[:, log_inds, :] = np.exp(denorm[:, log_inds, :])
-    return names, denorm
-
-
-def load_samples(sample_dir, norm_file, num_samples=None):
-    # TODO: use same loader
-    files = os.listdir(sample_dir)
+def load_samples(sample_dir, num_samples=None):
+    dataset = ThrusterDataset(sample_dir)
+    indices = np.arange(len(dataset))
     if num_samples is not None:
-        files = np.random.choice(files, size=num_samples).tolist()
+        indices = np.random.choice(indices, size=num_samples)
 
-    data = [np.load(sample_dir / x)["data"] for x in files]
-
-    return denormalize(data, norm_file)
-
+    samples_norm = np.array([dataset[i][2] for i in indices])
+    samples = dataset.denormalize_tensor(samples_norm)
+    
+    return dataset, samples
 
 def plot_quantiles(ax, x, qs, color=None, zorder=0):
     color = "tab:blue" if color is None else color
     alpha_95 = 0.25
     alpha_50 = 0.5
-
-    # linestyle_50 = "--"
-    # linestyle_95 = ":"
 
     line_95_lo = qs[0, :]
     line_50_lo = qs[1, :]
@@ -130,10 +113,6 @@ def plot_quantiles(ax, x, qs, color=None, zorder=0):
     line_50_hi = qs[3, :]
     line_95_hi = qs[4, :]
 
-    # ax.plot(x, line_95_lo, color=color, linestyle=linestyle_95)
-    # ax.plot(x, line_95_hi, color=color, linestyle=linestyle_95)
-    # ax.plot(x, line_50_lo, color=color, linestyle=linestyle_50)
-    # ax.plot(x, line_50_hi, color=color, linestyle=linestyle_50)
     ax.plot(x, line_med, color=color, zorder=zorder + 2, label="Median")
 
     ax.fill_between(
@@ -275,23 +254,21 @@ def plot_comparison(
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    # norm_file = Path("data/batch_3/normalized_all/norm_data.csv")
-    norm_file = args.mcmc / "norm_data.csv"
-    field_names, samples_generated = load_samples(args.samples, norm_file)
-    _, samples_mcmc = load_samples(
-        args.mcmc / "data", norm_file, num_samples=args.num_mcmc
-    )
+    
+    dataset_gen, samples_generated = load_samples(args.samples)
+    dataset_mcmc, samples_mcmc = load_samples(args.mcmc, num_samples=args.num_mcmc)
 
     if args.ref is not None:
-        _, samples_ref = load_samples(args.ref / "data", norm_file)
+        _, samples_ref = load_samples(args.ref)
     else:
         samples_ref = None
 
-    # TODO: load from dataset
-    x = np.linspace(0, 0.08, samples_generated.shape[-1]) / 0.025
+
+    x = dataset_gen.grid / 0.025
+    field_names = list(dataset_gen.fields.keys())
+
 
     row_height = 2.3
-    #fields = ["ui_1", "Tev", "E", "inv_hall", "phi", "ne", "nn"]
     fields = args.fields
     nfields = len(fields)
 

@@ -3,9 +3,9 @@ fields_to_keep = ["B", "ui_1", "Tev"]
 # Observation std deviation
 observation_stddev = 1.5
 # Number of independent sample traces to generate
-num_samples = 1024
+num_samples = 64
 # Batch size of sample generation. If not provided, we do a single batch
-batch_size = 256
+batch_size = 64
 # Number of sampling steps to take
 num_steps = 1024
 # File containing (normalized) simulation info to condition on. If not provided, we sample unconditionally

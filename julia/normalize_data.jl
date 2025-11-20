@@ -36,7 +36,8 @@ Otherwise, returns the following:
 function load_single_sim(file; include_timevarying=false)
     raw = deserialize(file)
 
-    resolution = length(raw[:space][:ne])
+    grid = get(raw[:space], :z, collect(LinRange(0.0, 0.08, length(raw[:space][:ne])))) 
+    resolution = length(grid)
 
     time = raw[:time][:time_s]
     I_raw = raw[:time][:discharge_current_A]
@@ -160,7 +161,7 @@ function load_single_sim(file; include_timevarying=false)
         end
     end
 
-    return param_names, param_vec, tensor_row_names, tensor
+    return param_names, param_vec, tensor_row_names, tensor, grid
 end
 
 """
@@ -253,6 +254,8 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         tensor_norm = read_normalization_file(norm_file_data)
     end
 
+    println("Writing normalization files")
+
     # Create necessary directories
     data_dir = joinpath(out_dir, "data")
     mkpath(out_dir)
@@ -266,7 +269,7 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         i += 1
     end
 
-    param_labels, _, row_labels, _ = s
+    param_labels, _, row_labels, _, grid = s
 
     # Write normalization factors to disk for both params and data.
     # These have CSV format and the filenames are `norm_params.csv` and `norm_data.csv`
@@ -278,6 +281,14 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
             writedlm(f, matrix, ',')
         end
     end
+
+    # Write grid to file
+    open(joinpath(out_dir, "grid.csv"), "w") do f
+        println(f, "z (m)")
+        writedlm(f, grid, ",")
+    end
+
+    println("Normalizing data")
 
     # Set up bookkeeping and progress bar
     progress = Progress(length(files))

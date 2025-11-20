@@ -215,8 +215,17 @@ def sample(model, num_samples, args):
         shutil.rmtree(out_dir)
 
     os.makedirs(out_dir, exist_ok=True)
+
+    # Write normalization info
+    dataset.metadata_params.to_csv(out_dir / "norm_params.csv")
+    dataset.metadata_plasma.to_csv(out_dir / "norm_data.csv")
+    dataset.metadata_grid.to_csv(out_dir / "grid.csv")
+
+    # Write sample data
+    data_dir = out_dir / "data"
+    os.makedirs(data_dir, exist_ok=True)
     for i in range(num_samples):
-        file = Path(out_dir) / f"{uuid.uuid4()}.npz"
+        file = data_dir / f"{uuid.uuid4()}.npz"
         tens = final[i, :].cpu().numpy()
         np.savez(file, data=tens, params=condition_vec.cpu().numpy())
 

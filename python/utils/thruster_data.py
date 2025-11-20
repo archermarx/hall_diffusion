@@ -21,6 +21,12 @@ class ThrusterDataset(Dataset):
 
         self.metadata_plasma = pd.read_csv(self.dir / "norm_data.csv")
         self.metadata_params = pd.read_csv(self.dir / "norm_params.csv")
+        self.metadata_grid = pd.read_csv(self.dir / "grid.csv")
+
+        self.norm_tensor_mean = self.metadata_plasma["Mean"].to_numpy()
+        self.norm_tensor_std = self.metadata_plasma["Std"].to_numpy()
+        self.norm_tensor_log = self.metadata_plasma["Log"].to_numpy()
+        self.grid = self.metadata_grid["z (m)"].to_numpy()
 
         assert dimension == 1 or dimension == 2
         self.dimension = dimension
@@ -54,6 +60,33 @@ class ThrusterDataset(Dataset):
             param_dict[row["Field"]] = p
 
         return param_dict
+    
+    def normalize_tensor(self, tensor):
+        mean = self.norm_tensor_mean
+        std = self.norm_tensor_std
+        log = self.norm_tensor_log
+
+        log_inds = np.where(log)
+        norm = tensor
+        norm[:, log_inds, :] = np.log(tensor[:, log_inds, :])
+        norm = (norm - mean) / std
+        return norm
+
+    def denormalize_tensor(self, tensor):
+        mean = self.norm_tensor_mean
+        std = self.norm_tensor_std
+        log = self.norm_tensor_log
+
+        denorm = tensor * std[..., None] + mean[..., None]
+        log_inds = np.where(log)
+        denorm[:, log_inds, :] = np.exp(denorm[:, log_inds, :])
+        return denorm
+
+    def normalize_params(self):
+        raise NotImplementedError()
+
+    def denormalize_params(self):
+        raise NotImplementedError()
 
     def __len__(self):
         return len(self.files)

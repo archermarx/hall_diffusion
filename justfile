@@ -11,7 +11,7 @@ FIELDS := "ui_1 Tev E inv_hall ne"
 
 plot-noTe:
     uv run python/plot.py \
-        --mcmc=mcmc_reference/no_Te/normalized \
+        --mcmc=mcmc_reference/results_noTe/normalized \
         --ref=mcmc_reference/ref_sim/normalized \
         --mode=quantiles \
         -o "mcmc_noTe.png" \
@@ -20,7 +20,7 @@ plot-noTe:
 
 plot-withTe:
     uv run python/plot.py \
-        --mcmc=mcmc_reference/with_Te/normalized \
+        --mcmc=mcmc_reference/results_withTe/normalized \
         --ref=mcmc_reference/ref_sim/normalized \
         --mode=quantiles \
         -o "mcmc_withTe.png" \
