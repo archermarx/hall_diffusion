@@ -27,7 +27,7 @@ std_dev = 1.5
 [observation.fields]
 B = { locs = "all", error_type = "relative", std_dev = 1.0 }
 #ui_1 = { locs = [0.025, 0.03], error_type = "relative", std_dev = 1.0}
-ui_1 = { locs = [0.015, 0.02, 0.0225, 0.025, 0.02625, 0.0275, 0.03, 0.035, 0.04, 0.045], error_type = "relative", std_dev = 1.0}
-#ui_1 = { locs = "all", error_type = "relative", std_dev = 0.8 }
+#ui_1 = { locs = [0.015, 0.02, 0.0225, 0.025, 0.02625, 0.0275, 0.03, 0.035, 0.04, 0.045], error_type = "relative", std_dev = 1.0}
+ui_1 = { locs = "all", error_type = "relative", std_dev = 1.0 }
 #ne = { locs = [0.01], error_type = "relative", std_dev = 8.0 }
 

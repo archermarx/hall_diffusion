@@ -18,6 +18,7 @@ import models.edm
 import models.edm2
 from utils import utils
 from utils.thruster_data import ThrusterDataset
+import noise
 
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str)
@@ -240,27 +241,22 @@ def sample(model, num_samples, args):
     _, data_vec, data = dataset[0]
     condition_vec = torch.tensor(data_vec, device=DEVICE)
     data = torch.tensor(data, device=DEVICE).unsqueeze(0)
-
-    # Tile data
-    (_, num_channels, resolution) = data.shape
-    data_denorm = dataset.denormalize_tensor(data)
+    (_, channels, resolution) = data.shape
+    
+    # Create noise sampler
+    noise_sampler = noise.RBFKernel(channels, resolution, device=DEVICE)
 
     # Observation conditioning
     mask = build_observation_operator(dataset, obs_fields).to(DEVICE)
 
     # Assign observation variances
-    obs_var = torch.zeros((num_channels, resolution), device=DEVICE)
+    obs_var = torch.zeros((channels, resolution), device=DEVICE)
     indices_to_keep = [dataset.fields[field] for field in obs_fields]
     for i, index in enumerate(indices_to_keep):
-        # Get field scale
-        #data_field = data[0, index, :]
-        obs_std = obs_stddev[i]
-        #print(obs_std)
-        obs_var[index, :] = obs_std**2
-
+        obs_var[index, :] = obs_stddev[i]**2
 
     # Initial noise samples
-    xt = torch.randn((num_samples, num_channels, resolution), device=DEVICE) * noise_max
+    xt = noise_sampler.sample(num_samples) * noise_max
 
     # Load timesteps
     steps = edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent)
