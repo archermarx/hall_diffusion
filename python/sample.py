@@ -243,8 +243,7 @@ def sample(model, num_samples, args):
     data = torch.tensor(data, device=DEVICE).unsqueeze(0)
     (_, channels, resolution) = data.shape
     
-    # Create noise sampler
-    noise_sampler = noise.RBFKernel(channels, resolution, device=DEVICE)
+
 
     # Observation conditioning
     mask = build_observation_operator(dataset, obs_fields).to(DEVICE)
@@ -255,7 +254,9 @@ def sample(model, num_samples, args):
     for i, index in enumerate(indices_to_keep):
         obs_var[index, :] = obs_stddev[i]**2
 
-    # Initial noise samples
+    # Create noise sampler and initial noise samples
+    #noise_sampler = noise.RBFKernel(channels, resolution, device=DEVICE)
+    noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
     xt = noise_sampler.sample(num_samples) * noise_max
 
     # Load timesteps
