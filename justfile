@@ -9,7 +9,7 @@ sample-withTe:
 
 FIELDS := "B ui_1 Tev E inv_hall ne"
 
-MODE := "traces"
+MODE := "quantiles"
 NUM_MCMC := "1024"
 
 plot-noTe:

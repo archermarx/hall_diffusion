@@ -26,26 +26,45 @@ parser.add_argument("config", type=str)
 DEVICE = torch.device("cpu")
 
 def build_observation_operator(dataset, observations):
-
     num_channels = len(dataset.fields)
     resolution = len(dataset.grid)
 
     obs_matrix = torch.zeros(num_channels, resolution)
     grid = dataset.grid
 
+    m = num_channels * resolution
+    n = 0
+
     for (obs_field, obs_data) in observations.items():
         ind = dataset.fields[obs_field]
+
+        # print(f"{ind=}, {obs_field=}")
         loc = obs_data.get("locs", "all")
 
         if loc == "all":
             obs_matrix[ind, :] = 1.0
+            n += resolution
         elif isinstance(loc, list):
             for z in loc:
                 j = bisect.bisect_left(grid, z)
-                obs_matrix[ind, j] = z
+                obs_matrix[ind, j] = 1.0
+                n += 1
 
+    # m = num_channels * resolution
+    # n = num_observations
 
-    return obs_matrix.unsqueeze(0)
+    A = torch.zeros(n, m)
+    obs_matrix = obs_matrix.reshape(-1)
+
+    print(f"{A.shape=}")
+
+    j = 0
+    for i in range(m):
+        if obs_matrix[i] == 1.0:
+            A[j, i] = 1.0
+            j += 1
+
+    return A 
 
 
 def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
@@ -58,23 +77,49 @@ def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     return timesteps
 
 
-def guidance_score(x, obs_variance, pde_strength, observations, mask, dataset):
+def guidance_score(x, obs_var, proc_var, pde_strength, observations, mask, dataset):
     (batch_size, _, _) = x.shape
 
     grad = torch.full_like(x, 0.0, device=x.device)
+
+    obs_vec = (mask @ observations.reshape(-1))
+    var = (mask @ obs_var.reshape(-1))
+
+    H = mask
+    H_pinv = torch.linalg.pinv(H)
+
+    n, m = H.shape
+    assert H_pinv.shape == (m, n)
+    assert obs_vec.shape == (n,)
+
+    # Precompute (rt^2 HH^T + sigma_y^2 I)^{-1} H
+    mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
+    assert mat1.shape == (n, m)
 
     for b in range(batch_size):
         batch_x0 = x[b, ...]
         batch_x0.requires_grad = True
 
-        x_denorm = dataset.denormalize_tensor(batch_x0.unsqueeze(0))
+        x_vec = batch_x0.reshape(-1)
+        assert x_vec.shape == (m,)
 
-        obs_loss = torch.sum(mask * ((observations - x_denorm) ** 2 / obs_variance)) / 2
-        pde_loss = pde_strength * (0.0 * x_denorm).mean()
-        total_loss = obs_loss + pde_loss
+        # # Noise-free pseudoinverse guidance
+        # mat = H_pinv @ obs_vec - (H_pinv @ (H @ x_vec.reshape(-1)))
+        # mat_x = (mat.detach() * x_vec).sum()
+        # guidance = torch.autograd.grad(mat_x, batch_x0)[0]
+        # grad[b, ...] = guidance
 
-        total_loss.backward()
-        grad[b, ...] = batch_x0.grad
+        vec1 = (obs_vec - (H @ x_vec))
+        assert vec1.shape == (n,)
+
+
+        vec2 = (vec1 @ mat1)
+        assert vec2.shape == (m,)
+ 
+        mat_x = (vec2.detach() * x_vec).sum()
+        score = torch.autograd.grad(mat_x, batch_x0)[0]
+
+        grad[b, ...] = score
 
     return grad
 
@@ -87,7 +132,7 @@ def reverse_step(
     ims,
     masks,
     dataset,
-    obs_variance=None,
+    obs_var=None,
     pde_strength=0.0,
     step_scale=1.0,
 ):
@@ -106,11 +151,13 @@ def reverse_step(
         d0 = -(x_0 - x_t) / t_prev
         x_1 = x_t + step_scale * 0.5 * dt * d0
 
+    proc_var = t**2 / (t**2 + 1)
+
     # Guidance loss
-    if obs_variance is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_0, obs_variance, pde_strength, ims, masks, dataset)
+    if obs_var is not None and t_mid < t_max_guidance:
+        obs_score = guidance_score(x_0, obs_var, proc_var, pde_strength, ims, masks, dataset)
         # x_1 += 0.5 * dt * t_prev * obs_score
-        x_1 -= 0.5 * obs_score
+        x_1 += 0.5 * obs_score
 
     # Corrector step (midpoint rule)
     with torch.no_grad():
@@ -119,10 +166,10 @@ def reverse_step(
         x_1 = x_t + step_scale * dt * d1
 
     # Guidance loss
-    if obs_variance is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_0, obs_variance, pde_strength, ims, masks, dataset)
+    if obs_var is not None and t_mid < t_max_guidance:
+        obs_score = guidance_score(x_0, obs_var, proc_var, pde_strength, ims, masks, dataset)
         # x_1 += dt * t_mid * obs_score
-        x_1 -= obs_score
+        x_1 += obs_score
 
     return x_1
 
@@ -202,15 +249,14 @@ def sample(model, num_samples, args):
     mask = build_observation_operator(dataset, obs_fields).to(DEVICE)
 
     # Assign observation variances
-    obs_variance = torch.ones((num_channels, resolution), device=DEVICE)
+    obs_var = torch.zeros((num_channels, resolution), device=DEVICE)
     indices_to_keep = [dataset.fields[field] for field in obs_fields]
     for i, index in enumerate(indices_to_keep):
         # Get field scale
-        data_field = data_denorm[0, index, :]
-        field_scale = 1 / resolution * torch.norm(data_field)
-        obs_std = obs_stddev[i] * field_scale
-        print(obs_std)
-        obs_variance[index, :] = obs_std**2
+        #data_field = data[0, index, :]
+        obs_std = obs_stddev[i]
+        #print(obs_std)
+        obs_var[index, :] = obs_std**2
 
 
     # Initial noise samples
@@ -228,9 +274,9 @@ def sample(model, num_samples, args):
         xt,
         steps,
         dataset,
-        im_masks=(data_denorm, mask),
+        im_masks=(data, mask),
         showprogress=True,
-        obs_variance=obs_variance,
+        obs_var=obs_var,
         pde_strength=0.0,
         step_scale=step_scale,
     )
