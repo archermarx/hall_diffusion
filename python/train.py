@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 # Our dependencies
 import models.edm2
 import models.edm
+import noise
 
 from models.ema import EMA
 from utils import utils, thruster_data
@@ -55,21 +56,23 @@ def learning_rate_schedule(
 # Loss function for EDM2 model
 # Modified to include first- and second-deriviative losses to hopefully reduce noise
 class EDM2Loss:
-    def __init__(self, P_mean=-0.4, P_std=1.0, sigma_data=0.5):
+    def __init__(self, noise_sampler, P_mean=-0.4, P_std=1.0, sigma_data=0.5, include_logvar=False, deriv_h=1.0):
         self.P_mean = P_mean
         self.P_std = P_std
         self.sigma_data = sigma_data
+        self.noise_sampler = noise_sampler
+        self.deriv_h = deriv_h
+        self.include_logvar = include_logvar
 
     def __call__(
         self,
-        net,
-        images,
+        x,
+        model,
         noise_std=None,
-        labels=None,
-        include_logvar=False,
-        deriv_h=1.0,
+        condition_vec=None,
     ):
-        rnd_normal = torch.randn([images.shape[0], 1, 1], device=images.device)
+        batch_size, _, _ = x.shape
+        rnd_normal = torch.randn([batch_size, 1, 1], device=x.device)
 
         if noise_std is None:
             sigma = (rnd_normal * self.P_std + self.P_mean).exp()
@@ -77,23 +80,24 @@ class EDM2Loss:
             sigma = noise_std
 
         weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
-        noise = torch.randn_like(images) * sigma
-        noisy_im = images + noise
+        noise = self.noise_sampler.sample(batch_size) * sigma
+        
+        noisy_im = x + noise
 
-        if include_logvar:
-            denoised, logvar = net(noisy_im, sigma, labels, return_logvar=True)
+        if self.include_logvar:
+            denoised, logvar = model(noisy_im, sigma, condition_vec, return_logvar=True)
         else:
-            denoised = net(noisy_im, sigma, labels)
+            denoised = model(noisy_im, sigma, condition_vec)
             logvar = torch.tensor(0.0)
 
         # Base loss
-        base_loss = (denoised - images) ** 2
+        base_loss = (denoised - x) ** 2
 
         # "Step size": scale for diff loss
 
         # Derivative loss
         diff_denoised = torch.diff(denoised)
-        diff_images = torch.diff(images)
+        diff_images = torch.diff(x)
         diff_loss_1 = (diff_denoised - diff_images) ** 2
         diff_loss_1 = torch.nn.functional.pad(diff_loss_1, (0, 1))
 
@@ -103,44 +107,21 @@ class EDM2Loss:
         diff_loss_2 = (diff2_denoised - diff2_images) ** 2
         diff_loss_2 = torch.nn.functional.pad(diff_loss_2, (1, 1))
 
-        total_weight = 1 + 1 / deriv_h + 1 / deriv_h**2
+        h = self.deriv_h
+
+        total_weight = 1 + 1 / h + 1 / h**2
         loss = (
             weight
-            * (base_loss + diff_loss_1 / deriv_h + diff_loss_2 / deriv_h**2)
+            * (base_loss + diff_loss_1 / h + diff_loss_2 / h**2)
             / total_weight
         )
         base_loss = loss.mean().item()
 
         # Weight by homoscedastic uncertainty
-        if include_logvar:
+        if self.include_logvar:
             loss = loss / logvar.exp() + logvar
 
         return loss.mean(), base_loss, noisy_im, denoised
-
-
-# ----------------------------------------------------------------------------
-# Create and evaluatate an instance of the loss function for the EDM2 model
-def calc_loss(
-    y,
-    model,
-    noise_std=None,
-    P_mean=-1.2,
-    P_std=1.2,
-    data_std=0.5,
-    condition_vector=None,
-    include_logvar=False,
-    deriv_h=1.0,
-):
-    loss_fn = EDM2Loss(P_mean, P_std, data_std)
-    return loss_fn(
-        model,
-        y,
-        noise_std=noise_std,
-        labels=condition_vector,
-        include_logvar=include_logvar,
-        deriv_h=deriv_h,
-    )
-
 
 # ----------------------------------------------------------------------------
 # Evaluate the loss on the validation set.
@@ -148,12 +129,12 @@ def calc_loss(
 # Optionally, visualize progress on some validation set examples, with images saved to `out_folder`
 def validation_loss(
     model,
+    loss_fn,
     val_loader,
     visualize=False,
     epoch_idx=0,
     out_folder=Path("."),
     data_dir: Path | str = "data/training",
-    **loss_args,
 ):
     # Set model into evaluation mode
     model.eval()
@@ -164,7 +145,7 @@ def validation_loss(
         with torch.no_grad():
             x = x.float().to(DEVICE)
             vec = vec.float().to(DEVICE)
-            _, loss, *_ = calc_loss(x, model, condition_vector=vec)
+            _, loss, *_ = loss_fn(x, model, condition_vec=vec)
             losses.append(loss)
     loss = np.mean(losses)
 
@@ -178,9 +159,7 @@ def validation_loss(
             fixed_noise = torch.tensor(NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
             noise_std[: len(fixed_noise), 0, 0] = fixed_noise
 
-            _, _, noisy_im, denoise_pred = calc_loss(
-                y, model, noise_std, condition_vector=vec, **loss_args
-            )
+            _, _, noisy_im, denoise_pred = loss_fn(y, model, noise_std, condition_vec=vec)
 
             suptitle = f"Epoch: {epoch_idx + 1:04d}, Loss: {loss:.4f}"
             fig, _ = visualize_denoising(
@@ -275,13 +254,13 @@ def visualize_denoising_1d(
 def train_one_batch(
     y,
     model,
+    loss_fn,
     optimizer,
     ema_model,
     ema,
     scaler,
-    condition_vector=None,
+    condition_vec=None,
     use_amp=False,
-    **loss_args,
 ):
     # Set model to training mode and zero gradients
     model.train()
@@ -289,22 +268,17 @@ def train_one_batch(
 
     # Tranfer conditioning vector and data to device
     y = y.float().to(DEVICE)
-    if condition_vector is not None:
-        condition_vector = condition_vector.to(DEVICE)
+    if condition_vec is not None:
+        condition_vec = condition_vec.to(DEVICE)
 
     # Compute loss function and do backwards pass
     if use_amp:
         with torch.amp.autocast_mode.autocast(DEVICE.type):
-            loss, base_loss, *_ = calc_loss(
-                y,
-                model,
-                condition_vector=condition_vector,
-                **loss_args,
-            )
+            loss, base_loss, *_ = loss_fn(y, model, condition_vec=condition_vec)
 
         scaler.scale(loss).backward()
     else:
-        loss, base_loss, *_ = calc_loss(y, model, condition_vector=condition_vector)
+        loss, base_loss, *_ = loss_fn(y, model, condition_vec=condition_vec)
         loss.backward()
 
     # Make sure gradients are finite
@@ -497,6 +471,14 @@ def train(args):
 
     start_epoch = max_epochs
 
+    # Loss function
+    channels = len(train_dataset.fields)
+    resolution = len(train_dataset.grid)
+    print(f"{channels=}, {resolution=}")
+    #noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
+    noise_sampler = noise.RBFKernel(channels, resolution, device=DEVICE)
+    loss_fn = EDM2Loss(noise_sampler, **loss_args)
+
     # ---------------------------------------------
     # Main training loop
     while True:
@@ -512,13 +494,13 @@ def train(args):
             _, batch_loss = train_one_batch(
                 y,
                 model,
+                loss_fn,
                 optimizer,
                 ema_model,
                 ema,
                 scaler,
-                condition_vector=vec,
+                condition_vec=vec,
                 use_amp=use_amp,
-                **loss_args,
             )
             num_examples.append(example_idx)
             train_losses.append(batch_loss)
@@ -578,13 +560,14 @@ def train(args):
                 )
                 ema_loss = validation_loss(
                     ema_model,
+                    loss_fn,
                     test_loader,
                     visualize=True,
                     epoch_idx=epoch_idx,
                     out_folder=out_dir,
                     data_dir=test_data_dir,
                 )
-                val_loss = validation_loss(model, test_loader, data_dir=test_data_dir)
+                val_loss = validation_loss(model, loss_fn, test_loader, data_dir=test_data_dir)
 
             val_losses.append(val_loss)
             ema_losses.append(ema_loss)
