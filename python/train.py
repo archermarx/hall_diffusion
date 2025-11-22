@@ -475,8 +475,17 @@ def train(args):
     channels = len(train_dataset.fields)
     resolution = len(train_dataset.grid)
     print(f"{channels=}, {resolution=}")
-    #noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
-    noise_sampler = noise.RBFKernel(channels, resolution, device=DEVICE)
+
+    noise_sampler_args = train_args.get("noise_sampler", dict(type = "gaussian"))
+    train_args["noise_sampler"] = noise_sampler_args
+
+    if noise_sampler_args["type"] == "gaussian":
+        noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
+    elif noise_sampler_args["type"] == "rbf":
+        noise_sampler = noise.RBFKernel(channels, resolution, scale=noise_sampler_args["scale"], device=DEVICE)
+    else:
+        raise NotImplementedError()
+
     loss_fn = EDM2Loss(noise_sampler, **loss_args)
 
     # ---------------------------------------------
@@ -601,6 +610,7 @@ def train(args):
             out_dict = dict(
                 model=model.state_dict(),
                 model_config=config["model"],
+                train_config=config["training"],
                 optimizer=optimizer.state_dict(),
                 best=best_training_params,
                 ema=ema_model.state_dict(),

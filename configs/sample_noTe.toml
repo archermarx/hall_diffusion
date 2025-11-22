@@ -8,7 +8,7 @@ num_steps = 2048
 # Which model to load (ema, best, last)
 model_type = "ema"
 # Output directory for generations.
-out_dir = "samples/noTe-sparse"
+out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
@@ -25,8 +25,8 @@ std_dev = 1.5
 [observation.fields]
 B = { locs = "all", error_type = "relative", std_dev = 0.7 }
 # ui_1 = { locs = [0.025, 0.03], error_type = "relative", std_dev = 1.0}
-ui_1 = { locs = [0.015, 0.02, 0.0225, 0.025, 0.02625, 0.0275, 0.03, 0.035, 0.04, 0.045], error_type = "relative", std_dev = 1.0}
-#ui_1 = { locs = "all", error_type = "relative", std_dev = 1.0 }
+#ui_1 = { locs = [0.015, 0.02, 0.0225, 0.025, 0.02625, 0.0275, 0.03, 0.035, 0.04, 0.045], error_type = "relative", std_dev = 1.0}
+ui_1 = { locs = "all", error_type = "relative", std_dev = 1.0 }
 #nu_an = { locs = "all", error_type = "relative", std_dev = 0.7 }
 #ne = { locs = [0.01], error_type = "relative", std_dev = 8.0 }
 

@@ -57,8 +57,6 @@ def build_observation_operator(dataset, observations):
     A = torch.zeros(n, m)
     obs_matrix = obs_matrix.reshape(-1)
 
-    print(f"{A.shape=}")
-
     j = 0
     for i in range(m):
         if obs_matrix[i] == 1.0:
@@ -155,10 +153,10 @@ def reverse_step(
     proc_var = t**2 / (t**2 + 1)
 
     # Guidance loss
-    if obs_var is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_0, obs_var, proc_var, pde_strength, ims, masks, dataset)
-        # x_1 += 0.5 * dt * t_prev * obs_score
-        x_1 += 0.5 * obs_score
+    # if obs_var is not None and t_mid < t_max_guidance:
+    #     obs_score = guidance_score(x_0, obs_var, proc_var, pde_strength, ims, masks, dataset)
+    #     # x_1 += 0.5 * dt * t_prev * obs_score
+    #     x_1 += 0.5 * obs_score
 
     # Corrector step (midpoint rule)
     with torch.no_grad():
@@ -218,7 +216,7 @@ def reverse(D, x, timesteps, dataset, im_masks=None, showprogress=False, **kwarg
     return output
 
 
-def sample(model, num_samples, args):
+def sample(model, noise_sampler, num_samples, args):
     # Load sampling arguments
     num_steps = args.get("num_steps", 256)
     noise_min = args.get("noise_min", 0.002)
@@ -254,9 +252,7 @@ def sample(model, num_samples, args):
     for i, index in enumerate(indices_to_keep):
         obs_var[index, :] = obs_stddev[i]**2
 
-    # Create noise sampler and initial noise samples
-    #noise_sampler = noise.RBFKernel(channels, resolution, device=DEVICE)
-    noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
+    # Sample initial noise
     xt = noise_sampler.sample(num_samples) * noise_max
 
     # Load timesteps
@@ -337,9 +333,29 @@ if __name__ == "__main__":
     if remainder > 0:
         batches.append(remainder)
 
+
+    # Create noise sampler and initial noise samples
+    if "train_config" in model_dict and "noise_sampler" in model_dict["train_config"]:
+        noise_sampler_args = model_dict["train_config"]["noise_sampler"]
+    else:
+        noise_sampler_args = dict(type="gaussian", scale=1.0)
+
+    channels = model.img_channels
+    resolution = model.img_resolution
+
+
+    if noise_sampler_args["type"] == "gaussian":
+        noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
+    elif noise_sampler_args["type"] == "rbf":
+        scale = noise_sampler_args["scale"]
+        assert isinstance(scale, float | int)
+        noise_sampler = noise.RBFKernel(channels, resolution, scale=scale, device=DEVICE)
+    else:
+        raise NotImplementedError()
+
     # Sample in batches
     for i, batch_num_samples in enumerate(batches):
-        sample(model, batch_num_samples, sampling_config)
+        sample(model, noise_sampler, batch_num_samples, sampling_config)
 
         # Make sure we don't remove old samples
         sampling_config["replace_samples"] = False

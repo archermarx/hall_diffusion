@@ -38,6 +38,8 @@ ema = 0.995
 use_amp = true
 # Log file name
 log_file = "training.dat"
+# Noise sampler
+noise_sampler = {type = "gaussian"}
 
 # Loss function configuration
 [training.loss]

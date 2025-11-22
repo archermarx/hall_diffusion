@@ -12,6 +12,7 @@ class NoiseSampler(object):
     def sample(self, N):
         raise NotImplementedError()
     
+
 class RandomNoise(NoiseSampler):
     @torch.no_grad()
     def __init__(self, in_channels, Ln, device=None):
@@ -26,10 +27,9 @@ class RandomNoise(NoiseSampler):
 
 class RBFKernel(NoiseSampler):
     @torch.no_grad()
-    def __init__(self, in_channels, Ln, scale=1, eps=0.0001, device=None):
+    def __init__(self, in_channels, Ln, scale=1.0, eps=0.01, device=None):
         self.in_channels = in_channels
         self.Ln = Ln
-        #self.Ln2 = Ln2
         self.device = device
         self.scale = scale
 
