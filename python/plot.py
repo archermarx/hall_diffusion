@@ -6,6 +6,7 @@ import argparse
 import matplotlib
 import tomllib
 import math
+import bisect
 
 from utils.thruster_data import ThrusterDataset
 
@@ -223,6 +224,13 @@ def get_field(field, field_names, data):
     else:
         return data[:, index_dict[field], :]
 
+def get_grid_locs(loc, grid):
+    loc = np.array(loc)
+    new_loc = np.zeros_like(loc)
+    for (i, x) in enumerate(loc):
+        j = bisect.bisect_left(grid, x)
+        new_loc[i] = grid[j]
+    return new_loc
 
 def plot_comparison(
     axes,
@@ -257,6 +265,7 @@ def plot_comparison(
                 obs_args = dict(color=OBS_COLOR, label="Observed", zorder=100)
                 if isinstance(locs, list):
                     locs = np.array(locs) / CHANNEL_LENGTH
+                    locs = get_grid_locs(locs, x)
                     y = np.interp(locs, x, field_ref)
                     ax.scatter(locs, y, **obs_args)
                 else:
