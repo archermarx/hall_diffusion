@@ -19,6 +19,7 @@ parser.add_argument("-m", "--mode", choices=["traces", "quantiles"], default="qu
 parser.add_argument("-f", "--fields", nargs='+', required=True)
 parser.add_argument("--observation", type=Path)
 parser.add_argument("--type", choices=["sidebyside", "multifield"], default = "multifield")
+parser.add_argument("--nolegend", action="store_true")
 
 matplotlib.rcParams["text.usetex"] = True
 matplotlib.rcParams["font.size"] = 15
@@ -282,7 +283,7 @@ def plot_comparison(
             letter_pos = field_info[field].get("letter_pos", "")
             ax.annotate(f"({letters[i]})", **letter_args(letter_pos, 0.05))
 
-        if show_legend and i == len(axes) - 1:
+        if show_legend and i == 0:
             ax.legend()
 
 
@@ -327,7 +328,7 @@ def plot_multifield_comparison(args):
             field_names,
             ref=samples_ref,
             show_xlabel=(False if i < nfields - 1 else True),
-            show_legend=(True if i == 0 else False),
+            show_legend=(True if i == 0 and not args.nolegend else False),
             titles=(titles if i == 0 else None),
             letters=[LETTERS[2 * i], LETTERS[2 * i + 1]],
             mode=args.mode,

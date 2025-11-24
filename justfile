@@ -44,6 +44,7 @@ plot-noTe:
         -f {{ FIELDS }} \
         --num-mcmc={{ NUM_MCMC }} \
         --observation=configs/sample_noTe.toml \
+        --nolegend
 
 plot-withTe:
     uv run python/plot.py \
