@@ -1,5 +1,5 @@
 # Number of independent sample traces to generate
-num_samples = 256
+num_samples = 64
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
@@ -12,21 +12,22 @@ out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale = 1.0
+step_scale = 1.1
 
 [observation]
 # Folder containing (normalized) simulation info to condition on.
 # If not provided, we sample unconditionally.
 file = "mcmc_reference/ref_sim/normalized"
-
 # Default stddev
 std_dev = 1.5
 
-[observation.fields]
-B = { locs = "all", error_type = "relative", std_dev = 0.7 }
-# ui_1 = { locs = [0.025, 0.03], error_type = "relative", std_dev = 1.0}
-#ui_1 = { locs = [0.015, 0.02, 0.0225, 0.025, 0.02625, 0.0275, 0.03, 0.035, 0.04, 0.045], error_type = "relative", std_dev = 1.0}
-ui_1 = { locs = "all", error_type = "relative", std_dev = 1.0 }
-#nu_an = { locs = "all", error_type = "relative", std_dev = 0.7 }
-#ne = { locs = [0.01], error_type = "relative", std_dev = 8.0 }
+# [observation.fields.B]
+# locs = "all"
+# error_type = "relative"
+# std_dev = 1.0
 
+[observation.fields.ui_1]
+#locs = "all"
+locs = [0.025, 0.0275, 0.03, 0.035]
+error_type = "relative"
+std_dev = 0.25

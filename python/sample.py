@@ -76,10 +76,8 @@ def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     return timesteps
 
 
-def guidance_score(x, obs_var, proc_var, pde_strength, observations, mask, dataset):
-    (batch_size, _, _) = x.shape
-
-    grad = torch.full_like(x, 0.0, device=x.device)
+def guidance_score(x_t, x_0, obs_var, proc_var, pde_strength, observations, mask, dataset):
+    (batch_size, _, _) = x_0.shape
 
     obs_vec = (mask @ observations.reshape(-1))
     var = (mask @ obs_var.reshape(-1))
@@ -95,36 +93,21 @@ def guidance_score(x, obs_var, proc_var, pde_strength, observations, mask, datas
     mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
     assert mat1.shape == (n, m)
 
-    for b in range(batch_size):
-        batch_x0 = x[b, ...]
-        batch_x0.requires_grad = True
+    # Pseudoinverse guidance (with noise)
+    x_vec = x_0.reshape(batch_size, -1)
+    vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
+    assert vec1.shape == (batch_size, n)
 
-        x_vec = batch_x0.reshape(-1)
-        assert x_vec.shape == (m,)
+    vec2 = (vec1 @ mat1)
+    assert vec2.shape == (batch_size, m)
 
-        # # Noise-free pseudoinverse guidance
-        # mat = H_pinv @ obs_vec - (H_pinv @ (H @ x_vec.reshape(-1)))
-        # mat_x = (mat.detach() * x_vec).sum()
-        # guidance = torch.autograd.grad(mat_x, batch_x0)[0]
-        # grad[b, ...] = guidance
+    mat_x = (vec2.detach() * x_vec).sum()
+    score = torch.autograd.grad(mat_x, x_t)[0]
 
-        vec1 = (obs_vec - (H @ x_vec))
-        assert vec1.shape == (n,)
-
-
-        vec2 = (vec1 @ mat1)
-        assert vec2.shape == (m,)
- 
-        mat_x = (vec2.detach() * x_vec).sum()
-        score = torch.autograd.grad(mat_x, batch_x0)[0]
-
-        grad[b, ...] = score
-
-    return grad
-
+    return score
 
 def reverse_step(
-    D,
+    denoiser,
     x_t,
     t_prev,
     t,
@@ -134,46 +117,58 @@ def reverse_step(
     obs_var=None,
     pde_strength=0.0,
     step_scale=1.0,
+    method="midpoint",
+    model_args=dict(),
 ):
+    
+    assert method in ["heun", "midpoint", "euler"]
+
     (b, _, _) = x_t.shape
 
     ones = torch.ones((b, 1, 1), device=x_t.device)
 
     dt = t - t_prev
     t_mid = 0.5 * (t + t_prev)
+    proc_var = t**2 / (t**2 + 1)
 
     t_max_guidance = 100
 
-    # Predictor step (midpoint rule)
-    with torch.no_grad():
-        x_0 = D(x_t, t_prev * ones)
-        d0 = -(x_0 - x_t) / t_prev
-        x_1 = x_t + step_scale * 0.5 * dt * d0
+    x_t = x_t.detach()
+    x_t.requires_grad = True
+    denoiser.zero_grad()
 
-    proc_var = t**2 / (t**2 + 1)
+    # Compute initial step to get predicted sample location
+    x_denoised = denoiser(x_t, t_prev * ones, **model_args)
+    deriv_0 = -(x_denoised - x_t) / t_prev
+    step_0 = step_scale * dt * deriv_0
 
-    # Guidance loss
-    # if obs_var is not None and t_mid < t_max_guidance:
-    #     obs_score = guidance_score(x_0, obs_var, proc_var, pde_strength, ims, masks, dataset)
-    #     # x_1 += 0.5 * dt * t_prev * obs_score
-    #     x_1 += 0.5 * obs_score
+    if (method == "midpoint"):
+        step_0 *= 0.5
 
-    # Corrector step (midpoint rule)
-    with torch.no_grad():
-        x_0 = D(x_1, t_mid * ones)
-        d1 = -(x_0 - x_1) / t_mid
-        x_1 = x_t + step_scale * dt * d1
+    x_pred = x_t + step_0
+
+    if method == "midpoint" or (method == "heun" and t > 0):
+        # Compute corrector step
+        t2 = t_mid if method == "midpoint" else t
+        x_denoised = denoiser(x_pred, t2 * ones, **model_args)
+        deriv_1 = -(x_denoised - x_t) / t2
+        
+        if method == "midpoint":
+            step_1 = step_scale * dt * deriv_1
+        else:
+            step_1 = step_scale * dt * (deriv_0 + deriv_1) / 2
+    
+        x_pred = x_t + step_1
 
     # Guidance loss
     if obs_var is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_0, obs_var, proc_var, pde_strength, ims, masks, dataset)
+        obs_score = guidance_score(x_t, x_denoised, obs_var, proc_var, pde_strength, ims, masks, dataset)
         # x_1 += dt * t_mid * obs_score
-        x_1 += obs_score
+        x_pred += obs_score
 
-    return x_1
+    return x_pred.detach()
 
-
-def reverse(D, x, timesteps, dataset, im_masks=None, showprogress=False, **kwargs):
+def reverse(denoiser, x, timesteps, dataset, im_masks=None, showprogress=False, model_args=dict(), **kwargs):
     """
     Perform iterative denoising to generate a 1D image from Gaussian noise using a provided denoising model
 
@@ -209,8 +204,17 @@ def reverse(D, x, timesteps, dataset, im_masks=None, showprogress=False, **kwarg
             continue
 
         t_prev = timesteps[step_idx - 1]
-        x = reverse_step(D, x, t_prev, t, ims, masks, dataset, **kwargs)
+        x = reverse_step(denoiser, x, t_prev, t, ims, masks, dataset, model_args=model_args, **kwargs)
         output[step_idx, ...] = x
+
+    # ones = torch.ones((b, 1, 1), device=x.device)
+    # for i in range(20):
+    #     sigma = 0.002
+    #     x += torch.randn_like(x, device=x.device) * sigma
+    #     x = reverse_step(denoiser, x, sigma, 0, ims, masks, dataset, model_args=model_args, **kwargs)
+    
+    # with torch.no_grad():
+    #     x = denoiser(x, 0.002 * ones, **model_args)
 
     output[-1, ...] = x
     return output
@@ -223,6 +227,7 @@ def sample(model, noise_sampler, num_samples, args):
     noise_max = args.get("noise_max", 80)
     exponent = args.get("step_exponent", 7)
     step_scale = args.get("step_scale", 1.0)
+    method = args.get("method", "midpoint")
 
     # Load observations
     obs_args = args["observation"]
@@ -240,8 +245,6 @@ def sample(model, noise_sampler, num_samples, args):
     condition_vec = torch.tensor(data_vec, device=DEVICE)
     data = torch.tensor(data, device=DEVICE).unsqueeze(0)
     (_, channels, resolution) = data.shape
-    
-
 
     # Observation conditioning
     mask = build_observation_operator(dataset, obs_fields).to(DEVICE)
@@ -258,12 +261,8 @@ def sample(model, noise_sampler, num_samples, args):
     # Load timesteps
     steps = edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent)
 
-    # Bake in conditioning information
-    def D(x, sigma):
-        return model(x, sigma, condition_vector=condition_vec)
-
     output = reverse(
-        D,
+        model,
         xt,
         steps,
         dataset,
@@ -272,6 +271,8 @@ def sample(model, noise_sampler, num_samples, args):
         obs_var=obs_var,
         pde_strength=0.0,
         step_scale=step_scale,
+        method=method,
+        model_args=dict(condition_vector=condition_vec)
     )
 
     final = output[-1, ...]
