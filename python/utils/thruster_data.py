@@ -17,8 +17,8 @@ class NormInfo(TypedDict):
 class Normalizer:
     def __init__(self, dir):
         self.dir = Path(dir)
-        self.norm_tensor, self.metadata_tensor = Normalizer.read_normalization_info(dir/"norm_data.csv")
-        self.norm_params, self.metadata_params = Normalizer.read_normalization_info(dir/"norm_params.csv")
+        self.norm_tensor, self.metadata_tensor = Normalizer.read_normalization_info(self.dir/"norm_data.csv")
+        self.norm_params, self.metadata_params = Normalizer.read_normalization_info(self.dir/"norm_params.csv")
 
     @staticmethod
     def read_normalization_info(path: Path|str) -> tuple[NormInfo, pd.DataFrame]:

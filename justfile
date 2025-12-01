@@ -12,6 +12,15 @@ FIELDS := "ui_1 Tev E nu_an ne B"
 MODE := "quantiles"
 NUM_MCMC := "1024"
 
+plot-state-noTe:
+    uv run python/plot.py \
+        --samples=samples/noTe \
+        --mode={{MODE}} \
+        -o "state_noTe.png" \
+        -f ui_1 nu_an phi Tev ne E \
+        --observation=configs/sample_noTe.toml \
+        --type=sidebyside
+
 plot-reverse-noTe:
     uv run python/plot.py \
         --samples=samples/noTe \
@@ -43,7 +52,8 @@ plot-noTe:
         -f {{ FIELDS }} \
         --num-mcmc={{ NUM_MCMC }} \
         --observation=configs/sample_noTe.toml \
-        --nolegend
+        --nolegend \
+        --type=comparison
 
 plot-withTe:
     uv run python/plot.py \
@@ -54,4 +64,6 @@ plot-withTe:
         -o "mcmc_withTe.png" \
         -f {{ FIELDS }} \
         --num-mcmc={{ NUM_MCMC }} \
-        --observation=configs/sample_withTe.toml
+        --observation=configs/sample_withTe.toml \
+        --nolegend \
+        --type=comparison

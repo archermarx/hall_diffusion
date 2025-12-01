@@ -34,7 +34,6 @@ DATA_LINESTYLE = (0, (4.0, 4.0))
 DATA_LINE_ARGS = dict(linewidth=2.5, linestyle=DATA_LINESTYLE)
 XLABEL = "z (channel lengths)"
 OBS_COLOR = "orange"
-
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
 # Build quantiles/credible intervals we want to plot
@@ -45,9 +44,9 @@ for ci in CREDIBLE_INTERVALS:
     QUANTILES.append(0.5 - ci/2)
     QUANTILES.append(0.5 + ci/2)
 
-
 # Discharge channel length for the thruster (TODO: embed this in dataset)
 CHANNEL_LENGTH = 0.025
+
 
 def alpha_blend(color, alpha, background="white"):
     r, g, b, _ = colors.to_rgba(color)
@@ -57,7 +56,8 @@ def alpha_blend(color, alpha, background="white"):
     b = (1 - alpha) * bb + alpha * b
     return (r, g, b, 1.0)
 
-field_info = {
+
+FIELD_INFO = {
      "B": dict(
         ylabel=r"Field strength (G)",
         title="Magnetic field strength",
@@ -112,6 +112,7 @@ field_info = {
     ),
 }
 
+
 def letter_args(pos, pad):
     # default: top left
     x = pad
@@ -135,6 +136,7 @@ def letter_args(pos, pad):
 
     return dict(xy=(x,y), ha=ha, va=va, xycoords="axes fraction", fontsize=25)
 
+
 def load_samples(sample_dir, num_samples=None):
     dataset = ThrusterDataset(sample_dir)
     indices = np.arange(len(dataset))
@@ -143,8 +145,9 @@ def load_samples(sample_dir, num_samples=None):
 
     samples_norm = np.array([dataset[i][2] for i in indices])
     samples = dataset.norm.denormalize_tensor(samples_norm)
-    
+
     return dataset, samples
+
 
 def plot_quantiles(ax, x, qs, color=None, zorder=0):
     color = "tab:blue" if color is None else color
@@ -167,16 +170,16 @@ def plot_quantiles(ax, x, qs, color=None, zorder=0):
             label=f"{round(ci*100):d}\\% CI",
         )
 
-def plot_traces(ax, x, data, color, zorder=0):
 
+def plot_traces(ax, x, data, color, zorder=0):
     num_samples = data.shape[0]
     N = 250
     indices = np.arange(num_samples)
     indices = np.random.choice(indices, N)
-
     alpha = 0.3 / (N / 10)
 
     ax.plot(x, data[indices].T, color=color, alpha=alpha, zorder=zorder)
+
 
 def plot_field(
     ax,
@@ -221,78 +224,50 @@ def get_field(field, field_names, data):
     else:
         return data[:, index_dict[field], :]
 
-def plot_comparison(
-    axes,
-    x,
-    samples,
-    field,
-    field_names,
-    titles=None,
-    ref=None,
-    show_legend=True,
-    show_xlabel=True,
-    letters=None,
-    mode="quantiles",
-    observation=None,
-):
-    fields_loaded = [get_field(field, field_names, s) for s in samples]
-    scale_factor = field_info[field].get("yscalefactor", 1.0)
-    if ref is None:
-        field_ref = None
-    else:
-        field_ref = get_field(field, field_names, ref)[0, :] * scale_factor
 
-    for i, (ax, y) in enumerate(zip(axes, fields_loaded)):
-        plot_field(ax, x, y, mode=mode, **field_info[field])
-        if field_ref is not None:
+def plot_multifield(axes, x, samples, fields, field_names, ref=None, mode="quantiles", observation=None):
+    assert (len(axes) == len(fields))
 
-            ax.plot(x, field_ref, color="black", label="Data", **DATA_LINE_ARGS)
+    for (ax, field) in zip(axes, fields):
+        y = get_field(field, field_names, samples)
 
-            if observation is not None and field in observation:
-                _, x_data, y_data = utils.get_observation_locs(observation, field, x*CHANNEL_LENGTH, form="denormalized")
-                obs_args = dict(color=OBS_COLOR, label="Observed", zorder=100)
+        scale_factor = FIELD_INFO[field].get("yscalefactor", 1.0)
+        plot_field(ax, x, y, **FIELD_INFO[field], mode=mode)
 
-                x_data = x_data / CHANNEL_LENGTH
+        if ref is not None:
+            y_ref = get_field(field, field_names, ref)[0, :] * scale_factor
+            ax.plot(x, y_ref, color="black", label="Data", **DATA_LINE_ARGS)
 
-                if len(x_data) != len(field_ref):
-                    if y_data is None:
-                        y_data = np.interp(x_data, x, field_ref)
-                    else:
-                        y_data = y_data * scale_factor
-                    ax.scatter(x_data, y_data, **obs_args)
+        if observation is not None and field in observation["fields"]:
+            y_ref_obs = get_field(field, field_names, observation["ref"])[0, :] * scale_factor
+
+            _, x_data, y_data = utils.get_observation_locs(
+                observation["fields"],
+                field, x*CHANNEL_LENGTH,
+                normalizer=observation["data"].norm,
+                form="denormalized"
+            )
+
+            obs_args = dict(color=OBS_COLOR, label="Observed", zorder=100)
+
+            x_data = x_data / CHANNEL_LENGTH
+
+            if len(x_data) != len(y_ref_obs):
+                if y_data is None:
+                    y_data = np.interp(x_data, x, y_ref_obs)
                 else:
-                    ax.plot(x_data, field_ref, **DATA_LINE_ARGS, **obs_args)
-       
-        if not show_xlabel:
-            ax.set(xlabel="", xticklabels=[])
-        if i > 0:
-            ax.set(ylabel="", yticklabels=[])
-
-        if titles is not None:
-            ax.set(title=titles[i])
-
-    # Equilize ylims
-    ymin = min(ax.get_ylim()[0] for ax in axes)
-    ymax = max(ax.get_ylim()[1] for ax in axes)
-    for i, ax in enumerate(axes):
-        ax.set_ylim(ymin, ymax)
-
-        # Add plot letters
-        if letters is not None:
-            letter_pos = field_info[field].get("letter_pos", "")
-            ax.annotate(f"({letters[i]})", **letter_args(letter_pos, 0.05))
-
-        if show_legend and i == 0:
-            ax.legend()
+                    y_data = y_data * scale_factor
+                ax.scatter(x_data, y_data, **obs_args)
+            else:
+                ax.plot(x_data, y_ref_obs, **DATA_LINE_ARGS, **obs_args)
 
 
-def plot_multifield_comparison(args):
+def add_letter(ax, field, ind):
+    letter_pos = FIELD_INFO[field].get("letter_pos", "")
+    ax.annotate(f"({LETTERS[ind]})", **letter_args(letter_pos, 0.05))
 
-    if args.ref is not None:
-        _, samples_ref = load_samples(args.ref)
-    else:
-        samples_ref = None
 
+def plot_multifield_comparison(args, **kwargs):
     dataset_gen, samples_generated = load_samples(args.samples)
     _, samples_mcmc = load_samples(args.mcmc, num_samples=args.num_mcmc)
 
@@ -303,118 +278,83 @@ def plot_multifield_comparison(args):
     fields = args.fields
     nfields = len(fields)
 
-    fig, axes = plt.subplots(
-        nfields, 2, layout="constrained", figsize=(7, nfields * row_height), dpi=200
-    )
+    fig, axes = plt.subplots(nfields, 2, layout="constrained", figsize=(7, nfields * row_height), dpi=200)
 
-    titles = [
-        f"MCMC ({args.num_mcmc} samples)",
-        f"Generated ({samples_generated.shape[0]} samples)",
-    ]
+    # Plot fields
+    field_args = dict(fields=fields, field_names=field_names)
+    plot_multifield(axes[:, 0], x, samples_mcmc, **field_args, **kwargs)
+    plot_multifield(axes[:, 1], x, samples_generated, **field_args, **kwargs)
 
-    if args.observation is None:
-        observation = None
-    else:
-        with open(args.observation, "rb") as fp:
-            obs_dict = utils.read_observation(tomllib.load(fp)["observation"])
-            observation = obs_dict["fields"]
+    # Plot configuration
+    axes[0,0].set_title(f"MCMC ({args.num_mcmc} samples)")
+    axes[0,1].set_title(f"Generated ({samples_generated.shape[0]} samples)")
 
-    for i, field in enumerate(fields):
-        plot_comparison(
-            axes[i, :],
-            x,
-            [samples_mcmc, samples_generated],
-            field,
-            field_names,
-            ref=samples_ref,
-            show_xlabel=(False if i < nfields - 1 else True),
-            show_legend=(True if i == 0 and not args.nolegend else False),
-            titles=(titles if i == 0 else None),
-            letters=[LETTERS[2 * i], LETTERS[2 * i + 1]],
-            mode=args.mode,
-            observation=observation,
-        )
+    # Remove shared labels
+    [ax.set(xlabel="", xticklabels=[]) for ax in axes[:-1, :].ravel()]
+    [ax.set(ylabel="", yticklabels=[]) for ax in axes[:, 1]]
+
+    # Shared y-limits on horizontal
+    for (i, row) in enumerate(axes):
+        ymin = min(ax.get_ylim()[0] for ax in row)
+        ymax = max(ax.get_ylim()[1] for ax in row)
+        for (j, ax) in enumerate(row):
+            ax.set(ylim=(ymin, ymax))
+            add_letter(ax, fields[i], 2*i + j)
 
     fig.savefig(args.output)
 
-def plot_sidebyside(args):
 
+def plot_sidebyside(args, **kwargs):
     col_width = 3.5
+    row_height = 3
     num_fields = len(args.fields)
 
-    fig, axes = plt.subplots(1,num_fields, constrained_layout='true', dpi=200, figsize=(col_width * num_fields, 3))
+    num_cols = 2
+    num_rows = math.ceil(num_fields / num_cols)
+    figsize = (col_width * num_cols, row_height * num_rows)
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=figsize, layout="constrained", dpi=200)
 
     dataset, samples = load_samples(args.samples)
     x = dataset.grid / CHANNEL_LENGTH
     field_names = list(dataset.fields())
 
+    axes_linear = axes.ravel()
+    plot_multifield(axes_linear[:num_fields], x, samples, args.fields, field_names, **kwargs)
+    [ax.set_axis_off() for ax in axes_linear[num_fields:]]
+
+    for (i, (field, ax)) in enumerate(zip(args.fields, axes_linear)):
+        add_letter(ax, field, i)
+        if field == "ui_1":
+            ax.legend(fontsize=12)
+
+    fig.savefig(args.output)
+
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+
     if args.observation is None:
         observation = None
     else:
         with open(args.observation, "rb") as fp:
             obs_dict = utils.read_observation(tomllib.load(fp)["observation"])
-            print(f"{obs_dict=}")
-            observation = obs_dict["fields"]
+            base_data, samples_ref = load_samples(obs_dict["base_sim"])
+            observation = dict(fields=obs_dict["fields"], data=base_data, ref=samples_ref)
 
     if args.ref is not None:
         _, samples_ref = load_samples(args.ref)
     else:
         samples_ref = None
-    
 
-    for (i, (ax, field)) in enumerate(zip(axes, args.fields)):
-        fields_loaded = get_field(field, field_names, samples)
+    common_args = dict(ref=samples_ref, observation=observation, mode=args.mode)
 
-        plot_field(ax, x, fields_loaded, **field_info[field], color='tab:blue')
-        ax.set_xticks(range(math.ceil(max(x))))
-
-        if samples_ref is None:
-            field_ref = None
-        else:
-            field_ref = get_field(field, field_names, samples_ref)[0, :] * field_info[field].get(
-                "yscalefactor", 1.0
-            )
-
-        if field_ref is not None:
-
-            ax.plot(x, field_ref, color="black", label="Data", **DATA_LINE_ARGS)
-            ylim = ax.get_ylim()
-
-            if observation is not None and field in observation:
-                locs = observation[field].get("locs", "all")
-                obs_args = dict(color=OBS_COLOR, label="Observed", zorder=10)
-                if isinstance(locs, list):
-                    locs = np.array(locs) / CHANNEL_LENGTH
-                    y = np.interp(locs, x, field_ref)
-                    ax.scatter(locs, y, **obs_args)
-                else:
-                    ax.plot(x, field_ref, **DATA_LINE_ARGS, **obs_args)
-            else:
-                ax.plot([-1], [-1], linewidth=2, **obs_args)
-
-            ax.set_ylim(ylim)
-
-
-        # Add plot letters
-        letter_pos = field_info[field].get("letter_pos", "")
-        ax.annotate(f"({LETTERS[i]})", **letter_args("top left", 0.05))
-
-        if field == "ui_1":
-            ax.legend(fontsize=12)
-
-
-    fig.savefig(args.output)
-
-if __name__ == "__main__":
-    args = parser.parse_args()
-
-    if args.type == "multifield":
-        plot_multifield_comparison(args)
+    if args.type == "comparison":
+        plot_multifield_comparison(args, **common_args)
     elif args.type == "sidebyside":
-        plot_sidebyside(args)
+        plot_sidebyside(args, **common_args)
     else:
         raise NotImplementedError()
-    
+
 
 
 
