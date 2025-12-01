@@ -31,24 +31,23 @@ def get_device():
 def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
     x = obs[field].get("x", "all")
     y = obs[field].get("y", None)
-
+        
     if x == "all":
-        x = grid
-
-    assert (y is None) or (len(x) == len(y))
-    x = np.array(x)
+        x_new = grid
+        indices = np.arange(len(x_new))
+    else:
+        x = np.array(x)
+        x_new = np.zeros_like(x)
+        indices = np.zeros_like(x, dtype=int)
+        for (i, _x) in enumerate(x):
+            j = bisect.bisect_left(grid, _x)
+            indices[i] = j
+            x_new[i] = grid[j]
     
+    assert (y is None) or (len(x) == len(y))
+
     if y is not None:
         y = np.array(y)
-
-    x_new = np.zeros_like(x)
-    indices = np.zeros_like(x, dtype=int)
-    for (i, _x) in enumerate(x):
-        j = bisect.bisect_left(grid, _x)
-        indices[i] = j
-        x_new[i] = grid[j]
-
-    if y is not None:
         normalized = obs[field]["normalized"]
 
         if form == "normalized" and not normalized:

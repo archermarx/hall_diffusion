@@ -26,7 +26,7 @@ parser.add_argument("config", type=str)
 DEVICE = torch.device("cpu")
 
 def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE):
-    _, _, data_tensor = dataset[0]
+    data_tensor = torch.tensor(dataset[0][2])
     (num_channels, resolution) = data_tensor.shape
 
     obs_matrix_loc = torch.zeros(num_channels, resolution)
@@ -52,7 +52,7 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
         # Get observation from file
         x_inds, x_data, y_data = utils.get_observation_locs(obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized")
 
-        if (len(x_data) == resolution) and (x_inds == np.arange(resolution)):
+        if (len(x_data) == resolution) and np.all(x_inds == np.arange(resolution)):
             # If x_data == grid, then we're observing an entire row
             print("Observing row " + obs_field)
             obs_matrix_loc[row_index, :] = 1.0
@@ -69,7 +69,7 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
 
             if y_data is None:
                 print("Using underlying data")
-                obs_matrix_dat[row_index, x_inds] = data_tensor[x_inds, :]
+                obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
             else:
                 print("Using data from file")
                 obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32)
