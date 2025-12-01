@@ -6,8 +6,8 @@ import argparse
 import matplotlib
 import tomllib
 import math
-import bisect
 
+from utils import utils
 from utils.thruster_data import ThrusterDataset
 
 parser = argparse.ArgumentParser()
@@ -142,7 +142,7 @@ def load_samples(sample_dir, num_samples=None):
         indices = np.random.choice(indices, size=num_samples)
 
     samples_norm = np.array([dataset[i][2] for i in indices])
-    samples = dataset.denormalize_tensor(samples_norm)
+    samples = dataset.norm.denormalize_tensor(samples_norm)
     
     return dataset, samples
 
@@ -167,8 +167,6 @@ def plot_quantiles(ax, x, qs, color=None, zorder=0):
             label=f"{round(ci*100):d}\\% CI",
         )
 
-
-
 def plot_traces(ax, x, data, color, zorder=0):
 
     num_samples = data.shape[0]
@@ -179,7 +177,6 @@ def plot_traces(ax, x, data, color, zorder=0):
     alpha = 0.3 / (N / 10)
 
     ax.plot(x, data[indices].T, color=color, alpha=alpha, zorder=zorder)
-
 
 def plot_field(
     ax,
@@ -224,14 +221,6 @@ def get_field(field, field_names, data):
     else:
         return data[:, index_dict[field], :]
 
-def get_grid_locs(loc, grid):
-    loc = np.array(loc)
-    new_loc = np.zeros_like(loc)
-    for (i, x) in enumerate(loc):
-        j = bisect.bisect_left(grid, x)
-        new_loc[i] = grid[j]
-    return new_loc
-
 def plot_comparison(
     axes,
     x,
@@ -247,12 +236,11 @@ def plot_comparison(
     observation=None,
 ):
     fields_loaded = [get_field(field, field_names, s) for s in samples]
+    scale_factor = field_info[field].get("yscalefactor", 1.0)
     if ref is None:
         field_ref = None
     else:
-        field_ref = get_field(field, field_names, ref)[0, :] * field_info[field].get(
-            "yscalefactor", 1.0
-        )
+        field_ref = get_field(field, field_names, ref)[0, :] * scale_factor
 
     for i, (ax, y) in enumerate(zip(axes, fields_loaded)):
         plot_field(ax, x, y, mode=mode, **field_info[field])
@@ -261,15 +249,20 @@ def plot_comparison(
             ax.plot(x, field_ref, color="black", label="Data", **DATA_LINE_ARGS)
 
             if observation is not None and field in observation:
-                locs = observation[field].get("locs", "all")
+
+                _, x_data, y_data = utils.get_observation_locs(observation, field, x*CHANNEL_LENGTH)
                 obs_args = dict(color=OBS_COLOR, label="Observed", zorder=100)
-                if isinstance(locs, list):
-                    locs = np.array(locs) / CHANNEL_LENGTH
-                    locs = get_grid_locs(locs, x)
-                    y = np.interp(locs, x, field_ref)
-                    ax.scatter(locs, y, **obs_args)
+
+                x_data = x_data / CHANNEL_LENGTH
+
+                if len(x_data) != len(field_ref):
+                    if y_data is None:
+                        y_data = np.interp(x_data, x, field_ref)
+                    else:
+                        y_data = y_data * scale_factor
+                    ax.scatter(x_data, y_data, **obs_args)
                 else:
-                    ax.plot(x, field_ref, **DATA_LINE_ARGS, **obs_args)
+                    ax.plot(x_data, field_ref, **DATA_LINE_ARGS, **obs_args)
 
 
        
@@ -297,7 +290,7 @@ def plot_comparison(
 
 
 def plot_multifield_comparison(args):
-    
+
     if args.ref is not None:
         _, samples_ref = load_samples(args.ref)
     else:
@@ -307,7 +300,7 @@ def plot_multifield_comparison(args):
     _, samples_mcmc = load_samples(args.mcmc, num_samples=args.num_mcmc)
 
     x = dataset_gen.grid / CHANNEL_LENGTH
-    field_names = list(dataset_gen.fields.keys())
+    field_names = list(dataset_gen.fields())
 
     row_height = 2.3
     fields = args.fields
@@ -355,7 +348,7 @@ def plot_sidebyside(args):
 
     dataset, samples = load_samples(args.samples)
     x = dataset.grid / CHANNEL_LENGTH
-    field_names = list(dataset.fields.keys())
+    field_names = list(dataset.fields())
 
 
     if args.observation is None:
