@@ -249,8 +249,7 @@ def plot_comparison(
             ax.plot(x, field_ref, color="black", label="Data", **DATA_LINE_ARGS)
 
             if observation is not None and field in observation:
-
-                _, x_data, y_data = utils.get_observation_locs(observation, field, x*CHANNEL_LENGTH)
+                _, x_data, y_data = utils.get_observation_locs(observation, field, x*CHANNEL_LENGTH, form="denormalized")
                 obs_args = dict(color=OBS_COLOR, label="Observed", zorder=100)
 
                 x_data = x_data / CHANNEL_LENGTH
@@ -263,8 +262,6 @@ def plot_comparison(
                     ax.scatter(x_data, y_data, **obs_args)
                 else:
                     ax.plot(x_data, field_ref, **DATA_LINE_ARGS, **obs_args)
-
-
        
         if not show_xlabel:
             ax.set(xlabel="", xticklabels=[])
@@ -319,7 +316,8 @@ def plot_multifield_comparison(args):
         observation = None
     else:
         with open(args.observation, "rb") as fp:
-            observation = tomllib.load(fp)["observation"]["fields"]
+            obs_dict = utils.read_observation(tomllib.load(fp)["observation"])
+            observation = obs_dict["fields"]
 
     for i, field in enumerate(fields):
         plot_comparison(
@@ -350,12 +348,13 @@ def plot_sidebyside(args):
     x = dataset.grid / CHANNEL_LENGTH
     field_names = list(dataset.fields())
 
-
     if args.observation is None:
         observation = None
     else:
         with open(args.observation, "rb") as fp:
-            observation = tomllib.load(fp)["observation"]["fields"]
+            obs_dict = utils.read_observation(tomllib.load(fp)["observation"])
+            print(f"{obs_dict=}")
+            observation = obs_dict["fields"]
 
     if args.ref is not None:
         _, samples_ref = load_samples(args.ref)

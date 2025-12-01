@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import bisect
 import pandas as pd
+import tomllib
 
 def get_script_dir():
     return Path(os.path.dirname(os.path.realpath(sys.argv[0])))
@@ -27,32 +28,54 @@ def get_device():
 
     return device
 
-def get_observation_locs(obs, field, grid):
-    resolution = len(grid)
-    locs = obs[field].get("locs", "all")
+def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
+    x = obs[field].get("x", "all")
+    y = obs[field].get("y", None)
 
-    field_data = None
+    if x == "all":
+        x = grid
+
+    assert (y is None) or (len(x) == len(y))
+    x = np.array(x)
     
-    if locs == "all":
-        return grid, np.arange(resolution), field_data
-    
-    if isinstance(locs, str):
-        # Try and open as a file
-        file = pd.read_csv(locs)
-        z_locs = file["z"].to_numpy()
+    if y is not None:
+        y = np.array(y)
 
-        # Check for field data
-        if field in file.columns:
-            field_data = file[field].to_numpy()
-
-    elif isinstance(locs, list):
-        z_locs = np.array(locs)
-
-    z_new = np.zeros_like(z_locs)
-    indices = np.zeros_like(z_locs, dtype=int)
-    for (i, x) in enumerate(z_locs):
-        j = bisect.bisect_left(grid, x)
+    x_new = np.zeros_like(x)
+    indices = np.zeros_like(x, dtype=int)
+    for (i, _x) in enumerate(x):
+        j = bisect.bisect_left(grid, _x)
         indices[i] = j
-        z_new[i] = grid[j]
+        x_new[i] = grid[j]
 
-    return indices, z_new, field_data
+    if y is not None:
+        normalized = obs[field]["normalized"]
+
+        if form == "normalized" and not normalized:
+            if normalizer is None:
+                raise RuntimeError("Normalized data requested but no normalizer provided.")
+
+            y = normalizer.normalize(y, field)
+        elif form == "denormalized" and normalized:
+            if normalizer is None:
+                raise RuntimeError("De-normalized data requested but no normalizer provided.")
+
+            y = normalizer.denormalize(y, field)
+        elif form != "denormalized" and form != "normalized":
+            raise RuntimeError("Data must be requested in either normalized or denormalized form")
+
+    return indices, x_new, y
+
+def read_observation(obs):
+    if isinstance(obs, str):
+        with open(obs, "rb") as fp:
+            obs_dict = tomllib.load(fp)
+    elif isinstance(obs, dict):
+        obs_dict = obs
+    else:
+        raise NotImplementedError()
+
+    if "extra" in obs_dict:
+        obs_dict.update(read_observation(obs_dict["extra"]))
+                        
+    return obs_dict

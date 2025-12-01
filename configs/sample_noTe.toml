@@ -3,7 +3,7 @@ num_samples = 64
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
-num_steps = 1024
+num_steps = 512
 
 # Which model to load (ema, best, last) 
 model_type = "ema"
@@ -14,21 +14,4 @@ replace_samples = true
 # Step scale
 step_scale = 1.1
 
-[observation]
-# Folder containing (normalized) simulation info to condition on.
-# If not provided, we sample unconditionally.
-file = "mcmc_reference/ref_sim/normalized"
-# Default stddev
-std_dev = 1.2
-
-# [observation.fields.B]
-# locs = "all"
-# error_type = "relative"
-# std_dev = 1.0
-
-[observation.fields.ui_1]
-#locs = "all"
-#locs = [0.025, 0.0275, 0.03, 0.035]
-locs = "experimental_data/ui_pb=3.5e-5.csv"
-error_type = "relative"
-std_dev = 1.0
+observation = "experimental_data/data_pb=3.5e-5.toml"

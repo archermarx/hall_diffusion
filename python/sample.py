@@ -50,7 +50,7 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
         stddev = obs_fields[obs_field].get("std_dev", default_stddev)
 
         # Get observation from file
-        x_inds, x_data, y_data = utils.get_observation_locs(obs_fields, obs_field, grid)
+        x_inds, x_data, y_data = utils.get_observation_locs(obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized")
 
         if (len(x_data) == resolution) and (x_inds == np.arange(resolution)):
             # If x_data == grid, then we're observing an entire row
@@ -72,7 +72,6 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
                 obs_matrix_dat[row_index, x_inds] = data_tensor[x_inds, :]
             else:
                 print("Using data from file")
-                y_data = dataset.norm.normalize(y_data, obs_field)
                 obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32)
 
     # Dimensions
@@ -237,12 +236,12 @@ def sample(model, noise_sampler, num_samples, args):
     method = args.get("method", "midpoint")
 
     # Load observations
-    obs_args = args["observation"]
-    obs_file = Path(obs_args["file"])
+    obs_args = utils.read_observation(args["observation"])
+    obs_file = Path(obs_args["base_sim"])
 
     # Load data for conditioning
     dataset = ThrusterDataset(obs_file)
-    _, data_vec, data = dataset[0]
+    _, data_vec, _ = dataset[0]
     condition_vec = torch.tensor(data_vec, device=DEVICE)
     #data = torch.tensor(data, device=DEVICE).unsqueeze(0)
     
