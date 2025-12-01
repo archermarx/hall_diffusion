@@ -26,7 +26,9 @@ parser.add_argument("config", type=str)
 DEVICE = torch.device("cpu")
 
 def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE):
-    data_tensor = torch.tensor(dataset[0][2])
+    _, param_vec, data_tensor = dataset[0]
+    data_tensor = torch.tensor(data_tensor, device=DEVICE)
+    param_vec = torch.tensor(param_vec, device=DEVICE) 
     (num_channels, resolution) = data_tensor.shape
 
     obs_matrix_loc = torch.zeros(num_channels, resolution)
@@ -63,6 +65,7 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
             # Partial/sparse observation of the row
             # If y not provided, we use the underlying data matrix from the dataset
             # Otherwise we use the y found in the file
+            # TODO: stddevs that vary point-to-point
             obs_matrix_loc[row_index, x_inds] = 1.0
             obs_matrix_var[row_index, x_inds] = stddev**2
             n += len(x_inds)
@@ -92,7 +95,13 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
     obs_y = obs_A @ obs_matrix_dat.reshape(-1)
     obs_var = obs_A @ obs_matrix_var.reshape(-1)
 
-    return obs_A.to(DEVICE), obs_y.to(DEVICE), obs_var.to(DEVICE)
+    # Read scalar parameters if present
+    if (params := observations.get("params", None)) is not None:
+        for (p, i) in dataset.params().items():
+            if p in params:
+                param_vec[i] = dataset.norm.normalize(params[p], p)
+
+    return obs_A.to(DEVICE), obs_y.to(DEVICE), obs_var.to(DEVICE), param_vec
 
 
 def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
@@ -241,12 +250,7 @@ def sample(model, noise_sampler, num_samples, args):
 
     # Load data for conditioning
     dataset = ThrusterDataset(obs_file)
-    _, data_vec, _ = dataset[0]
-    condition_vec = torch.tensor(data_vec, device=DEVICE)
-    #data = torch.tensor(data, device=DEVICE).unsqueeze(0)
-    
-    # Observation conditioning
-    obs_operator, obs_data, obs_var = build_observation(dataset, obs_args, device=DEVICE)
+    obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, device=DEVICE)
     obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
 
     # Sample initial noise
@@ -265,7 +269,7 @@ def sample(model, noise_sampler, num_samples, args):
         pde_strength=0.0,
         step_scale=step_scale,
         method=method,
-        model_args=dict(condition_vector=condition_vec)
+        model_args=dict(condition_vector=param_vec)
     )
 
     final = output[-1, ...]
@@ -286,7 +290,7 @@ def sample(model, noise_sampler, num_samples, args):
     for i in range(num_samples):
         file = data_dir / f"{uuid.uuid4()}.npz"
         tens = final[i, :].cpu().numpy()
-        np.savez(file, data=tens, params=condition_vec.cpu().numpy())
+        np.savez(file, data=tens, params=param_vec.cpu().numpy())
 
 
 if __name__ == "__main__":
