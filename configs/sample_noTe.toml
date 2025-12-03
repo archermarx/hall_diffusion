@@ -12,6 +12,6 @@ out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale = 1.1
+step_scale = 1.2
 
 observation = "experimental_data/data_pb=3.5e-5.toml"

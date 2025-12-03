@@ -17,7 +17,7 @@ plot-state-noTe:
         --samples=samples/noTe \
         --mode={{MODE}} \
         -o "state_noTe.png" \
-        -f ui_1 nu_an phi Tev ne E \
+        -f  ne nn nu_an phi ui_1 Tev \
         --observation=configs/sample_noTe.toml \
         --type=sidebyside
 

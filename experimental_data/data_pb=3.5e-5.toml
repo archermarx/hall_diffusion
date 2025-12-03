@@ -1,7 +1,6 @@
 # Folder containing normalization information, if the above is unnormalized
 base_sim = "mcmc_reference/ref_sim/normalized"
-stddev = 1.2
-
+stddev = 0.75
 # TODO: use this
 # TODO: normalized = true | false
 [params]

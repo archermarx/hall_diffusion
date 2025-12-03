@@ -61,13 +61,13 @@ FIELD_INFO = {
      "B": dict(
         ylabel=r"Field strength (G)",
         title="Magnetic field strength",
-        letter_pos = "top",
+        letter_pos = "top right",
         yscalefactor = 10_000,
     ),
     "Tev": dict(
         ylabel=r"Electron temperature (eV)",
         title="Electron temperature",
-        letter_pos = "top",
+        letter_pos = "top right",
     ),
     "inv_hall": dict(
         ylabel=r"$\nu_{an}/\omega_{ce}$",
@@ -79,13 +79,13 @@ FIELD_INFO = {
         ylabel=r"Anom. coll. freq (Hz)",
         ylog=True,
         title="Anomalous collision freq.",
-        letter_pos = "bottom",
+        letter_pos = "top right",
     ),
     "ne": dict(
         ylabel=r"Plasma density (m$^{-3}$)",
-        ylog=True,
+        ylog=False,
         title="Plasma density",
-        letter_pos = "bottom",
+        letter_pos = "top right",
     ),
     "ui_1": dict(
         ylabel=r"Ion velocity (km/s)",
@@ -97,18 +97,18 @@ FIELD_INFO = {
         ylabel=r"Electric field (kV/m)",
         yscalefactor=1 / 1000,
         title="Electric field",
-        letter_pos = "top",
+        letter_pos = "top right",
     ),
     "phi": dict(
         ylabel=r"Potential (V)",
         title="Electrostatic potential",
-        letter_pos = "bottom",
+        letter_pos = "top right",
     ),
     "nn": dict(
         ylabel=r"Neutral density (m$^{-3}$)",
-        ylog=True,
+        ylog=False,
         title="Neutral density",
-        letter_pos = "bottom",
+        letter_pos = "top right",
     ),
 }
 
@@ -326,6 +326,11 @@ def plot_sidebyside(args, **kwargs):
         add_letter(ax, field, i)
         if field == "ui_1":
             ax.legend(fontsize=12)
+
+    # Remove xlabels and ticks on all but lat plto
+    for (i, row) in enumerate(axes):
+        if i < num_rows - 1:
+            [ax.set(xlabel="", xticklabels=[]) for ax in row]
 
     fig.savefig(args.output)
 
