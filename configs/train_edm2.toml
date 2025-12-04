@@ -39,12 +39,12 @@ use_amp = true
 # Log file name
 log_file = "training.dat"
 # Noise sampler
-noise_sampler = {type = "rbf", scale = 0.5}
+noise_sampler = {type = "rbf", scale = 0.05}
 
 # Loss function configuration
 [training.loss]
 # log(mean) of noise levels to sample
-P_mean = -1.0
+P_mean = -1.2
 # log(std) of noise levels to sample
 P_std = 1.2
 # Whether to include the heterosceladic uncertainty component (`logvar`) in the training loss.
@@ -79,22 +79,3 @@ test_data_dir = "data/batch_3/normalized_test_small"
 load_checkpoint = true
 # Frequency in batches with which checkpoints are saved. Set to -1 to disable checkpointing
 checkpoint_save_freq = 20
-
-# Sampling configuration
-[sampling]
-# Which plasma properties should be held constant during sampling. An empty list gives unconditional samples.
-fields_to_keep = ["B", "ui_1"]
-# Observation std deviation
-observation_stddev = 1.0
-# Whether to use the saved weights of the EMA model instead of the base weights
-use_ema = false
-# Number of independent sample traces to generate
-num_samples = 64
-# Number of sampling steps to take
-num_steps = 1024
-# Output directory for generations. Will be created as a subdirectory of the main output directory
-out_dir = "samples"
-# File containing (normalized) simulation info to condition on. If not provided, we generate one randomly from the test dataset.
-condition_file = "mcmc_reference/ref_sim/normalized"
-# Step scale
-step_scale = 1.1

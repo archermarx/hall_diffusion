@@ -329,6 +329,9 @@ def train(args):
     train_dataset = thruster_data.ThrusterDataset(train_data_dir)
     test_dataset = thruster_data.ThrusterDataset(test_data_dir)
 
+    # Check that normalization is the same between training and test datasets
+    assert train_dataset.norm == test_dataset.norm
+
     pin = DEVICE.type == "cuda"
     train_loader = DataLoader(
         train_dataset,
@@ -488,6 +491,7 @@ def train(args):
 
     loss_fn = EDM2Loss(noise_sampler, **loss_args)
 
+
     # ---------------------------------------------
     # Main training loop
     while True:
@@ -611,6 +615,7 @@ def train(args):
                 model=model.state_dict(),
                 model_config=config["model"],
                 train_config=config["training"],
+                normalizer=train_dataset.norm,
                 optimizer=optimizer.state_dict(),
                 best=best_training_params,
                 ema=ema_model.state_dict(),

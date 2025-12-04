@@ -1,5 +1,5 @@
 
-MODEL := "saved_models/edm2_small_old/checkpoint_random.pth.tar"
+MODEL := "saved_models/edm2_small_old/checkpoint.pth.tar"
 
 sample-noTe:
     uv run python/sample.py {{ MODEL }} configs/sample_noTe.toml
@@ -17,7 +17,7 @@ plot-state-noTe:
         --samples=samples/noTe \
         --mode={{MODE}} \
         -o "state_noTe.png" \
-        -f  ne nn nu_an phi ui_1 Tev \
+        -f  ne E nu_an phi ui_1 Tev \
         --observation=configs/sample_noTe.toml \
         --type=sidebyside
 
