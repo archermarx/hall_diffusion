@@ -482,7 +482,7 @@ def train(args):
     start_epoch = max_epochs
 
     # Loss function
-    channels = len(train_dataset.fields)
+    channels = train_dataset.num_fields
     resolution = len(train_dataset.grid)
     print(f"{channels=}, {resolution=}")
 

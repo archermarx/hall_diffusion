@@ -6,9 +6,97 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
+from typing import TypedDict
+
+class NormInfo(TypedDict):
+    names: dict[str, int]
+    mean: np.ndarray
+    std: np.ndarray
+    log: np.ndarray
+
+class Normalizer:
+    def __init__(self, dir):
+        self.dir = Path(dir)
+        self.norm_tensor, self.metadata_tensor = Normalizer.read_normalization_info(self.dir/"norm_data.csv")
+        self.norm_params, self.metadata_params = Normalizer.read_normalization_info(self.dir/"norm_params.csv")
+
+    @staticmethod
+    def read_normalization_info(path: Path|str) -> tuple[NormInfo, pd.DataFrame]:
+        df = pd.read_csv(Path(path))
+        mean = df["Mean"].to_numpy()
+        std = df["Std"].to_numpy()
+        log = df["Log"].to_numpy()
+        names = {field: i for (i, field) in enumerate(df["Field"])}
+        out: NormInfo = {"names": names, "mean": mean, "std": std, "log": log}
+        return out, df
+    
+    def write_normalization_info(self, path: Path|str):
+        path = Path(path)
+        self.metadata_params.to_csv(path/ "norm_params.csv")
+        self.metadata_tensor.to_csv(path / "norm_data.csv")
+    
+    def find_name(self, name: str):
+        if name in self.fields():
+            norm = self.norm_tensor
+        elif name in self.params():
+            norm = self.norm_params
+        else:
+            raise KeyError(f"{name} is not a valid field or param in the given dataset.")
+
+        index = norm["names"][name]
+        return index, norm
+
+    def fields(self) -> dict:
+        return self.norm_tensor["names"]
+
+    def params(self) -> dict:
+        return self.norm_params["names"]
+
+    def normalize(self, val, name: str):
+        index, norm = self.find_name(name)
+        mean, std, log = norm["mean"], norm["std"], norm["log"]
+
+        if log[index]:
+            val = np.log(val)
+
+        return (val - mean[index]) / std[index]
+    
+    def denormalize(self, val, name: str):
+        index, norm = self.find_name(name)
+        mean, std, log = norm["mean"], norm["std"], norm["log"]
+
+        val = mean[index] + val * std[index]
+        if log[index]:
+            val = np.exp(val)
+
+        return val
+
+    def normalize_params(self, param_vec):
+        normed = np.zeros_like(param_vec)
+        for (name, i) in self.params().items():
+            normed[i] = self.normalize(param_vec[i], name)
+        return normed
+
+    def denormalize_params(self, param_vec):
+        denormed = np.zeros_like(param_vec)
+        for (name, i) in self.params().items():
+            denormed[i] = self.denormalize(param_vec[i], name)
+        return denormed
+
+    def normalize_tensor(self, tensor):
+        normed = np.zeros_like(tensor)
+        for (name, i) in self.fields().items():
+            normed[:, i, :] = self.normalize(tensor[:, i, :], name)
+        return normed
+
+    def denormalize_tensor(self, tensor):
+        denormed = np.zeros_like(tensor)
+        for (name, i) in self.fields().items():
+            denormed[:, i, :] = self.denormalize(tensor[:, i, :], name)
+        return denormed
 
 class ThrusterDataset(Dataset):
-    def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, dimension=1, files=None):
+    def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, files=None):
         super().__init__()
         self.dir = Path(dir)
         self.data_dir = self.dir / "data"
@@ -20,98 +108,22 @@ class ThrusterDataset(Dataset):
         elif subset_size is not None and subset_size > 0:
             self.files = self.files[start_index : (subset_size + start_index)]
 
-        self.metadata_plasma = pd.read_csv(self.dir / "norm_data.csv")
-        self.metadata_params = pd.read_csv(self.dir / "norm_params.csv")
         self.metadata_grid = pd.read_csv(self.dir / "grid.csv")
-
-        self.norm_tensor_mean = self.metadata_plasma["Mean"].to_numpy()
-        self.norm_tensor_std = self.metadata_plasma["Std"].to_numpy()
-        self.norm_tensor_log = self.metadata_plasma["Log"].to_numpy()
         self.grid = self.metadata_grid["z (m)"].to_numpy()
+        self.norm = Normalizer(dir)
+        self.num_fields = len(self.norm.norm_tensor["names"])
+        self.num_params = len(self.norm.norm_params["names"])
 
-        assert dimension == 1 or dimension == 2
-        self.dimension = dimension
-        self.fields = {field: i for (i, field) in enumerate(self.metadata_plasma["Field"])}
-        self.params = {field: i for (i, field) in enumerate(self.metadata_params["Field"])}
+    def write_metadata(self, path: Path | str):
+        path = Path(path)
+        self.norm.write_normalization_info(path)
+        self.metadata_grid.to_csv(path / "grid.csv")
 
-    def params_to_vec(self, param_dict):
-        df = self.metadata_params.set_index("Field").to_dict(orient="index")
-        param_vec = np.zeros(len(df))
-
-        for i, (key, val) in enumerate(df.items()):
-            p = param_dict[key]
-            if val["Log"]:
-                p = np.log(p)
-
-            param_vec[i] = (p - val["Mean"]) / val["Std"]
-
-        return param_vec
-
-    def vec_to_params(self, param_vec):
-        df = self.metadata_params
-        param_dict = {}
-        for index, row in df.iterrows():
-            mean = row["Mean"]
-            std = row["Std"]
-            is_log = row["Log"]
-            p = param_vec[index] * std + mean
-            assert isinstance(is_log, bool)
-            if is_log:
-                p = np.exp(p)
-            param_dict[row["Field"]] = p
-
-        return param_dict
+    def fields(self):
+        return self.norm.fields()
     
-    def normalize_tensor(self, tensor):
-        mean = self.norm_tensor_mean
-        std = self.norm_tensor_std
-        log_inds = np.where(self.norm_tensor_log)[0]
-
-        if isinstance(tensor, torch.Tensor):
-            mean = torch.tensor(mean, device=tensor.device)
-            std = torch.tensor(std, device=tensor.device)
-            log_inds = torch.tensor(log_inds, device=tensor.device)
-
-            norm = tensor
-            norm[:, log_inds, :] = torch.log(tensor[:, log_inds, :])
-            norm = (norm - mean) / std
-
-        elif isinstance(tensor, np.ndarray):
-            norm = tensor
-            norm[:, log_inds, :] = np.log(tensor[:, log_inds, :])
-            norm = (norm - mean) / std
-        else:
-            raise NotImplementedError()
-
-        return norm
-
-    def denormalize_tensor(self, tensor):
-        mean = self.norm_tensor_mean
-        std = self.norm_tensor_std
-        log_inds = np.where(self.norm_tensor_log)[0]
-
-
-        if isinstance(tensor, torch.Tensor):
-            mean = torch.tensor(mean, device=tensor.device)
-            std = torch.tensor(std, device=tensor.device)
-            log_inds = torch.tensor(log_inds, device=tensor.device)
-
-            denorm = tensor * std[..., None] + mean[..., None]
-            denorm[:, log_inds, :] = torch.exp(denorm[:, log_inds, :])
-
-        elif isinstance(tensor, np.ndarray):
-            denorm = tensor * std[..., None] + mean[..., None]
-            denorm[:, log_inds, :] = np.exp(denorm[:, log_inds, :])
-        else:
-            raise NotImplementedError()
-        
-        return denorm
-
-    def normalize_params(self):
-        raise NotImplementedError()
-
-    def denormalize_params(self):
-        raise NotImplementedError()
+    def params(self):
+        return self.norm.params()
 
     def __len__(self):
         return len(self.files)
@@ -133,10 +145,9 @@ class ThrusterPlotter1D:
         labels: list | None = None,
         colors: list | None = None,
         alphas: list | None = None,
-        obs_locations=None,
     ):
-        self.metadata = dataset.metadata_plasma
-        self.xmax = 3.0
+        self.norm = dataset.norm
+        self.xmax = dataset.grid[-1]
 
         if sims is None:
             self.sims = []
@@ -157,7 +168,6 @@ class ThrusterPlotter1D:
         self.labels.append(label)
 
     def get_field(self, field, denormalize=False):
-
         if field == "inverse_hall":
             ys = []
             nu_an = self.get_field("nu_an", denormalize=denormalize)
@@ -172,23 +182,11 @@ class ThrusterPlotter1D:
                 ys.append(_nu - wce)
 
             return ys
-        
-        field_map = {field: i for (i, field) in enumerate(self.metadata["Field"])}
-        df_field = self.metadata.set_index("Field")
-
-        mean = df_field["Mean"][field]
-        std = df_field["Std"][field]
 
         ys = []
-
         for sim in self.sims:
-            y = sim[field_map[field], :].numpy()
-            if denormalize:
-                mean = df_field["Mean"][field]
-                std = df_field["Std"][field]
-                y = y * std + mean
-
-            ys.append(y)
+            y = sim[self.norm.fields()[field], :].numpy()
+            ys.append(self.norm.denormalize(y, field))
 
         return ys
 
@@ -202,18 +200,19 @@ class ThrusterPlotter1D:
             x = np.linspace(0, self.xmax, w)
             ax.set_xlabel("Axial location [channel lengths]")
 
-        df_field = self.metadata.set_index("Field")
+
+        norm_tensor = self.norm.norm_tensor
+        ind = norm_tensor["names"][field]
 
         if field == "inverse_hall":
             log = True
         else:
-            log = df_field["Log"][field]
+            log = norm_tensor["log"][ind]
 
         ys = self.get_field(field, denormalize=denormalize)
 
         for i, y in enumerate(ys):
             if denormalize and log:
-                y = np.exp(y)
                 ax.set_yscale("log")
 
             if self.colors is not None and self.alphas is not None:

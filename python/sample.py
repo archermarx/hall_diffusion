@@ -6,7 +6,6 @@ import os
 import shutil
 import uuid
 import math
-import bisect
 
 # Third-party deps
 import torch
@@ -26,44 +25,83 @@ parser.add_argument("config", type=str)
 
 DEVICE = torch.device("cpu")
 
-def build_observation_operator(dataset, observations):
-    num_channels = len(dataset.fields)
-    resolution = len(dataset.grid)
+def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE):
+    _, param_vec, data_tensor = dataset[0]
+    data_tensor = torch.tensor(data_tensor, device=DEVICE)
+    param_vec = torch.tensor(param_vec, device=DEVICE) 
+    (num_channels, resolution) = data_tensor.shape
 
-    obs_matrix = torch.zeros(num_channels, resolution)
+    obs_matrix_loc = torch.zeros(num_channels, resolution)
+    obs_matrix_dat = torch.zeros(num_channels, resolution)
+    obs_matrix_var = torch.zeros(num_channels, resolution)
+
+    default_stddev = observations.get("std_dev", 1.0)
+
     grid = dataset.grid
 
     m = num_channels * resolution
     n = 0
 
-    for (obs_field, obs_data) in observations.items():
-        ind = dataset.fields[obs_field]
+    obs_fields = observations["fields"]
 
-        # print(f"{ind=}, {obs_field=}")
-        loc = obs_data.get("locs", "all")
+    for obs_field in obs_fields:
+        # Get tensor row index
+        row_index = dataset.fields()[obs_field]
 
-        if loc == "all":
-            obs_matrix[ind, :] = 1.0
+        # Get stddev (TODO: read from file to allow more values, but this needs to wait for improved stddev handling)
+        stddev = obs_fields[obs_field].get("std_dev", default_stddev)
+
+        # Get observation from file
+        x_inds, x_data, y_data = utils.get_observation_locs(obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized")
+
+        if (len(x_data) == resolution) and np.all(x_inds == np.arange(resolution)):
+            # If x_data == grid, then we're observing an entire row
+            print("Observing row " + obs_field)
+            obs_matrix_loc[row_index, :] = 1.0
+            obs_matrix_dat[row_index, :] = data_tensor[row_index, :]
+            obs_matrix_var[row_index, :] = stddev**2
             n += resolution
-        elif isinstance(loc, list):
-            for z in loc:
-                j = bisect.bisect_left(grid, z)
-                obs_matrix[ind, j] = 1.0
-                n += 1
+        else:
+            # Partial/sparse observation of the row
+            # If y not provided, we use the underlying data matrix from the dataset
+            # Otherwise we use the y found in the file
+            # TODO: stddevs that vary point-to-point
+            obs_matrix_loc[row_index, x_inds] = 1.0
+            obs_matrix_var[row_index, x_inds] = stddev**2
+            n += len(x_inds)
 
+            if y_data is None:
+                print("Using underlying data")
+                obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
+            else:
+                print("Using data from file")
+                obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32)
+
+    # Dimensions
     # m = num_channels * resolution
     # n = num_observations
+    # A (linear observation operator) = (n, m)
+    # y (observed data) = (n,)
 
-    A = torch.zeros(n, m)
-    obs_matrix = obs_matrix.reshape(-1)
+    obs_matrix_loc = obs_matrix_loc.reshape(-1)
+    obs_A = torch.zeros(n, m)
 
     j = 0
     for i in range(m):
-        if obs_matrix[i] == 1.0:
-            A[j, i] = 1.0
+        if obs_matrix_loc[i] == 1.0:
+            obs_A[j, i] = 1.0
             j += 1
 
-    return A 
+    obs_y = obs_A @ obs_matrix_dat.reshape(-1)
+    obs_var = obs_A @ obs_matrix_var.reshape(-1)
+
+    # Read scalar parameters if present
+    if (params := observations.get("params", None)) is not None:
+        for (p, i) in dataset.params().items():
+            if p in params:
+                param_vec[i] = dataset.norm.normalize(params[p], p)
+
+    return obs_A.to(DEVICE), obs_y.to(DEVICE), obs_var.to(DEVICE), param_vec
 
 
 def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
@@ -76,15 +114,12 @@ def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     return timesteps
 
 
-def guidance_score(x, obs_var, proc_var, pde_strength, observations, mask, dataset):
-    (batch_size, _, _) = x.shape
+def guidance_score(x_t, x_0, observation, proc_var, pde_strength, dataset):
+    (batch_size, _, _) = x_0.shape
 
-    grad = torch.full_like(x, 0.0, device=x.device)
-
-    obs_vec = (mask @ observations.reshape(-1))
-    var = (mask @ obs_var.reshape(-1))
-
-    H = mask
+    obs_vec = observation["data"]
+    var = observation["var"]
+    H = observation["operator"]
     H_pinv = torch.linalg.pinv(H)
 
     n, m = H.shape
@@ -95,85 +130,80 @@ def guidance_score(x, obs_var, proc_var, pde_strength, observations, mask, datas
     mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
     assert mat1.shape == (n, m)
 
-    for b in range(batch_size):
-        batch_x0 = x[b, ...]
-        batch_x0.requires_grad = True
+    # Pseudoinverse guidance (with noise)
+    x_vec = x_0.reshape(batch_size, -1)
+    vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
+    assert vec1.shape == (batch_size, n)
 
-        x_vec = batch_x0.reshape(-1)
-        assert x_vec.shape == (m,)
+    vec2 = (vec1 @ mat1)
+    assert vec2.shape == (batch_size, m)
 
-        # # Noise-free pseudoinverse guidance
-        # mat = H_pinv @ obs_vec - (H_pinv @ (H @ x_vec.reshape(-1)))
-        # mat_x = (mat.detach() * x_vec).sum()
-        # guidance = torch.autograd.grad(mat_x, batch_x0)[0]
-        # grad[b, ...] = guidance
+    mat_x = (vec2.detach() * x_vec).sum()
+    score = torch.autograd.grad(mat_x, x_t)[0]
 
-        vec1 = (obs_vec - (H @ x_vec))
-        assert vec1.shape == (n,)
-
-
-        vec2 = (vec1 @ mat1)
-        assert vec2.shape == (m,)
- 
-        mat_x = (vec2.detach() * x_vec).sum()
-        score = torch.autograd.grad(mat_x, batch_x0)[0]
-
-        grad[b, ...] = score
-
-    return grad
-
+    return score
 
 def reverse_step(
-    D,
+    denoiser,
     x_t,
     t_prev,
     t,
-    ims,
-    masks,
+    observation,
     dataset,
-    obs_var=None,
     pde_strength=0.0,
     step_scale=1.0,
+    method="midpoint",
+    model_args=dict(),
 ):
+    
+    assert method in ["heun", "midpoint", "euler"]
+
     (b, _, _) = x_t.shape
 
     ones = torch.ones((b, 1, 1), device=x_t.device)
 
     dt = t - t_prev
     t_mid = 0.5 * (t + t_prev)
+    proc_var = t**2 / (t**2 + 1)
 
     t_max_guidance = 100
 
-    # Predictor step (midpoint rule)
-    with torch.no_grad():
-        x_0 = D(x_t, t_prev * ones)
-        d0 = -(x_0 - x_t) / t_prev
-        x_1 = x_t + step_scale * 0.5 * dt * d0
+    x_t = x_t.detach()
+    x_t.requires_grad = True
+    denoiser.zero_grad()
 
-    proc_var = t**2 / (t**2 + 1)
+    # Compute initial step to get predicted sample location
+    x_denoised = denoiser(x_t, t_prev * ones, **model_args)
+    deriv_0 = -(x_denoised - x_t) / t_prev
+    step_0 = step_scale * dt * deriv_0
+
+    if (method == "midpoint"):
+        step_0 *= 0.5
+
+    x_pred = x_t + step_0
+
+    if method == "midpoint" or (method == "heun" and t > 0):
+        # Compute corrector step
+        t2 = t_mid if method == "midpoint" else t
+        x_denoised = denoiser(x_pred, t2 * ones, **model_args)
+        deriv_1 = -(x_denoised - x_t) / t2
+        
+        if method == "midpoint":
+            step_1 = step_scale * dt * deriv_1
+        else:
+            step_1 = step_scale * dt * (deriv_0 + deriv_1) / 2
+    
+        x_pred = x_t + step_1
 
     # Guidance loss
-    # if obs_var is not None and t_mid < t_max_guidance:
-    #     obs_score = guidance_score(x_0, obs_var, proc_var, pde_strength, ims, masks, dataset)
-    #     # x_1 += 0.5 * dt * t_prev * obs_score
-    #     x_1 += 0.5 * obs_score
-
-    # Corrector step (midpoint rule)
-    with torch.no_grad():
-        x_0 = D(x_1, t_mid * ones)
-        d1 = -(x_0 - x_1) / t_mid
-        x_1 = x_t + step_scale * dt * d1
-
-    # Guidance loss
-    if obs_var is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_0, obs_var, proc_var, pde_strength, ims, masks, dataset)
+    if observation["var"] is not None and t_mid < t_max_guidance:
+        obs_score = guidance_score(x_t, x_denoised, observation, proc_var, pde_strength, dataset)
         # x_1 += dt * t_mid * obs_score
-        x_1 += obs_score
+        x_pred += obs_score
 
-    return x_1
+    return x_pred.detach()
 
-
-def reverse(D, x, timesteps, dataset, im_masks=None, showprogress=False, **kwargs):
+def reverse(denoiser, x, timesteps, dataset, observation, showprogress=False, model_args=dict(), **kwargs):
     """
     Perform iterative denoising to generate a 1D image from Gaussian noise using a provided denoising model
 
@@ -192,24 +222,13 @@ def reverse(D, x, timesteps, dataset, im_masks=None, showprogress=False, **kwarg
     output = torch.zeros((num_steps, b, c, w))
     output[0, ...] = x
 
-    # Conditional diffusion/infill
-    # Provide images to infill as well as mask indicating the area to be infilled
-    if im_masks is not None:
-        ims, masks = im_masks
-    else:
-        # If no mask provided, then we use a mask of all ones and a blank reference image
-        masks = torch.zeros_like(x, device=x.device)
-        ims = torch.zeros_like(x, device=x.device)
-
-    ims.requires_grad = False
-    masks.requires_grad = False
 
     for step_idx, t in enumerate(tqdm(timesteps, disable=(not showprogress))):
         if step_idx == 0:
             continue
 
         t_prev = timesteps[step_idx - 1]
-        x = reverse_step(D, x, t_prev, t, ims, masks, dataset, **kwargs)
+        x = reverse_step(denoiser, x, t_prev, t, observation, dataset, model_args=model_args, **kwargs)
         output[step_idx, ...] = x
 
     output[-1, ...] = x
@@ -223,34 +242,16 @@ def sample(model, noise_sampler, num_samples, args):
     noise_max = args.get("noise_max", 80)
     exponent = args.get("step_exponent", 7)
     step_scale = args.get("step_scale", 1.0)
+    method = args.get("method", "midpoint")
 
     # Load observations
-    obs_args = args["observation"]
-    obs_fields = obs_args["fields"]
-    obs_file = Path(obs_args["file"])
-    obs_stddev_default = obs_args.get("std_dev", 1.0)
-    obs_stddev = []
+    obs_args = utils.read_observation(args["observation"])
+    obs_file = Path(obs_args["base_sim"])
 
-    for _, field_args in obs_fields.items():
-        obs_stddev.append(field_args.get("std_dev", obs_stddev_default))
-
-    # Load data
+    # Load data for conditioning
     dataset = ThrusterDataset(obs_file)
-    _, data_vec, data = dataset[0]
-    condition_vec = torch.tensor(data_vec, device=DEVICE)
-    data = torch.tensor(data, device=DEVICE).unsqueeze(0)
-    (_, channels, resolution) = data.shape
-    
-
-
-    # Observation conditioning
-    mask = build_observation_operator(dataset, obs_fields).to(DEVICE)
-
-    # Assign observation variances
-    obs_var = torch.zeros((channels, resolution), device=DEVICE)
-    indices_to_keep = [dataset.fields[field] for field in obs_fields]
-    for i, index in enumerate(indices_to_keep):
-        obs_var[index, :] = obs_stddev[i]**2
+    obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, device=DEVICE)
+    obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
 
     # Sample initial noise
     xt = noise_sampler.sample(num_samples) * noise_max
@@ -258,20 +259,17 @@ def sample(model, noise_sampler, num_samples, args):
     # Load timesteps
     steps = edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent)
 
-    # Bake in conditioning information
-    def D(x, sigma):
-        return model(x, sigma, condition_vector=condition_vec)
-
     output = reverse(
-        D,
+        model,
         xt,
         steps,
         dataset,
-        im_masks=(data, mask),
         showprogress=True,
-        obs_var=obs_var,
+        observation=obs,
         pde_strength=0.0,
         step_scale=step_scale,
+        method=method,
+        model_args=dict(condition_vector=param_vec)
     )
 
     final = output[-1, ...]
@@ -282,12 +280,9 @@ def sample(model, noise_sampler, num_samples, args):
     if args.get("replace_samples", False) and out_dir.exists():
         shutil.rmtree(out_dir)
 
+    # Make folder and write metadata
     os.makedirs(out_dir, exist_ok=True)
-
-    # Write normalization info
-    dataset.metadata_params.to_csv(out_dir / "norm_params.csv")
-    dataset.metadata_plasma.to_csv(out_dir / "norm_data.csv")
-    dataset.metadata_grid.to_csv(out_dir / "grid.csv")
+    dataset.write_metadata(out_dir)
 
     # Write sample data
     data_dir = out_dir / "data"
@@ -295,7 +290,7 @@ def sample(model, noise_sampler, num_samples, args):
     for i in range(num_samples):
         file = data_dir / f"{uuid.uuid4()}.npz"
         tens = final[i, :].cpu().numpy()
-        np.savez(file, data=tens, params=condition_vec.cpu().numpy())
+        np.savez(file, data=tens, params=param_vec.cpu().numpy())
 
 
 if __name__ == "__main__":
@@ -342,7 +337,6 @@ if __name__ == "__main__":
 
     channels = model.img_channels
     resolution = model.img_resolution
-
 
     if noise_sampler_args["type"] == "gaussian":
         noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
