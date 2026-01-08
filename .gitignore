@@ -8,3 +8,5 @@ __pycache__
 gendata.out
 samples/
 *.png
+*.hto
+.ipynb_checkpoints
