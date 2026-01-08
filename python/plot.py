@@ -19,7 +19,7 @@ parser.add_argument("-o", "--output", type=str, default="_plt.png")
 parser.add_argument("-m", "--mode", choices=["traces", "quantiles"], default="quantiles")
 parser.add_argument("-f", "--fields", nargs='+', required=True)
 parser.add_argument("--observation", type=Path)
-parser.add_argument("--type", choices=["sidebyside", "multifield"], default = "multifield")
+parser.add_argument("--type", choices=["sidebyside", "comparison"], default = "comparison")
 parser.add_argument("--nolegend", action="store_true")
 
 matplotlib.rcParams["text.usetex"] = True
