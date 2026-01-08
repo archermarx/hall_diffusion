@@ -10,15 +10,15 @@ import pickle
 parser = argparse.ArgumentParser()
 parser.add_argument("-d", "--data-dir", type=Path, help="Directory containing training data")
 parser.add_argument("-t", "--test-dir", type=Path, help="Directory containing test data")
-parser.add_argument("-o", "--output-file", type=Path, help="File to output", default=Path("out.pkl"))
-parser.add_argument("-r", "--rtol", type=float, help ="Target relative tolerance", default = 0.05)
+parser.add_argument("-o", "--output-file", type=Path, help="File to output", default=Path("out.hto"))
+parser.add_argument("-r", "--rtol", type=float, help ="Target relative tolerance", default = 0.1)
 parser.add_argument("-b", "--batch-size", type=int, help = "Batch size", default=1024)
 parser.add_argument("--no-test", action = "store_true", help = "Whether to evaluate on a test dataset")
 
 def compress(rtol, batch_size, data_dir, test_dir, output_file, no_test):
 
     train_dataset = thruster_data.ThrusterDataset(data_dir)
-    test_dataset = thruster_data.ThrusterDataset(test_dir)
+
 
     batch_idx = 0
     transpose = (2, 1, 0)
@@ -41,7 +41,12 @@ def compress(rtol, batch_size, data_dir, test_dir, output_file, no_test):
     loader_args = dict(batch_size=batch_size, shuffle=False, num_workers=True, drop_last=True)
 
     train_loader = DataLoader(train_dataset, **loader_args)
-    test_loader = DataLoader(test_dataset, **loader_args)
+
+    if test_dir is None:
+        test_loader = None
+    else:
+        test_dataset = thruster_data.ThrusterDataset(test_dir)
+        test_loader = DataLoader(test_dataset, **loader_args)
 
     train_iterator = iter(train_loader)
     _, _, training_snapshot = next(train_iterator)
@@ -70,7 +75,7 @@ def compress(rtol, batch_size, data_dir, test_dir, output_file, no_test):
 
     test_errors = []
 
-    if not no_test:
+    if test_loader is not None:
         for _, _, test_snapshot in test_loader:
             test_snapshot = transform(test_snapshot)
             rec = compressor.reconstruct(
@@ -128,7 +133,7 @@ def compress(rtol, batch_size, data_dir, test_dir, output_file, no_test):
 
         if update_flag:
             test_errors = []
-            if not no_test:
+            if test_loader is not None:
                 for _, _, test_snapshot in test_loader:
                     test_snapshot = transform(test_snapshot)
                     rec = compressor.reconstruct(

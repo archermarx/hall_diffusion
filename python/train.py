@@ -39,6 +39,7 @@ ROOT_DIR = SCRIPT_DIR / ".."
 # Noise levels at which we plot progress during training
 NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 1.0]
 
+
 # ----------------------------------------------------------------------------
 # Learning rate decay schedule used in the paper "Analyzing and Improving the Training Dynamics of Diffusion Models". (EDM2)
 def learning_rate_schedule(
@@ -56,7 +57,15 @@ def learning_rate_schedule(
 # Loss function for EDM2 model
 # Modified to include first- and second-deriviative losses to hopefully reduce noise
 class EDM2Loss:
-    def __init__(self, noise_sampler, P_mean=-0.4, P_std=1.0, sigma_data=0.5, include_logvar=False, deriv_h=1.0):
+    def __init__(
+        self,
+        noise_sampler,
+        P_mean=-0.4,
+        P_std=1.0,
+        sigma_data=0.5,
+        include_logvar=False,
+        deriv_h=1.0,
+    ):
         self.P_mean = P_mean
         self.P_std = P_std
         self.sigma_data = sigma_data
@@ -81,7 +90,7 @@ class EDM2Loss:
 
         weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
         noise = self.noise_sampler.sample(batch_size) * sigma
-        
+
         noisy_im = x + noise
 
         if self.include_logvar:
@@ -111,9 +120,7 @@ class EDM2Loss:
 
         total_weight = 1 + 1 / h + 1 / h**2
         loss = (
-            weight
-            * (base_loss + diff_loss_1 / h + diff_loss_2 / h**2)
-            / total_weight
+            weight * (base_loss + diff_loss_1 / h + diff_loss_2 / h**2) / total_weight
         )
         base_loss = loss.mean().item()
 
@@ -122,6 +129,7 @@ class EDM2Loss:
             loss = loss / logvar.exp() + logvar
 
         return loss.mean(), base_loss, noisy_im, denoised
+
 
 # ----------------------------------------------------------------------------
 # Evaluate the loss on the validation set.
@@ -159,7 +167,9 @@ def validation_loss(
             fixed_noise = torch.tensor(NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
             noise_std[: len(fixed_noise), 0, 0] = fixed_noise
 
-            _, _, noisy_im, denoise_pred = loss_fn(y, model, noise_std, condition_vec=vec)
+            _, _, noisy_im, denoise_pred = loss_fn(
+                y, model, noise_std, condition_vec=vec
+            )
 
             suptitle = f"Epoch: {epoch_idx + 1:04d}, Loss: {loss:.4f}"
             fig, _ = visualize_denoising(
@@ -476,13 +486,15 @@ def train(args):
     resolution = len(train_dataset.grid)
     print(f"{channels=}, {resolution=}")
 
-    noise_sampler_args = train_args.get("noise_sampler", dict(type = "gaussian"))
+    noise_sampler_args = train_args.get("noise_sampler", dict(type="gaussian"))
     train_args["noise_sampler"] = noise_sampler_args
 
     if noise_sampler_args["type"] == "gaussian":
         noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
     elif noise_sampler_args["type"] == "rbf":
-        noise_sampler = noise.RBFKernel(channels, resolution, scale=noise_sampler_args["scale"], device=DEVICE)
+        noise_sampler = noise.RBFKernel(
+            channels, resolution, scale=noise_sampler_args["scale"], device=DEVICE
+        )
     else:
         raise NotImplementedError()
 
@@ -576,7 +588,9 @@ def train(args):
                     out_folder=out_dir,
                     data_dir=test_data_dir,
                 )
-                val_loss = validation_loss(model, loss_fn, test_loader, data_dir=test_data_dir)
+                val_loss = validation_loss(
+                    model, loss_fn, test_loader, data_dir=test_data_dir
+                )
 
             val_losses.append(val_loss)
             ema_losses.append(ema_loss)
@@ -661,7 +675,7 @@ def train(args):
             fig.savefig(out_dir / "loss_prog.png", dpi=200)
             plt.close(fig)
 
-        if max_epochs > 0 and epoch_idx >= max_epochs + start_epoch:
+        if max_epochs > 0 and epoch_idx >= max_epochs:
             break
 
 
