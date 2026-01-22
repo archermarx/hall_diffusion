@@ -24,9 +24,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str)
 parser.add_argument("config", type=str)
 parser.add_argument("-o", "--out-dir", type=str)
+parser.add_argument("-n", "--num-samples", type=int)
+parser.add_argument("-s", "--num-steps", type=int)
 
 DEVICE = torch.device("cpu")
-
 
 def build_observation(dataset, observations, default_stddev=1.0):
     _, param_vec, data_tensor = dataset[0]
@@ -178,9 +179,10 @@ def residual_ohm(x_0, dataset):
     qm = q_e / m_e
     wce = qm * B
     mu = qm * (nu_e / (nu_e**2 + wce**2))
-    ue_calc = -mu * (E + grad_pe / ne)
+    je_calc = q_e * mu * (ne * E + grad_pe)
+    je = -q_e * ne * ue
 
-    return norm_residual(ue_calc, ue)
+    return norm_residual(je_calc, je)
 
 def residual_ne(x_0, dataset):
     """
@@ -209,36 +211,39 @@ def physics_residuals(x_0, dataset):
 def guidance_score(x_t, x_0, observation, proc_var, pde_strength, pde_args, dataset):
     (batch_size, _, _) = x_0.shape
 
-    obs_vec = observation["data"]
-    var = observation["var"]
-    H = observation["operator"]
+    total_loss = torch.tensor(0.0, device=DEVICE)
 
-    # # Pseudoinverse guidance (with noise)
-    # n, m = H.shape
-    # assert obs_vec.shape == (n,)
+    if observation["var"] is not None:
+        obs_vec = observation["data"]
+        var = observation["var"]
+        H = observation["operator"]
 
-    # mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
-    # assert mat1.shape == (n, m)
+        # # Pseudoinverse guidance (with noise)
+        # n, m = H.shape
+        # assert obs_vec.shape == (n,)
 
-    # x_vec = x_0.reshape(batch_size, -1)
-    # vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
-    # assert vec1.shape == (batch_size, n)
+        # mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
+        # assert mat1.shape == (n, m)
 
-    # vec2 = (vec1 @ mat1)
-    # assert vec2.shape == (batch_size, m)
+        # x_vec = x_0.reshape(batch_size, -1)
+        # vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
+        # assert vec1.shape == (batch_size, n)
 
-    # mat_x = (vec2.detach() * x_vec).sum()
-    # score = torch.autograd.grad(mat_x, x_t)[0]
+        # vec2 = (vec1 @ mat1)
+        # assert vec2.shape == (batch_size, m)
 
-    #=====================================================
-    # Diffusion posterior sampling (get observation loss)
-    #=====================================================
-    x_vec = x_0.reshape(batch_size, -1)
-    measurement = torch.matmul(H, x_vec.T).T
-    total_var = var + proc_var
-    obs_loss = torch.sum((measurement - obs_vec[None, ...])**2 / total_var)
+        # mat_x = (vec2.detach() * x_vec).sum()
+        # score = torch.autograd.grad(mat_x, x_t)[0]
 
-    total_loss = obs_loss
+        #=====================================================
+        # Diffusion posterior sampling (get observation loss)
+        #=====================================================
+        x_vec = x_0.reshape(batch_size, -1)
+        measurement = torch.matmul(H, x_vec.T).T
+        total_var = var + proc_var
+        obs_loss = torch.sum((measurement - obs_vec[None, ...])**2 / total_var)
+
+        total_loss += obs_loss
 
     if pde_strength > 0:
         #=====================================================
@@ -248,7 +253,7 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, pde_args, data
         pde_errs = physics_residuals(x_0, dataset)
         pde_weights = pde_args.get("strengths", dict())
 
-        pde_loss = 0.0
+        pde_loss = torch.tensor(0.0, device=DEVICE)
         for (k, v) in pde_errs.items():
             err = v.mean()
             w = pde_weights.get(k, 0.0)
@@ -259,15 +264,13 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, pde_args, data
             if w > 0:
                 pde_loss += w * err
 
-        pde_loss *= pde_strength
-
         if print_residuals:
             print()
 
-        total_loss += pde_loss
+        total_loss += pde_strength * pde_loss
 
     # Take gradient
-    score = -torch.autograd.grad(obs_loss, x_t)[0]
+    score = -torch.autograd.grad(total_loss, x_t)[0]
 
     return score
 
@@ -331,7 +334,7 @@ def reverse_step(
         pde_strength = 0.0
 
     # Guidance loss
-    if observation["var"] is not None and t_mid < t_max_guidance:
+    if t_mid < t_max_guidance:
         obs_score = guidance_score(
             x_t, x_denoised, observation, proc_var, pde_strength, pde_args, dataset
         )
@@ -386,6 +389,12 @@ def reverse(
             pde_args=pde_args,
             **kwargs,
         )
+
+        # Check for NaN or Inf
+        if not torch.all(torch.isfinite(x)):
+            print("NaN/Inf deteced during sampling. Exiting")
+            exit(1)
+
         output[step_idx, ...] = x
 
     output[-1, ...] = x
@@ -476,8 +485,15 @@ if __name__ == "__main__":
     with open(args.config, "rb") as fp:
         sampling_config = tomllib.load(fp)
 
+    # Read command line args and replace TOML args if needed
     if args.out_dir is not None:
         sampling_config["out_dir"] = args.out_dir
+
+    if args.num_steps is not None:
+        sampling_config["num_steps"] = args.num_steps
+
+    if args.num_samples is not None:
+        sampling_config["num_samples"] = args.num_samples
 
     # Load model and config from checkpoint
     model_dict = torch.load(args.model, weights_only=False)
