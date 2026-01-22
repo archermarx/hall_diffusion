@@ -1,0 +1,24 @@
+# Number of independent sample traces to generate
+num_samples = 32768
+# Batch size of sample generation. If not provided, we do a single batch
+batch_size = 1024
+# Number of sampling steps to take
+num_steps = 2048
+
+# Which model to load (ema, best, last)
+model_type = "ema"
+# Output directory for generations.
+out_dir = "samples/sample_21"
+# Whether samples in out_dir should be replaced or added to
+replace_samples = false
+# Step scale
+step_scale = 1.0
+
+[observation]
+# Folder containing normalization information, if the above is unnormalized
+base_sim = "mcmc_reference/ref_sim/normalized"
+stddev = 1.2
+
+[observation.fields]
+B = { locs = "all", error_type = "relative", std_dev = 0.7 }
+ui_1 = { locs = "all", error_type = "relative", std_dev = 1.0}
