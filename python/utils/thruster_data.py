@@ -40,14 +40,27 @@ class ThrusterDataset(Dataset):
     def params(self):
         return self.norm.params()
     
-    def get_field(self, tens, field, action=None):
-        row = tens[:, self.fields()[field], :]
+    def get_field(self, tens, name, action=None):
+        row = tens[:, self.fields()[name], :]
         if action == "normalize":
-            return self.norm.normalize(row, field)
+            return self.norm.normalize(row, name)
         elif action == "denormalize":
-            return self.norm.denormalize(row, field)
-        else:
+            return self.norm.denormalize(row, name)
+        elif action is None:
             return row
+        else:
+            raise NameError(f"Action '{name}' not allowed. Action must be 'normalize', 'denormalize' or `None`.")
+        
+    def get_param(self, p, name, action=None):
+        param = p[self.params()[name]]
+        if action == "normalize":
+            return self.norm.normalize(param, name)
+        elif action == "denormalize":
+            return self.norm.denormalize(param, name)
+        elif action is None:
+            return param
+        else:
+            raise NameError(f"Action '{name}' not allowed. Action must be 'normalize', 'denormalize' or `None`.")
 
     def __len__(self):
         return len(self.files)

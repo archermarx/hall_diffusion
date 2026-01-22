@@ -89,7 +89,6 @@ def build_observation(dataset, observations, default_stddev=1.0):
     # n = num_observations
     # A (linear observation operator) = (n, m)
     # y (observed data) = (n,)
-
     obs_matrix_loc = obs_matrix_loc.reshape(-1)
     obs_A = torch.zeros(n, m)
 
@@ -119,13 +118,20 @@ def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     timesteps[-1] = 0
     return timesteps
 
-# Constants
-q_e = 1.6e-19
-m_e = 9.1e-31
+
+def print_grad_hook(grad):
+    print(f"Gradient received: shape={grad.shape}, norm={grad.norm():.4f}")
 
 #=====================================================
 # Physics residuals
 #=====================================================
+
+# Constants
+q_e = 1.6e-19
+m_e = 9.1e-31
+
+def norm_residual(x: torch.Tensor, ref: torch.Tensor):
+    return ((x - ref) / ref.abs().max())**2
 
 def residual_E(x_0, dataset):
     """
@@ -139,7 +145,7 @@ def residual_E(x_0, dataset):
     grad_phi = (phi[:, 2:] - phi[:, :-2]) / (2 * dataset.dx)
 
     # Compute normalized electric field residual
-    return dataset.norm.normalize((E[:, 1:-1] + grad_phi).abs(), "E")**2
+    return norm_residual(grad_phi, E[:, 1:-1])
 
 def residual_grad_pe(x_0, dataset):
     """
@@ -153,13 +159,12 @@ def residual_grad_pe(x_0, dataset):
     grad_pe_calc = (pe[:, 2:] - pe[:, :-2]) / (2 * dataset.dx)
 
     # Compute squared normalized pressure gradient residual
-    return dataset.norm.normalize((grad_pe[:, 1:-1] - grad_pe_calc), "∇pe")**2
+    return norm_residual(grad_pe_calc, grad_pe[:, 1:-1])
 
 def residual_ohm(x_0, dataset):
     """
     Compute Ohm's law residual: ue = -mu * (E + grad_pe / ne)
-    With mu = qe / (me * nu_e) / (1 + hall**2)
-    and hall = q_e * B / (m_e * nu_e)
+    With mu = q/m * (nu_e / (nu_e**2 + wce**2))
     """
     # Extract needed properties from the tensor
     B = dataset.get_field(x_0, "B", action="denormalize")
@@ -170,33 +175,51 @@ def residual_ohm(x_0, dataset):
     ue = dataset.get_field(x_0, "ue", action="denormalize")
 
     # Compute electron velocity
-    hall = q_e * B / (m_e * nu_e)
-    mu = q_e / (m_e * nu_e * (1 + hall**2))
+    qm = q_e / m_e
+    wce = qm * B
+    mu = qm * (nu_e / (nu_e**2 + wce**2))
     ue_calc = -mu * (E + grad_pe / ne)
 
-    # Compute squared normalized Ohm's law residual
-    return dataset.norm.normalize((ue - ue_calc), "ue")**2
+    return norm_residual(ue_calc, ue)
+
+def residual_ne(x_0, dataset):
+    """
+    Compute ne residual: ne = sum(Z * ni_Z)
+    """
+    # Get electron density
+    ne   = dataset.get_field(x_0, "ne", action="denormalize")
+    ni_1 = dataset.get_field(x_0, f"ni_1", action="denormalize")
+    ni_2 = dataset.get_field(x_0, f"ni_2", action="denormalize")
+    ni_3 = dataset.get_field(x_0, f"ni_3", action="denormalize")
+    ne_calc = ni_1 + 2 * ni_2 + 3 * ni_3
+
+    return norm_residual(ne_calc, ne)
+
+PHYSICS_RESIDUALS = dict(
+    E = residual_E, grad_pe = residual_grad_pe, ohm = residual_ohm, ne = residual_ne
+)
+
+def physics_residuals(x_0, dataset):
+    return {res_name: res_func(x_0, dataset).mean() for (res_name, res_func) in PHYSICS_RESIDUALS.items()}
 
 #=====================================================
 # Conditioning on observations and PDEs
 #=====================================================
 
-def guidance_score(x_t, x_0, observation, proc_var, pde_strength, dataset):
+def guidance_score(x_t, x_0, observation, proc_var, pde_strength, pde_args, dataset):
     (batch_size, _, _) = x_0.shape
 
     obs_vec = observation["data"]
     var = observation["var"]
     H = observation["operator"]
 
-    # #Pseudoinverse loss
+    # # Pseudoinverse guidance (with noise)
     # n, m = H.shape
     # assert obs_vec.shape == (n,)
 
-    # # Precompute (rt^2 HH^T + sigma_y^2 I)^{-1} H
     # mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
     # assert mat1.shape == (n, m)
 
-    # # Pseudoinverse guidance (with noise)
     # x_vec = x_0.reshape(batch_size, -1)
     # vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
     # assert vec1.shape == (batch_size, n)
@@ -214,36 +237,39 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, dataset):
     measurement = torch.matmul(H, x_vec.T).T
     total_var = var + proc_var
     obs_loss = torch.sum((measurement - obs_vec[None, ...])**2 / total_var)
-    
-    #=====================================================
-    # DiffusionPDE loss (get physics/PDE loss)
-    #=====================================================
-    E_err = residual_E(x_0, dataset)
-    grad_pe_err = residual_grad_pe(x_0, dataset)
-    ohm_err = residual_ohm(x_0, dataset)
 
-    # Sum components into single PDE loss
-    weights = torch.tensor([1.0, 1.0, 0.0], device=DEVICE)
-    weights /= weights.sum()
-
-    errs = [E_err.mean(), grad_pe_err.mean(), ohm_err.mean()]
-    pde_loss = 0.0
-    for (e, w) in zip(errs, weights):
-        if w > 0:
-            pde_loss += w * e
-
-    # Combine observation loss with PDE loss
-    print(f"E_err = {errs[0].item():.3e}, pe_err = {errs[1].item():.3e}, ohm_err = {errs[2].item():.3e}")
     total_loss = obs_loss
-    if (pde_strength > 0):
-        print(f"pde on")
-        total_loss += pde_strength * pde_loss
+
+    if pde_strength > 0:
+        #=====================================================
+        # DiffusionPDE loss (get physics/PDE loss)
+        #=====================================================
+        print_residuals = pde_args.get("print_residuals", False)
+        pde_errs = physics_residuals(x_0, dataset)
+        pde_weights = pde_args.get("strengths", dict())
+
+        pde_loss = 0.0
+        for (k, v) in pde_errs.items():
+            err = v.mean()
+            w = pde_weights.get(k, 0.0)
+
+            if print_residuals:
+                print(f"{k}: {err.item():.3e}   ", end="")
+
+            if w > 0:
+                pde_loss += w * err
+
+        pde_loss *= pde_strength
+
+        if print_residuals:
+            print()
+
+        total_loss += pde_loss
 
     # Take gradient
-    score = torch.autograd.grad(-total_loss, x_t)[0]
+    score = -torch.autograd.grad(obs_loss, x_t)[0]
 
     return score
-
 
 def reverse_step(
     denoiser,
@@ -252,7 +278,7 @@ def reverse_step(
     t,
     observation,
     dataset,
-    pde_strength=0.0,
+    pde_args,
     step_scale=1.0,
     method="midpoint",
     model_args=dict(),
@@ -296,15 +322,18 @@ def reverse_step(
 
         x_pred = x_t + step_1
 
-    if (t < 1):
-        pde_strength = 10.0 / (t**2 + 1)
+    pde_start = pde_args.get("start_time", 1.0)
+    pde_stop = pde_args.get("stop_time", 0.0)
+
+    if (pde_stop <= t <= pde_start):
+        pde_strength = pde_args.get("strengths", dict()).get("base", 0.0) / (t**2 + 1)
     else:
         pde_strength = 0.0
 
     # Guidance loss
     if observation["var"] is not None and t_mid < t_max_guidance:
         obs_score = guidance_score(
-            x_t, x_denoised, observation, proc_var, pde_strength, dataset
+            x_t, x_denoised, observation, proc_var, pde_strength, pde_args, dataset
         )
         # x_1 += dt * t_mid * obs_score
         x_pred += obs_score
@@ -319,6 +348,7 @@ def reverse(
     dataset,
     observation,
     showprogress=False,
+    pde_args=dict(),
     model_args=dict(),
     **kwargs,
 ):
@@ -353,6 +383,7 @@ def reverse(
             observation,
             dataset,
             model_args=model_args,
+            pde_args=pde_args,
             **kwargs,
         )
         output[step_idx, ...] = x
@@ -410,10 +441,10 @@ def sample(model, noise_sampler, num_samples, args):
         dataset,
         showprogress=True,
         observation=obs,
-        pde_strength=0.0,
         step_scale=step_scale,
         method=method,
         model_args=dict(condition_vector=param_vec),
+        pde_args=args.get("pde_guidance", None)
     )
 
     final = output[-1, ...]
