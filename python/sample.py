@@ -108,8 +108,7 @@ def build_observation(dataset, observations, default_stddev=1.0):
             if p in params:
                 param_vec[i] = dataset.norm.normalize(params[p], p)
 
-    return obs_A.to(device), obs_y.to(device), obs_var.to(device), param_vec
-
+    return obs_A.to(DEVICE), obs_y.to(DEVICE), obs_var.to(DEVICE), param_vec
 
 def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     inv_rho = 1 / exponent
@@ -120,6 +119,67 @@ def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     timesteps[-1] = 0
     return timesteps
 
+# Constants
+q_e = 1.6e-19
+m_e = 9.1e-31
+
+#=====================================================
+# Physics residuals
+#=====================================================
+
+def residual_E(x_0, dataset):
+    """
+    Compute electric field residual: E = -grad(phi)
+    """
+    # Get de-normalized phi and E
+    phi = dataset.get_field(x_0, "phi", action="denormalize")
+    E = dataset.get_field(x_0, "E", action = "denormalize")
+
+    # Compute potential gradient using finite differences (interior only)
+    grad_phi = (phi[:, 2:] - phi[:, :-2]) / (2 * dataset.dx)
+
+    # Compute normalized electric field residual
+    return dataset.norm.normalize((E[:, 1:-1] + grad_phi).abs(), "E")**2
+
+def residual_grad_pe(x_0, dataset):
+    """
+    Compute pressure gradient residual: gradpe = grad(pe)
+    """
+    # Get pressure and pressure gradient
+    pe = dataset.get_field(x_0, "pe", action="denormalize")
+    grad_pe = dataset.get_field(x_0, "∇pe", action="denormalize")
+
+    # Compute pressure gradient with finite differences (interior only)
+    grad_pe_calc = (pe[:, 2:] - pe[:, :-2]) / (2 * dataset.dx)
+
+    # Compute squared normalized pressure gradient residual
+    return dataset.norm.normalize((grad_pe[:, 1:-1] - grad_pe_calc), "∇pe")**2
+
+def residual_ohm(x_0, dataset):
+    """
+    Compute Ohm's law residual: ue = -mu * (E + grad_pe / ne)
+    With mu = qe / (me * nu_e) / (1 + hall**2)
+    and hall = q_e * B / (m_e * nu_e)
+    """
+    # Extract needed properties from the tensor
+    B = dataset.get_field(x_0, "B", action="denormalize")
+    ne = dataset.get_field(x_0, "ne", action="denormalize")
+    nu_e = dataset.get_field(x_0, "nu_e", action="denormalize")
+    E = dataset.get_field(x_0, "E", action="denormalize")
+    grad_pe = dataset.get_field(x_0, "∇pe", action="denormalize")
+    ue = dataset.get_field(x_0, "ue", action="denormalize")
+
+    # Compute electron velocity
+    hall = q_e * B / (m_e * nu_e)
+    mu = q_e / (m_e * nu_e * (1 + hall**2))
+    ue_calc = -mu * (E + grad_pe / ne)
+
+    # Compute squared normalized Ohm's law residual
+    return dataset.norm.normalize((ue - ue_calc), "ue")**2
+
+#=====================================================
+# Conditioning on observations and PDEs
+#=====================================================
 
 def guidance_score(x_t, x_0, observation, proc_var, pde_strength, dataset):
     (batch_size, _, _) = x_0.shape
@@ -155,52 +215,28 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, dataset):
     total_var = var + proc_var
     obs_loss = torch.sum((measurement - obs_vec[None, ...])**2 / total_var)
     
-    #print(f"mse = {obs_loss.item()/len(obs_vec)}")
-
     #=====================================================
     # DiffusionPDE loss (get physics/PDE loss)
     #=====================================================
-    pde_loss = 0.0
-    
-    # Extract needed numerical properties
-    dx = dataset.grid[1] - dataset.grid[0]
-    q_e = 1.6e-19
-    m_e = 9.1e-31
-    B = dataset.get_field(x_0, "B", action="denormalize")
-    n_e = dataset.get_field(x_0, "ne", action="denormalize")
-    nu_e = dataset.get_field(x_0, "nu_e", action="denormalize")
-    phi = dataset.get_field(x_0, "phi", action="denormalize")
-    pe = dataset.get_field(x_0, "pe", action="denormalize")
-
-    # Normalize/denormalize quantities as needed
-    E = dataset.get_field(x_0, "E")
-    E_denorm = dataset.norm.denormalize(E, "E")
-    grad_pe = dataset.get_field(x_0, "∇pe")
-    grad_pe_denorm = dataset.norm.denormalize(grad_pe, "∇pe")
-    ue = dataset.get_field(x_0, "ue")
-
-    # Ohm's law residual
-    hall = q_e * B / (m_e * nu_e)
-    ohm_mobility = q_e / (m_e * nu_e * (1 + hall**2))
-    ohm_efield = E_denorm
-    ohm_pe = grad_pe_denorm / n_e
-    ohm_rhs = -ohm_mobility * (ohm_efield  + ohm_pe)
-    ohm_err = (dataset.norm.normalize(ohm_rhs, "ue") - ue)**2 / 25
-
-    # Gauss's law error
-    E_calc = dataset.norm.normalize(-(phi[:, 2:] - phi[:, :-2]) / (2 * dx), "E")
-    E_err = (E_calc - E[:,1:-1])**2
-
-    # Grad pe error
-    grad_pe_calc = dataset.norm.normalize((pe[:, 2:] - pe[:, :-2]) / (2 * dx), "∇pe")
-    grad_pe_err  = (grad_pe_calc - grad_pe[:,1:-1])**2
+    E_err = residual_E(x_0, dataset)
+    grad_pe_err = residual_grad_pe(x_0, dataset)
+    ohm_err = residual_ohm(x_0, dataset)
 
     # Sum components into single PDE loss
-    pde_loss = (ohm_err.mean() + E_err.mean() + grad_pe_err.mean())/3
+    weights = torch.tensor([1.0, 1.0, 0.0], device=DEVICE)
+    weights /= weights.sum()
+
+    errs = [E_err.mean(), grad_pe_err.mean(), ohm_err.mean()]
+    pde_loss = 0.0
+    for (e, w) in zip(errs, weights):
+        if w > 0:
+            pde_loss += w * e
 
     # Combine observation loss with PDE loss
+    print(f"E_err = {errs[0].item():.3e}, pe_err = {errs[1].item():.3e}, ohm_err = {errs[2].item():.3e}")
     total_loss = obs_loss
     if (pde_strength > 0):
+        print(f"pde on")
         total_loss += pde_strength * pde_loss
 
     # Take gradient
@@ -261,11 +297,9 @@ def reverse_step(
         x_pred = x_t + step_1
 
     if (t < 1):
-        pde_strength = 0.0#10.0/(t**2 + 1)
+        pde_strength = 10.0 / (t**2 + 1)
     else:
         pde_strength = 0.0
-
-    #print(f"t={t.item()},{pde_strength=}")
 
     # Guidance loss
     if observation["var"] is not None and t_mid < t_max_guidance:

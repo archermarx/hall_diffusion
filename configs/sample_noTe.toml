@@ -3,7 +3,7 @@ num_samples = 64
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
-num_steps = 2048
+num_steps = 512
 
 # Which model to load (ema, best, last) 
 model_type = "ema"
@@ -14,7 +14,7 @@ replace_samples = true
 # Step scale
 step_scale = 1.0
 # ODE method
-method = "midpoint"
+method = "heun"
 
 #observation = "experimental_data/data_pb=3.5e-5.toml"
 

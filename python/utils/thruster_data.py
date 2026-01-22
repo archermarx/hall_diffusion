@@ -24,6 +24,7 @@ class ThrusterDataset(Dataset):
 
         self.metadata_grid = pd.read_csv(self.dir / "grid.csv")
         self.grid = self.metadata_grid["z (m)"].to_numpy()
+        self.dx = self.grid[2] - self.grid[1]
         self.norm = Normalizer(dir)
         self.num_fields = len(self.norm.norm_tensor["names"])
         self.num_params = len(self.norm.norm_params["names"])
