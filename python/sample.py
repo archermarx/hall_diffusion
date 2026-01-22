@@ -35,7 +35,7 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
     obs_matrix_dat = torch.zeros(num_channels, resolution)
     obs_matrix_var = torch.zeros(num_channels, resolution)
 
-    default_stddev = observations.get("std_dev", 1.0)
+    default_stddev = observations.get("stddev", 1.0)
 
     grid = dataset.grid
 
@@ -49,7 +49,7 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
         row_index = dataset.fields()[obs_field]
 
         # Get stddev (TODO: read from file to allow more values, but this needs to wait for improved stddev handling)
-        stddev = obs_fields[obs_field].get("std_dev", default_stddev)
+        stddev = obs_fields[obs_field].get("stddev", default_stddev)
 
         # Get observation from file
         x_inds, x_data, y_data = utils.get_observation_locs(obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized")
@@ -101,7 +101,7 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
             if p in params:
                 param_vec[i] = dataset.norm.normalize(params[p], p)
 
-    return obs_A.to(DEVICE), obs_y.to(DEVICE), obs_var.to(DEVICE), param_vec
+    return obs_A.to(device), obs_y.to(device), obs_var.to(device), param_vec
 
 
 def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
@@ -120,26 +120,84 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, dataset):
     obs_vec = observation["data"]
     var = observation["var"]
     H = observation["operator"]
-    H_pinv = torch.linalg.pinv(H)
 
-    n, m = H.shape
-    assert H_pinv.shape == (m, n)
-    assert obs_vec.shape == (n,)
+    # #Pseudoinverse loss
+    # n, m = H.shape
+    # assert obs_vec.shape == (n,)
 
-    # Precompute (rt^2 HH^T + sigma_y^2 I)^{-1} H
-    mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
-    assert mat1.shape == (n, m)
+    # # Precompute (rt^2 HH^T + sigma_y^2 I)^{-1} H
+    # mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
+    # assert mat1.shape == (n, m)
 
-    # Pseudoinverse guidance (with noise)
+    # # Pseudoinverse guidance (with noise)
+    # x_vec = x_0.reshape(batch_size, -1)
+    # vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
+    # assert vec1.shape == (batch_size, n)
+
+    # vec2 = (vec1 @ mat1)
+    # assert vec2.shape == (batch_size, m)
+
+    # mat_x = (vec2.detach() * x_vec).sum()
+    # score = torch.autograd.grad(mat_x, x_t)[0]
+
+    #=====================================================
+    # Diffusion posterior sampling (get observation loss)
+    #=====================================================
     x_vec = x_0.reshape(batch_size, -1)
-    vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
-    assert vec1.shape == (batch_size, n)
+    measurement = torch.matmul(H, x_vec.T).T
+    total_var = var + proc_var
+    obs_loss = torch.sum((measurement - obs_vec[None, ...])**2 / total_var)
+    
+    #print(f"mse = {obs_loss.item()/len(obs_vec)}")
 
-    vec2 = (vec1 @ mat1)
-    assert vec2.shape == (batch_size, m)
+    #=====================================================
+    # DiffusionPDE loss (get physics/PDE loss)
+    #=====================================================
+    pde_loss = 0.0
+    
+    # Extract needed numerical properties
+    dx = dataset.grid[1] - dataset.grid[0]
+    q_e = 1.6e-19
+    m_e = 9.1e-31
+    B = dataset.get_field(x_0, "B", action="denormalize")
+    n_e = dataset.get_field(x_0, "ne", action="denormalize")
+    nu_e = dataset.get_field(x_0, "nu_e", action="denormalize")
+    phi = dataset.get_field(x_0, "phi", action="denormalize")
+    pe = dataset.get_field(x_0, "pe", action="denormalize")
 
-    mat_x = (vec2.detach() * x_vec).sum()
-    score = torch.autograd.grad(mat_x, x_t)[0]
+    # Normalize/denormalize quantities as needed
+    E = dataset.get_field(x_0, "E")
+    E_denorm = dataset.norm.denormalize(E, "E")
+    grad_pe = dataset.get_field(x_0, "∇pe")
+    grad_pe_denorm = dataset.norm.denormalize(grad_pe, "∇pe")
+    ue = dataset.get_field(x_0, "ue")
+
+    # Ohm's law residual
+    hall = q_e * B / (m_e * nu_e)
+    ohm_mobility = q_e / (m_e * nu_e * (1 + hall**2))
+    ohm_efield = E_denorm
+    ohm_pe = grad_pe_denorm / n_e
+    ohm_rhs = -ohm_mobility * (ohm_efield  + ohm_pe)
+    ohm_err = (dataset.norm.normalize(ohm_rhs, "ue") - ue)**2 / 25
+
+    # Gauss's law error
+    E_calc = dataset.norm.normalize(-(phi[:, 2:] - phi[:, :-2]) / (2 * dx), "E")
+    E_err = (E_calc - E[:,1:-1])**2
+
+    # Grad pe error
+    grad_pe_calc = dataset.norm.normalize((pe[:, 2:] - pe[:, :-2]) / (2 * dx), "∇pe")
+    grad_pe_err  = (grad_pe_calc - grad_pe[:,1:-1])**2
+
+    # Sum components into single PDE loss
+    pde_loss = (ohm_err.mean() + E_err.mean() + grad_pe_err.mean())/3
+
+    # Combine observation loss with PDE loss
+    total_loss = obs_loss
+    if (pde_strength > 0):
+        total_loss += pde_strength * pde_loss
+
+    # Take gradient
+    score = torch.autograd.grad(-total_loss, x_t)[0]
 
     return score
 
@@ -194,6 +252,13 @@ def reverse_step(
             step_1 = step_scale * dt * (deriv_0 + deriv_1) / 2
     
         x_pred = x_t + step_1
+
+    if (t < 1):
+        pde_strength = 0.0#10.0/(t**2 + 1)
+    else:
+        pde_strength = 0.0
+
+    #print(f"t={t.item()},{pde_strength=}")
 
     # Guidance loss
     if observation["var"] is not None and t_mid < t_max_guidance:

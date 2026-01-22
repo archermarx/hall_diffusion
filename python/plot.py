@@ -83,7 +83,7 @@ FIELD_INFO = {
     ),
     "ne": dict(
         ylabel=r"Plasma density (m$^{-3}$)",
-        ylog=False,
+        ylog=True,
         title="Plasma density",
         letter_pos = "top right",
     ),

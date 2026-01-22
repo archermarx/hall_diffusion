@@ -3,7 +3,7 @@ num_samples = 64
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
-num_steps = 1024
+num_steps = 2048
 
 # Which model to load (ema, best, last) 
 model_type = "ema"
@@ -12,8 +12,15 @@ out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale = 1.1
+step_scale = 1.0
 # ODE method
-method = "heun"
+method = "midpoint"
 
-observation = "experimental_data/data_pb=3.5e-5.toml"
+#observation = "experimental_data/data_pb=3.5e-5.toml"
+
+[observation]
+base_sim = "mcmc_reference/ref_sim/normalized"
+
+[observation.fields]
+B = {locs = "all", error_type = "relative", std_dev = 0.7}
+ui_1 = {locs = "all", error_type = "relative", std_dev = 1.0}
