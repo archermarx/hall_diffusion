@@ -176,6 +176,7 @@ def residual_ohm(x_0, dataset):
     ue = dataset.get_field(x_0, "ue", action="denormalize")
 
     # Compute electron velocity
+    # TODO: do intermediate calculations in a normalized way
     qm = q_e / m_e
     wce = qm * B
     mu = qm * (nu_e / (nu_e**2 + wce**2))
