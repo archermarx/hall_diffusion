@@ -1,9 +1,9 @@
 # Number of independent sample traces to generate
-num_samples = 256
+num_samples = 64
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
-num_steps = 2048
+num_steps = 512
 
 # Which model to load (ema, best, last) 
 model_type = "ema"
@@ -24,8 +24,8 @@ start_time = 5.0
 stop_time = 0.0
 
 [pde_guidance.strengths]
-base = 10.0
-ohm = 1.0
+base = 1.0
+ohm = 0.02
 E = 1.0
 grad_pe = 1.0
 ne = 1.0

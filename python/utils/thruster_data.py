@@ -51,6 +51,9 @@ class ThrusterDataset(Dataset):
         else:
             raise NameError(f"Action '{name}' not allowed. Action must be 'normalize', 'denormalize' or `None`.")
         
+    def get_denorm(self, tens, name):
+        return self.get_field(tens, name, action="denormalize")
+        
     def get_param(self, p, name, action=None):
         param = p[self.params()[name]]
         if action == "normalize":

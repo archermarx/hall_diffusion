@@ -130,6 +130,18 @@ def print_grad_hook(grad):
 # Constants
 q_e = 1.6e-19
 m_e = 9.1e-31
+qe_me = q_e / m_e
+
+# Normalization
+q_0 = q_e
+m_0 = m_e
+phi_0 = 300.0
+n_0 = 1e16
+L_0 = 1/math.cbrt(n_0)
+u_0 = math.sqrt(q_0 * phi_0 / m_0)
+t_0 = L_0 / u_0
+f_0 = 1/t_0
+E_0 = phi_0 / L_0
 
 def norm_residual(x: torch.Tensor, ref: torch.Tensor):
     return ((x - ref) / ref.abs().max())**2
@@ -138,62 +150,58 @@ def residual_E(x_0, dataset):
     """
     Compute electric field residual: E = -grad(phi)
     """
-    # Get de-normalized phi and E
-    phi = dataset.get_field(x_0, "phi", action="denormalize")
-    E = dataset.get_field(x_0, "E", action = "denormalize")
+    # Get phi and E in real units, then normalize consistently
+    phi = dataset.get_denorm(x_0, "phi") / phi_0
+    E = dataset.get_denorm(x_0, "E") / E_0
 
     # Compute potential gradient using finite differences (interior only)
-    grad_phi = (phi[:, 2:] - phi[:, :-2]) / (2 * dataset.dx)
+    grad_phi = (phi[:, 2:] - phi[:, :-2]) / (2 * dataset.dx / L_0)
 
     # Compute normalized electric field residual
-    return norm_residual(grad_phi, E[:, 1:-1])
+    return (grad_phi - E[:, 1:-1])**2 # norm_residual(grad_phi, E[:, 1:-1])
 
 def residual_grad_pe(x_0, dataset):
     """
     Compute pressure gradient residual: gradpe = grad(pe)
     """
-    # Get pressure and pressure gradient
-    pe = dataset.get_field(x_0, "pe", action="denormalize")
-    grad_pe = dataset.get_field(x_0, "∇pe", action="denormalize")
+    # Get pressure and pressure gradient in real units, then normalize consistently
+    pe = dataset.get_denorm(x_0, "pe") / (n_0 * phi_0)
+    grad_pe = dataset.get_denorm(x_0, "∇pe") / (n_0 * phi_0 / L_0)
 
     # Compute pressure gradient with finite differences (interior only)
-    grad_pe_calc = (pe[:, 2:] - pe[:, :-2]) / (2 * dataset.dx)
+    grad_pe_calc = (pe[:, 2:] - pe[:, :-2]) / (2 * dataset.dx / L_0)
 
     # Compute squared normalized pressure gradient residual
-    return norm_residual(grad_pe_calc, grad_pe[:, 1:-1])
+    return (grad_pe_calc - grad_pe[:, 1:-1])**2 #norm_residual(grad_pe_calc, grad_pe[:, 1:-1])
 
 def residual_ohm(x_0, dataset):
     """
     Compute Ohm's law residual: ue = -mu * (E + grad_pe / ne)
     With mu = q/m * (nu_e / (nu_e**2 + wce**2))
     """
-    # Extract needed properties from the tensor
-    B = dataset.get_field(x_0, "B", action="denormalize")
-    ne = dataset.get_field(x_0, "ne", action="denormalize")
-    nu_e = dataset.get_field(x_0, "nu_e", action="denormalize")
-    E = dataset.get_field(x_0, "E", action="denormalize")
-    grad_pe = dataset.get_field(x_0, "∇pe", action="denormalize")
-    ue = dataset.get_field(x_0, "ue", action="denormalize")
+    # Extract needed properties in real units, then normalize consistently
+    wce = qe_me * dataset.get_denorm(x_0, "B") / f_0
+    ne = dataset.get_denorm(x_0, "ne") / n_0
+    nu_e = dataset.get_denorm(x_0, "nu_e") / f_0
+    E = dataset.get_denorm(x_0, "E") / E_0
+    grad_pe = dataset.get_denorm(x_0, "∇pe") / (n_0 * phi_0 / L_0)
+    ue = dataset.get_denorm(x_0, "ue") / u_0
 
-    # Compute electron velocity
-    # TODO: do intermediate calculations in a normalized way
-    qm = q_e / m_e
-    wce = qm * B
-    mu = qm * (nu_e / (nu_e**2 + wce**2))
-    je_calc = q_e * mu * (ne * E + grad_pe)
-    je = -q_e * ne * ue
+    # Compute electron current using normalized ohm's law
+    mu = nu_e / (nu_e**2 + wce**2)
+    je_calc = -mu * (ne * E + grad_pe)
 
-    return norm_residual(je_calc, je)
+    return (je_calc - (ue * ne))**2 #norm_residual(je_calc, ue*ne)
 
 def residual_ne(x_0, dataset):
     """
     Compute ne residual: ne = sum(Z * ni_Z)
     """
     # Get electron density
-    ne   = dataset.get_field(x_0, "ne", action="denormalize")
-    ni_1 = dataset.get_field(x_0, f"ni_1", action="denormalize")
-    ni_2 = dataset.get_field(x_0, f"ni_2", action="denormalize")
-    ni_3 = dataset.get_field(x_0, f"ni_3", action="denormalize")
+    ne   = dataset.get_field(x_0, "ne", action="denormalize") / n_0
+    ni_1 = dataset.get_field(x_0, f"ni_1", action="denormalize") / n_0
+    ni_2 = dataset.get_field(x_0, f"ni_2", action="denormalize") / n_0
+    ni_3 = dataset.get_field(x_0, f"ni_3", action="denormalize") / n_0
     ne_calc = ni_1 + 2 * ni_2 + 3 * ni_3
 
     return norm_residual(ne_calc, ne)
