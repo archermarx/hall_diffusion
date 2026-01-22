@@ -156,6 +156,9 @@ The configs also have options for sampling/generating from the model.
 To run the sampler, just run `python/sampler.py`.
 The results will be placed in the config's specified output dirs.
 
+## Evaluating model quality
+We use the maximum mean discrepancy to evaluate the distance between two distributions, i.e. generated samples and a test set. We apply it here by first compressing the data into a latent representation using the Hierarchical Tucker method. This can be done in `compress.py`. Once the data have been compressed, we use `mmd.py` to compute the discrepancy.
+
 ## References
 - \[1\]: https://arxiv.org/abs/2206.00364
 - \[2\]: https://arxiv.org/abs/2312.02696

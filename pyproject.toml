@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "htucker",
     "matplotlib>=3.10.3",
     "numpy>=2.3.0",
     "pandas>=2.3.0",
@@ -16,3 +17,11 @@ dependencies = [
 
 [tool.setuptools]
 py-modules = []
+
+[tool.uv.sources]
+htucker = { git = "https://github.com/gorodetsky-umich/htucker_incremental" }
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.5.1",
+]

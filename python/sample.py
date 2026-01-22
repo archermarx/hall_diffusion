@@ -6,6 +6,7 @@ import os
 import shutil
 import uuid
 import math
+import random
 
 # Third-party deps
 import torch
@@ -22,13 +23,15 @@ import noise
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str)
 parser.add_argument("config", type=str)
+parser.add_argument("-o", "--out-dir", type=str)
 
 DEVICE = torch.device("cpu")
 
-def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE):
+
+def build_observation(dataset, observations, default_stddev=1.0):
     _, param_vec, data_tensor = dataset[0]
     data_tensor = torch.tensor(data_tensor, device=DEVICE)
-    param_vec = torch.tensor(param_vec, device=DEVICE) 
+    param_vec = torch.tensor(param_vec, device=DEVICE)
     (num_channels, resolution) = data_tensor.shape
 
     obs_matrix_loc = torch.zeros(num_channels, resolution)
@@ -52,7 +55,9 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
         stddev = obs_fields[obs_field].get("stddev", default_stddev)
 
         # Get observation from file
-        x_inds, x_data, y_data = utils.get_observation_locs(obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized")
+        x_inds, x_data, y_data = utils.get_observation_locs(
+            obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized"
+        )
 
         if (len(x_data) == resolution) and np.all(x_inds == np.arange(resolution)):
             # If x_data == grid, then we're observing an entire row
@@ -75,7 +80,9 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
                 obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
             else:
                 print("Using data from file")
-                obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32)
+                obs_matrix_dat[row_index, x_inds] = torch.tensor(
+                    y_data, dtype=torch.float32
+                )
 
     # Dimensions
     # m = num_channels * resolution
@@ -97,7 +104,7 @@ def build_observation(dataset, observations, default_stddev = 1.0, device=DEVICE
 
     # Read scalar parameters if present
     if (params := observations.get("params", None)) is not None:
-        for (p, i) in dataset.params().items():
+        for p, i in dataset.params().items():
             if p in params:
                 param_vec[i] = dataset.norm.normalize(params[p], p)
 
@@ -201,6 +208,7 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, dataset):
 
     return score
 
+
 def reverse_step(
     denoiser,
     x_t,
@@ -213,7 +221,6 @@ def reverse_step(
     method="midpoint",
     model_args=dict(),
 ):
-    
     assert method in ["heun", "midpoint", "euler"]
 
     (b, _, _) = x_t.shape
@@ -235,7 +242,7 @@ def reverse_step(
     deriv_0 = -(x_denoised - x_t) / t_prev
     step_0 = step_scale * dt * deriv_0
 
-    if (method == "midpoint"):
+    if method == "midpoint":
         step_0 *= 0.5
 
     x_pred = x_t + step_0
@@ -245,12 +252,12 @@ def reverse_step(
         t2 = t_mid if method == "midpoint" else t
         x_denoised = denoiser(x_pred, t2 * ones, **model_args)
         deriv_1 = -(x_denoised - x_t) / t2
-        
+
         if method == "midpoint":
             step_1 = step_scale * dt * deriv_1
         else:
             step_1 = step_scale * dt * (deriv_0 + deriv_1) / 2
-    
+
         x_pred = x_t + step_1
 
     if (t < 1):
@@ -262,13 +269,25 @@ def reverse_step(
 
     # Guidance loss
     if observation["var"] is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_t, x_denoised, observation, proc_var, pde_strength, dataset)
+        obs_score = guidance_score(
+            x_t, x_denoised, observation, proc_var, pde_strength, dataset
+        )
         # x_1 += dt * t_mid * obs_score
         x_pred += obs_score
 
     return x_pred.detach()
 
-def reverse(denoiser, x, timesteps, dataset, observation, showprogress=False, model_args=dict(), **kwargs):
+
+def reverse(
+    denoiser,
+    x,
+    timesteps,
+    dataset,
+    observation,
+    showprogress=False,
+    model_args=dict(),
+    **kwargs,
+):
     """
     Perform iterative denoising to generate a 1D image from Gaussian noise using a provided denoising model
 
@@ -287,13 +306,21 @@ def reverse(denoiser, x, timesteps, dataset, observation, showprogress=False, mo
     output = torch.zeros((num_steps, b, c, w))
     output[0, ...] = x
 
-
     for step_idx, t in enumerate(tqdm(timesteps, disable=(not showprogress))):
         if step_idx == 0:
             continue
 
         t_prev = timesteps[step_idx - 1]
-        x = reverse_step(denoiser, x, t_prev, t, observation, dataset, model_args=model_args, **kwargs)
+        x = reverse_step(
+            denoiser,
+            x,
+            t_prev,
+            t,
+            observation,
+            dataset,
+            model_args=model_args,
+            **kwargs,
+        )
         output[step_idx, ...] = x
 
     output[-1, ...] = x
@@ -309,14 +336,32 @@ def sample(model, noise_sampler, num_samples, args):
     step_scale = args.get("step_scale", 1.0)
     method = args.get("method", "midpoint")
 
-    # Load observations
-    obs_args = utils.read_observation(args["observation"])
-    obs_file = Path(obs_args["base_sim"])
+    # Determine if we're doing condional or unconditional sampling
+    # If there is an `observation` field, then we're conditioning on a partial observation of that simulation
+    # If not, we're sampling unconditionally
+    # If we sample unconditonally, we need to get some scalar parameters to condition on
+    # These are drawn from the same distributions as the training set
+    if "observation" in args:
+        obs_args = utils.read_observation(args["observation"])
+        obs_file = Path(obs_args["base_sim"])
 
-    # Load data for conditioning
-    dataset = ThrusterDataset(obs_file)
-    obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, device=DEVICE)
-    obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
+        # Load data for conditioning
+        dataset = ThrusterDataset(obs_file)
+        obs_operator, obs_data, obs_var, param_vec = build_observation(
+            dataset, obs_args
+        )
+        obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
+    elif "unconditional_data_dir" in args:
+        dataset = ThrusterDataset(args["unconditional_data_dir"])
+        obs = dict(operator=None, var=None, data=None)
+        param_vec_inds = random.choices(range(len(dataset)), k=num_samples)
+        param_vec = torch.tensor(
+            np.array([dataset[i][1] for i in param_vec_inds]), device=DEVICE
+        )
+    else:
+        raise NotImplementedError(
+            "Observation not provided and no data directory for unconditional sample generation."
+        )
 
     # Sample initial noise
     xt = noise_sampler.sample(num_samples) * noise_max
@@ -334,7 +379,7 @@ def sample(model, noise_sampler, num_samples, args):
         pde_strength=0.0,
         step_scale=step_scale,
         method=method,
-        model_args=dict(condition_vector=param_vec)
+        model_args=dict(condition_vector=param_vec),
     )
 
     final = output[-1, ...]
@@ -362,8 +407,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     DEVICE = utils.get_device()
 
+    # Load sampling configuration
     with open(args.config, "rb") as fp:
         sampling_config = tomllib.load(fp)
+
+    if args.out_dir is not None:
+        sampling_config["out_dir"] = args.out_dir
 
     # Load model and config from checkpoint
     model_dict = torch.load(args.model, weights_only=False)
@@ -393,7 +442,6 @@ if __name__ == "__main__":
     if remainder > 0:
         batches.append(remainder)
 
-
     # Create noise sampler and initial noise samples
     if "train_config" in model_dict and "noise_sampler" in model_dict["train_config"]:
         noise_sampler_args = model_dict["train_config"]["noise_sampler"]
@@ -408,7 +456,9 @@ if __name__ == "__main__":
     elif noise_sampler_args["type"] == "rbf":
         scale = noise_sampler_args["scale"]
         assert isinstance(scale, float | int)
-        noise_sampler = noise.RBFKernel(channels, resolution, scale=scale, device=DEVICE)
+        noise_sampler = noise.RBFKernel(
+            channels, resolution, scale=scale, device=DEVICE
+        )
     else:
         raise NotImplementedError()
 
