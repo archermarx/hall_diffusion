@@ -232,19 +232,13 @@ PHYSICS_RESIDUALS = dict(
 
 # Compute physics residual and some stats
 def physics_residual_info(x_0, dataset, res_name, res_info):
-    normalizer = res_info.get("normalizer", None)
     residual = res_info["func"](x_0, dataset)
 
     mean_res = residual.mean().item()
     min_res = residual.min().item()
     max_res = residual.max().item()
 
-    if normalizer is not None:
-        mean_res *= normalizer
-        min_res *= normalizer
-        max_res *= normalizer
-
-    status = f"{res_name}: {mean_res:.2e} {res_info["unit"]} ({min_res:.2e} - {max_res:.2e})"
+    status = f"{res_name}: {mean_res:.2e} ({min_res:.2e} - {max_res:.2e})"
 
     return {"residual": residual, "mean": mean_res, "min": min_res, "max": max_res, "status": status}
 
