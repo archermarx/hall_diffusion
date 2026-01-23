@@ -206,12 +206,51 @@ def residual_ne(x_0, dataset):
 
     return norm_residual(ne_calc, ne)
 
+# Register allowed physics residuals and some metadata
 PHYSICS_RESIDUALS = dict(
-    E = residual_E, grad_pe = residual_grad_pe, ohm = residual_ohm, ne = residual_ne
+    E = dict(
+        func = residual_E,
+        unit = "V/m",
+        normalizer = E_0,
+     ),
+    grad_pe = dict(
+        func = residual_grad_pe,
+        unit = "eV/m^4",
+        normalizer = phi_0 * n_0 / L_0,
+    ),
+    ohm = dict(
+        func = residual_ohm,
+        unit = "A/m^2",
+        normalizer = q_0 * n_0 * u_0,
+    ),
+    ne = dict(
+        func = residual_ne,
+        unit = "m^{-3}",
+        normalizer = n_0,
+    ),
 )
 
-def physics_residuals(x_0, dataset):
-    return {res_name: res_func(x_0, dataset).mean() for (res_name, res_func) in PHYSICS_RESIDUALS.items()}
+# Compute physics residual and some stats
+def physics_residual_info(x_0, dataset, res_name, res_info):
+    normalizer = res_info.get("normalizer", None)
+    residual = res_info["func"](x_0, dataset)
+
+    mean_res = residual.mean().item()
+    min_res = residual.min().item()
+    max_res = residual.max().item()
+
+    if normalizer is not None:
+        mean_res *= normalizer
+        min_res *= normalizer
+        max_res *= normalizer
+
+    status = f"{res_name}: {mean_res:.2e} {res_info["unit"]} ({min_res:.2e} - {max_res:.2e})"
+
+    return {"residual": residual, "mean": mean_res, "min": min_res, "max": max_res, "status": status}
+
+def calc_physics_residuals(x_0, dataset):
+    return {res_name: physics_residual_info(x_0, dataset, res_name, res_info) for (res_name, res_info) in PHYSICS_RESIDUALS.items()}
+
 
 #=====================================================
 # Conditioning on observations and PDEs
@@ -259,22 +298,19 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, pde_args, data
         # DiffusionPDE loss (get physics/PDE loss)
         #=====================================================
         print_residuals = pde_args.get("print_residuals", False)
-        pde_errs = physics_residuals(x_0, dataset)
+        pde_errs = calc_physics_residuals(x_0, dataset)
         pde_weights = pde_args.get("strengths", dict())
 
         pde_loss = torch.tensor(0.0, device=DEVICE)
         for (k, v) in pde_errs.items():
-            err = v.mean()
+            err = v["residual"].mean()
             w = pde_weights.get(k, 0.0)
-
-            if print_residuals:
-                print(f"{k}: {err.item():.3e}   ", end="")
 
             if w > 0:
                 pde_loss += w * err
 
         if print_residuals:
-            print()
+            print(" | ".join([x["status"] for x in pde_errs.values()]))
 
         total_loss += pde_strength * pde_loss
 
