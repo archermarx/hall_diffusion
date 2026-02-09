@@ -118,9 +118,9 @@ class EDM2Loss:
 
         h = self.deriv_h
 
-        total_weight = 1 + 1 / h + 1 / h**2
+        total_weight = 1 + h + h**2
         loss = (
-            weight * (base_loss + diff_loss_1 / h + diff_loss_2 / h**2) / total_weight
+            weight * (base_loss + diff_loss_1 * h + diff_loss_2 * h**2) / total_weight
         )
         base_loss = loss.mean().item()
 
@@ -502,7 +502,6 @@ def train(args):
         raise NotImplementedError()
 
     loss_fn = EDM2Loss(noise_sampler, **loss_args)
-
 
     # ---------------------------------------------
     # Main training loop
