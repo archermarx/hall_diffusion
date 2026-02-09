@@ -12,6 +12,7 @@ import random
 import torch
 from tqdm import tqdm
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Local deps
 import models.edm
@@ -21,11 +22,13 @@ from utils.thruster_data import ThrusterDataset
 import noise
 
 parser = argparse.ArgumentParser()
-parser.add_argument("model", type=str)
-parser.add_argument("config", type=str)
+parser.add_argument("model", type=str, nargs="?")
+parser.add_argument("config", type=str, nargs="?")
 parser.add_argument("-o", "--out-dir", type=str)
 parser.add_argument("-n", "--num-samples", type=int)
 parser.add_argument("-s", "--num-steps", type=int)
+parser.add_argument("--test-residual", action="store_true")
+parser.add_argument("--test-dir", type=Path)
 
 DEVICE = torch.device("cpu")
 
@@ -135,16 +138,19 @@ qe_me = q_e / m_e
 # Normalization
 q_0 = q_e
 m_0 = m_e
-phi_0 = 300.0
-n_0 = 1e16
+phi_0 = 0.01
+n_0 = 1e18
 L_0 = 1/math.cbrt(n_0)
 u_0 = math.sqrt(q_0 * phi_0 / m_0)
 t_0 = L_0 / u_0
 f_0 = 1/t_0
 E_0 = phi_0 / L_0
 
-def norm_residual(x: torch.Tensor, ref: torch.Tensor):
-    return ((x - ref) / ref.abs().max())**2
+def interior_gradient(x, dx):
+    return (x[:, 2:] - x[:, :-2]) / (2 * dx)
+
+def residual_result(a, b):
+    return (a-b)**2, a, b
 
 def residual_E(x_0, dataset):
     """
@@ -155,10 +161,10 @@ def residual_E(x_0, dataset):
     E = dataset.get_denorm(x_0, "E") / E_0
 
     # Compute potential gradient using finite differences (interior only)
-    grad_phi = (phi[:, 2:] - phi[:, :-2]) / (2 * dataset.dx / L_0)
+    E_calc = -interior_gradient(phi, dataset.dx / L_0)
 
     # Compute normalized electric field residual
-    return (grad_phi - E[:, 1:-1])**2 # norm_residual(grad_phi, E[:, 1:-1])
+    return residual_result(E_calc, E[:, 1:-1])
 
 def residual_grad_pe(x_0, dataset):
     """
@@ -169,10 +175,10 @@ def residual_grad_pe(x_0, dataset):
     grad_pe = dataset.get_denorm(x_0, "∇pe") / (n_0 * phi_0 / L_0)
 
     # Compute pressure gradient with finite differences (interior only)
-    grad_pe_calc = (pe[:, 2:] - pe[:, :-2]) / (2 * dataset.dx / L_0)
+    grad_pe_calc = interior_gradient(pe, dataset.dx / L_0)
 
     # Compute squared normalized pressure gradient residual
-    return (grad_pe_calc - grad_pe[:, 1:-1])**2 #norm_residual(grad_pe_calc, grad_pe[:, 1:-1])
+    return residual_result(grad_pe_calc, grad_pe[:, 1:-1])
 
 def residual_ohm(x_0, dataset):
     """
@@ -187,11 +193,23 @@ def residual_ohm(x_0, dataset):
     grad_pe = dataset.get_denorm(x_0, "∇pe") / (n_0 * phi_0 / L_0)
     ue = dataset.get_denorm(x_0, "ue") / u_0
 
-    # Compute electron current using normalized ohm's law
-    mu = nu_e / (nu_e**2 + wce**2)
-    je_calc = -mu * (ne * E + grad_pe)
+    # Get ion properties for ion drag calculations
+    ni_1 = dataset.get_field(x_0, f"ni_1", action="denormalize") / n_0
+    ni_2 = dataset.get_field(x_0, f"ni_2", action="denormalize") / n_0
+    ni_3 = dataset.get_field(x_0, f"ni_3", action="denormalize") / n_0
 
-    return (je_calc - (ue * ne))**2 #norm_residual(je_calc, ue*ne)
+    ui_1 = dataset.get_field(x_0, f"ui_1", action="denormalize") / u_0
+    ui_2 = dataset.get_field(x_0, f"ui_2", action="denormalize") / u_0
+    ui_3 = dataset.get_field(x_0, f"ui_3", action="denormalize") / u_0
+    
+    niui = ni_1 * ui_1 + ni_2 * ui_2 + ni_3 * ui_3
+
+    # Compute electron current using normalized ohm's law
+    ion_drag = niui * nu_e
+    mu = nu_e / (nu_e**2 + wce**2)
+    neue_calc = -mu * (ne * E + grad_pe - ion_drag)
+
+    return residual_result(neue_calc[:, 1:-1], (ne * ue)[:, 1:-1])
 
 def residual_ne(x_0, dataset):
     """
@@ -202,9 +220,9 @@ def residual_ne(x_0, dataset):
     ni_1 = dataset.get_field(x_0, f"ni_1", action="denormalize") / n_0
     ni_2 = dataset.get_field(x_0, f"ni_2", action="denormalize") / n_0
     ni_3 = dataset.get_field(x_0, f"ni_3", action="denormalize") / n_0
-    ne_calc = ni_1 + 2 * ni_2 + 3 * ni_3
+    ne_calc = 1 * ni_1 + 2 * ni_2 + 3 * ni_3
 
-    return norm_residual(ne_calc, ne)
+    return residual_result(ne_calc, ne)
 
 # Register allowed physics residuals and some metadata
 PHYSICS_RESIDUALS = dict(
@@ -232,7 +250,7 @@ PHYSICS_RESIDUALS = dict(
 
 # Compute physics residual and some stats
 def physics_residual_info(x_0, dataset, res_name, res_info):
-    residual = res_info["func"](x_0, dataset)
+    residual, _, _ = res_info["func"](x_0, dataset)
 
     mean_res = residual.mean().item()
     min_res = residual.min().item()
@@ -368,7 +386,7 @@ def reverse_step(
     pde_stop = pde_args.get("stop_time", 0.0)
 
     if (pde_stop <= t <= pde_start):
-        pde_strength = pde_args.get("strengths", dict()).get("base", 0.0) / (t**2 + 1)
+        pde_strength = abs(dt) * pde_args.get("strengths", dict()).get("base", 0.0) / (t**2 + 1)
     else:
         pde_strength = 0.0
 
@@ -431,7 +449,7 @@ def reverse(
 
         # Check for NaN or Inf
         if not torch.all(torch.isfinite(x)):
-            print("NaN/Inf deteced during sampling. Exiting")
+            print("NaN/Inf detected during sampling. Exiting")
             exit(1)
 
         output[step_idx, ...] = x
@@ -515,9 +533,72 @@ def sample(model, noise_sampler, num_samples, args):
         tens = final[i, :].cpu().numpy()
         np.savez(file, data=tens, params=param_vec.cpu().numpy())
 
+def test_residual(test_dir):
+    dataset = ThrusterDataset(test_dir)
+    x = dataset.grid
+    x_int = x[1:-1]
+
+    fig, axes = plt.subplots(2,2, figsize=(8,8), layout="constrained")
+    axes = axes.ravel()
+
+    _, _, tensor = dataset[4]
+    tensor = tensor[None, ...]
+
+    print("==========================")
+    print("Normalization constants:")
+    print("==========================")
+    print(f"{phi_0=}")
+    print(f"{L_0=:.3e}")
+    print(f"{E_0=:.3e}")
+    print(f"{n_0=:.3e}")
+    print(f"{u_0=:.3e}")
+    print(f"{t_0=:.3e}")
+    print("==========================")
+
+    for ax in axes:
+        ax.axhline([0.0], color = 'black', zorder=0, linestyle='--')
+
+    # E vs grad_phi
+    E_res, E_calc, E_base = residual_E(tensor, dataset)
+    axes[0].set(xlabel = "z (m)", ylabel = "Electric field (norm)", title = "E = -grad(phi)")
+    axes[0].plot(x_int, E_calc[0, :], label = "Extracted")
+    axes[0].plot(x_int, E_base[0, :], label = "Calculated", linestyle = "--")
+    axes[0].plot(x_int, np.sqrt(E_res[0, :]), label = "Residual")
+    axes[0].legend()
+
+    # pe vs grad_pe
+    grad_pe_res, grad_pe_calc, grad_pe_base = residual_grad_pe(tensor, dataset)
+    axes[1].set(xlabel = "z (m)", ylabel = "Pressure gradient (norm)", title = "Pressure gradient")
+    axes[1].plot(x_int, grad_pe_base[0, :], label = "Extracted")
+    axes[1].plot(x_int, grad_pe_calc[0, :], label = "Calculated", linestyle = "--")
+    axes[1].plot(x_int, np.sqrt(grad_pe_res[0, :]), label = "Residual")
+    axes[1].legend()
+
+    # Ohm's law
+    je_res, je_calc, je_base = residual_ohm(tensor, dataset)
+    axes[2].set(xlabel = "z (m)", ylabel = "Electron current density (norm)", title = "Ohm's law")
+    axes[2].plot(x_int, je_base[0, :], label = "Extracted")
+    axes[2].plot(x_int, je_calc[0, :], label = "Calculated", linestyle = "--")
+    axes[2].plot(x_int, np.sqrt(je_res[0, :]), label = "Residual")
+    axes[2].legend()
+
+    # Number densities
+    ne_res, ne_calc, ne_base = residual_ne(tensor, dataset)
+    axes[3].set(xlabel = "z (m)", ylabel = "Number density (norm)", title = "ne = sum(Z ni)")
+    axes[3].plot(x, ne_base[0, :], label = "Extracted")
+    axes[3].plot(x, ne_calc[0, :], label = "Calculated", linestyle = "--")
+    axes[3].plot(x, np.sqrt(ne_res[0, :]), label = "Residual")
+    axes[3].legend()
+
+    plt.savefig("residuals.png", dpi=200)
 
 if __name__ == "__main__":
     args = parser.parse_args()
+
+    if args.test_residual:
+        test_residual(args.test_dir)
+        exit(0)
+
     DEVICE = utils.get_device()
 
     # Load sampling configuration

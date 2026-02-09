@@ -3,7 +3,7 @@ num_samples = 64
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
-num_steps = 512
+num_steps = 2048
 
 # Which model to load (ema, best, last) 
 model_type = "ema"
@@ -12,7 +12,7 @@ out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale = 1.0
+step_scale = 1.05
 # ODE method
 method = "midpoint"
 
@@ -20,12 +20,12 @@ method = "midpoint"
 
 [pde_guidance]
 print_residuals = true
-start_time = 5.0
+start_time = 10.0
 stop_time = 0.0
 
 [pde_guidance.strengths]
-base = 1.0
-ohm = 0.02
+base = 10.0
+ohm = 1.0
 E = 1.0
 grad_pe = 1.0
 ne = 1.0

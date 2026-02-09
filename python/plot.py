@@ -31,7 +31,6 @@ matplotlib.rcParams["font.size"] = 15
 matplotlib.rcParams["font.family"] = "serif"
 matplotlib.rcParams["font.serif"] = "Computer Modern"
 
-
 # === Plotting style args ===
 # linestyle: (offset, (on, off, ...))
 DATA_LINESTYLE = (0, (4.0, 4.0))
