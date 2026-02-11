@@ -166,7 +166,6 @@ def load_samples(sample_dir, num_samples=None):
 
     samples_norm = np.array([dataset[i][2] for i in indices])
     samples = dataset.norm.denormalize_tensor(samples_norm)
-
     return dataset, samples
 
 
@@ -267,18 +266,15 @@ def get_field(field, field_names, data):
         ni_1 = data[:, index_dict["ni_1"], :]
         Te = data[:, index_dict["Tev"], :]
         energy = 1.5 * Te
-        rate_coeff_1 = pd.read_csv("rate_coeffs/ionization_Xe_Xe+.dat", delimiter="\t", skiprows=1)
-        rate_coeff_2 = pd.read_csv("rate_coeffs/ionization_Xe_Xe2+.dat", delimiter="\t", skiprows=1)
-        rate_coeff_3 = pd.read_csv("rate_coeffs/ionization_Xe_Xe3+.dat", delimiter="\t", skiprows=1)
+        rate_coeff_1 = pd.read_csv("rate_coeffs/ionization_Xe0_Xe1.dat", delimiter="\t", skiprows=1)
+        rate_coeff_2 = pd.read_csv("rate_coeffs/ionization_Xe0_Xe2.dat", delimiter="\t", skiprows=1)
+        rate_coeff_3 = pd.read_csv("rate_coeffs/ionization_Xe0_Xe3.dat", delimiter="\t", skiprows=1)
         kiz_1 = np.interp(energy, rate_coeff_1["Energy (eV)"], rate_coeff_1["Rate coefficient (m^3/s)"])
         kiz_2 = np.interp(energy, rate_coeff_2["Energy (eV)"], rate_coeff_2["Rate coefficient (m^3/s)"])
         kiz_3 = np.interp(energy, rate_coeff_3["Energy (eV)"], rate_coeff_3["Rate coefficient (m^3/s)"])
         return (kiz_1 + kiz_2 + kiz_3) * nn * ni_1 / ne
     else:
         f = data[:, index_dict[field], :]
-        if field == "nn":
-            print(np.min(f))
-            print(np.max(f)) 
         return f
 
 
@@ -312,9 +308,10 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
 
         # Plot reference simulations
         for (i, ref) in enumerate(refs):
-            if i == 1 and observation is not None and field in observation["fields"]:
-                # Don't plot ref_2 if we have an observation
-                continue
+            if observation is not None and field in observation["fields"]:
+                # Don't plot ref_2 if we have an observation or any ref if we plot markers
+                if i == 1 or obs_style=='marker':
+                    continue
 
             ref_dataset = ref["dataset"]
             ref_data = ref["data"]

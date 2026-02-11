@@ -12,8 +12,8 @@ out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale = 1.05
+step_scale = 1.1
 # ODE method
 method = "midpoint"
 
-observation = "experimental_data/perez_luna/data_pb=3.5e-5.toml"
+observation = "experimental_methods/perez_luna/observation.toml"

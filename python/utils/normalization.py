@@ -54,8 +54,6 @@ class Normalizer:
 
         mod = torch if isinstance(val, torch.Tensor) else np
 
-        #print(f"{mod=}")
-
         if log[index]:
             val = mod.log(val)
 
@@ -64,7 +62,6 @@ class Normalizer:
     def denormalize(self, val, name: str):
         index, norm = self.find_name(name)
         mean, std, log = norm["mean"], norm["std"], norm["log"]
-
         val = mean[index] + val * std[index]
 
         mod = torch if isinstance(val, torch.Tensor) else np
