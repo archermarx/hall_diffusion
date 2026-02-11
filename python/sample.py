@@ -38,9 +38,9 @@ def build_observation(dataset, observations, default_stddev=1.0):
     param_vec = torch.tensor(param_vec, device=DEVICE)
     (num_channels, resolution) = data_tensor.shape
 
-    obs_matrix_loc = torch.zeros(num_channels, resolution)
-    obs_matrix_dat = torch.zeros(num_channels, resolution)
-    obs_matrix_var = torch.zeros(num_channels, resolution)
+    obs_matrix_loc = torch.zeros(num_channels, resolution, device=DEVICE)
+    obs_matrix_dat = torch.zeros(num_channels, resolution, device=DEVICE)
+    obs_matrix_var = torch.zeros(num_channels, resolution, device=DEVICE)
 
     default_stddev = observations.get("stddev", 1.0)
 
@@ -63,9 +63,11 @@ def build_observation(dataset, observations, default_stddev=1.0):
             obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized"
         )
 
+        x_inds = np.unique(np.array(x_inds)).tolist()
+
         if (len(x_data) == resolution) and np.all(x_inds == np.arange(resolution)):
             # If x_data == grid, then we're observing an entire row
-            print("Observing row " + obs_field)
+            print(obs_field + ":\tobserving entire row.")
             obs_matrix_loc[row_index, :] = 1.0
             obs_matrix_dat[row_index, :] = data_tensor[row_index, :]
             obs_matrix_var[row_index, :] = stddev**2
@@ -80,13 +82,11 @@ def build_observation(dataset, observations, default_stddev=1.0):
             n += len(x_inds)
 
             if y_data is None:
-                print("Using underlying data")
+                print(obs_field + ":\tusing data from ref sim at selected axial locs.")
                 obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
             else:
-                print("Using data from file")
-                obs_matrix_dat[row_index, x_inds] = torch.tensor(
-                    y_data, dtype=torch.float32
-                )
+                print(obs_field +":\tusing data from file.")
+                obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32, device=DEVICE)
 
     # Dimensions
     # m = num_channels * resolution
@@ -94,7 +94,7 @@ def build_observation(dataset, observations, default_stddev=1.0):
     # A (linear observation operator) = (n, m)
     # y (observed data) = (n,)
     obs_matrix_loc = obs_matrix_loc.reshape(-1)
-    obs_A = torch.zeros(n, m)
+    obs_A = torch.zeros(n, m, device=DEVICE)
 
     j = 0
     for i in range(m):
@@ -111,7 +111,7 @@ def build_observation(dataset, observations, default_stddev=1.0):
             if p in params:
                 param_vec[i] = dataset.norm.normalize(params[p], p)
 
-    return obs_A.to(DEVICE), obs_y.to(DEVICE), obs_var.to(DEVICE), param_vec
+    return obs_A, obs_y, obs_var, param_vec
 
 def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     inv_rho = 1 / exponent
@@ -278,23 +278,6 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, pde_args, data
         var = observation["var"]
         H = observation["operator"]
 
-        # # Pseudoinverse guidance (with noise)
-        # n, m = H.shape
-        # assert obs_vec.shape == (n,)
-
-        # mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
-        # assert mat1.shape == (n, m)
-
-        # x_vec = x_0.reshape(batch_size, -1)
-        # vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
-        # assert vec1.shape == (batch_size, n)
-
-        # vec2 = (vec1 @ mat1)
-        # assert vec2.shape == (batch_size, m)
-
-        # mat_x = (vec2.detach() * x_vec).sum()
-        # score = torch.autograd.grad(mat_x, x_t)[0]
-
         #=====================================================
         # Diffusion posterior sampling (get observation loss)
         #=====================================================
@@ -382,11 +365,14 @@ def reverse_step(
 
         x_pred = x_t + step_1
 
-    pde_start = pde_args.get("start_time", 1.0)
-    pde_stop = pde_args.get("stop_time", 0.0)
+    if pde_args is not None:
+        pde_start = pde_args.get("start_time", 1.0)
+        pde_stop = pde_args.get("stop_time", 0.0)
 
-    if (pde_stop <= t <= pde_start):
-        pde_strength = abs(dt) * pde_args.get("strengths", dict()).get("base", 0.0) / (t**2 + 1)
+        if (pde_stop <= t <= pde_start):
+            pde_strength = abs(dt) * pde_args.get("strengths", dict()).get("base", 0.0) / (t**2 + 1)
+        else:
+            pde_strength = 0.0
     else:
         pde_strength = 0.0
 

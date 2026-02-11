@@ -28,8 +28,8 @@ class Normalizer:
     
     def write_normalization_info(self, path: Path|str):
         path = Path(path)
-        self.metadata_params.to_csv(path/ "norm_params.csv")
-        self.metadata_tensor.to_csv(path / "norm_data.csv")
+        self.metadata_params.to_csv(path/ "norm_params.csv", index=False)
+        self.metadata_tensor.to_csv(path / "norm_data.csv", index=False)
     
     def find_name(self, name: str):
         if name in self.fields():
@@ -67,9 +67,7 @@ class Normalizer:
 
         val = mean[index] + val * std[index]
 
-
         mod = torch if isinstance(val, torch.Tensor) else np
-        #print(f"{mod=}")
 
         if log[index]:
             val = mod.exp(val)

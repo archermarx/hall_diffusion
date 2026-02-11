@@ -1,0 +1,24 @@
+# Folder containing normalization information, if the above is unnormalized
+base_sim = "mcmc_reference/ref_sim/normalized"
+stddev = 0.75
+# TODO: use this
+# TODO: normalized = true | false
+[params]
+anode_mass_flow_rate_kg_s = 5.16e-6
+discharge_voltage_v = 300.0
+cathode_coupling_voltage = 30.0
+# neutral_velocity_m_s =
+# magnetic_field_scale =
+# wall_loss_scale = 
+
+# # TODO: use this
+# # TODO: normalized = true | false
+# [global_data]
+# discharge_current_A = 4.24
+# # thrust_mN
+
+[fields.ui_1]
+x = [0.009, 0.013, 0.017, 0.019, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026, 0.027, 0.028, 0.029, 0.031, 0.035, 0.039, 0.043, 0.047, 0.051, 0.055, 0.065, 0.075]
+y = [-1024,  -900,   900,  2800,  7300,  9000, 10800, 11800, 12690, 13400, 14200, 14850, 15600, 16200, 17270, 17794, 18159, 18242, 18365, 18450, 18658, 18400]
+normalized = false
+stddev = 1.2

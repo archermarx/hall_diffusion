@@ -195,7 +195,6 @@ function run_sim(params; num_cells = 128, perturbation_scale = 1.0)
 end
 
 function frame_from_dict(frame, config)
-
     species_dict = Dict(
         prop.gas.short_name => prop.gas for prop in config.propellants
     )
@@ -211,6 +210,7 @@ function frame_from_dict(frame, config)
         state.u .= dict["u"]
         neutrals[sym] = state
     end
+    @show extrema(neutrals[:Xe].n)
 
     ions = het.OrderedDict{Symbol, Vector{het.SpeciesState}}()
     for (sym, arr) in frame["ions"]
@@ -288,7 +288,7 @@ function sim_from_json(json_file)
     if haskey(output, "frames")
         for frame_dict in output["frames"]
             push!(frames, frame_from_dict(frame_dict, config))
-            push!(times, frame["t"])
+            push!(times, frame_dict["t"])
         end
     else
         @assert(haskey(output, "average"))
@@ -306,7 +306,8 @@ function process_jsons(dir, output_dir)
     mkpath(output_dir)
 
     @showprogress for file in files
-        output_file = joinpath(output_dir, splitpath(file)[end])
+        isdir(file) && continue
+        output_file = joinpath(output_dir, splitext(splitpath(file)[end])[1])
         sim = sim_from_json(file)
         if sim.retcode == :success
             save_sim(output_file, sim)
@@ -333,6 +334,7 @@ function save_sim(sim, params = nothing; avg_start_time = 5e-4)
     end
 
     N = length(avg[:z])
+    # only load interior cells
     inds = 2:N-1
 
     ui = avg[:ui][]
@@ -366,7 +368,7 @@ function save_sim(sim, params = nothing; avg_start_time = 5e-4)
 
     out_dict = Dict(
         :space => Dict(
-            :z => avg[:z] .|> Float32
+            :z => avg[:z][inds] .|> Float32,
             :B => avg[:B][][inds] .|> Float32,
             :nu_an => avg[:nu_an][][inds] .|> Float32,
             :nu_e => avg[:nu_e][][inds] .|> Float32,
@@ -402,6 +404,7 @@ function save_sim(file::String, args...; kwargs...)
     open(file, "w") do f
         serialize(f, sim_dict)
     end
+    print("Saved $(file)")
     return sim_dict
 end
 

@@ -32,7 +32,7 @@ class ThrusterDataset(Dataset):
     def write_metadata(self, path: Path | str):
         path = Path(path)
         self.norm.write_normalization_info(path)
-        self.metadata_grid.to_csv(path / "grid.csv")
+        self.metadata_grid.to_csv(path / "grid.csv", index=False)
 
     def fields(self):
         return self.norm.fields()

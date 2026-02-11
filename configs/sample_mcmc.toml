@@ -1,24 +1,38 @@
 # Number of independent sample traces to generate
-num_samples = 32768
+num_samples = 256
 # Batch size of sample generation. If not provided, we do a single batch
-batch_size = 1024
+batch_size = 256
 # Number of sampling steps to take
 num_steps = 2048
 
-# Which model to load (ema, best, last)
+# Which model to load (ema, best, last) 
 model_type = "ema"
 # Output directory for generations.
-out_dir = "samples/sample_21"
+out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
-replace_samples = false
+replace_samples = true
 # Step scale
-step_scale = 1.0
+step_scale = 1.00
+# ODE method
+method = "midpoint"
+
+# observation = "experimental_data/data_pb=3.5e-5.toml"
+
+# [pde_guidance]
+# print_residuals = true
+# start_time = 10.0
+# stop_time = 0.0
+
+# [pde_guidance.strengths]
+# base = 10.0
+# ohm = 1.0
+# E = 1.0
+# grad_pe = 1.0
+# ne = 1.0
 
 [observation]
-# Folder containing normalization information, if the above is unnormalized
 base_sim = "mcmc_reference/ref_sim/normalized"
-stddev = 1.2
 
 [observation.fields]
-B = { locs = "all", error_type = "relative", std_dev = 0.7 }
-ui_1 = { locs = "all", error_type = "relative", std_dev = 1.0}
+B = {locs = "all", error_type = "relative", std_dev = 1.0}
+ui_1 = {locs = "all", error_type = "relative", stddev = 1.0}
