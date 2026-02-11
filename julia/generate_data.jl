@@ -210,7 +210,6 @@ function frame_from_dict(frame, config)
         state.u .= dict["u"]
         neutrals[sym] = state
     end
-    @show extrema(neutrals[:Xe].n)
 
     ions = het.OrderedDict{Symbol, Vector{het.SpeciesState}}()
     for (sym, arr) in frame["ions"]
@@ -404,7 +403,7 @@ function save_sim(file::String, args...; kwargs...)
     open(file, "w") do f
         serialize(f, sim_dict)
     end
-    print("Saved $(file)")
+    println("Saved $(file)")
     return sim_dict
 end
 
