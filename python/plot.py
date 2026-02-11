@@ -97,8 +97,38 @@ FIELD_INFO = {
         title="Plasma density",
         letter_pos = "top right",
     ),
+    "ni_1": dict(
+        ylabel=r"Ion density (1) (m$^{-3}$)",
+        ylog=True,
+        title="Ion density (1)",
+        letter_pos = "top right",
+    ),
+    "ni_2": dict(
+        ylabel=r"Ion density (2) (m$^{-3}$)",
+        ylog=True,
+        title="Ion density (2)",
+        letter_pos = "top right",
+    ),
+    "ni_3": dict(
+        ylabel=r"Ion density (3) (m$^{-3}$)",
+        ylog=True,
+        title="Ion density (3)",
+        letter_pos = "top right",
+    ),
     "ui_1": dict(
         ylabel=r"Ion velocity (km/s)",
+        yscalefactor=1 / 1000,
+        title="Ion velocity",
+        letter_pos="top",
+    ),
+    "ui_2": dict(
+        ylabel=r"Ion velocity (2) (km/s)",
+        yscalefactor=1 / 1000,
+        title="Ion velocity",
+        letter_pos="top",
+    ),
+    "ui_3": dict(
+        ylabel=r"Ion velocity (3) (km/s)",
         yscalefactor=1 / 1000,
         title="Ion velocity",
         letter_pos="top",
@@ -283,7 +313,7 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
     obs_args = dict(color=OBS_COLOR, label="Observation", zorder=9)
 
     # Load and process reference simulation data 
-    # TODO: load this before
+    # TODO: load this before this function
     # TODO: support arbitrary reference simulation data
     refs = []
     lw = DATA_LINE_ARGS["linewidth"]
@@ -453,10 +483,7 @@ def plot_sidebyside(args, **kwargs):
     )
     axes_linear = axs.ravel()
 
-    if num_rows == 1:
-        multifield_args = dict(show_ylabel=False, show_title=True)
-    else:
-        multifield_args = dict()
+    multifield_args = dict(show_ylabel=False, show_title=True)
 
     dataset, samples = load_samples(args.samples)
     x = dataset.grid / CHANNEL_LENGTH

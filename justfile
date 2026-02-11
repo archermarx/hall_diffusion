@@ -8,6 +8,10 @@ REF_SIM := "mcmc_reference/ref_3charge/normalized"
 sample target:
     uv run python/sample.py {{MODEL}} configs/sample_{{target}}.toml -o samples/{{target}}
 
+# Run experimental data processing using perez-luna or roberts methods
+calc target:
+    uv run experimental_methods/{{target}}/{{target}}.py
+
 # Plots predictions for ui_1, ne, Tev, and nu_an horizonatally for the target case
 plot_forward target +fields=DEFAULT_FIELDS:
     uv run python/plot.py \
@@ -50,12 +54,12 @@ plot_roberts target="roberts" +fields=DEFAULT_FIELDS:
     uv run python/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"roberts.png" \
-        -f ui_1 Tev ne nn inv_hall \
+        -f ui_3 ne Tev E ue ni_1 nn inv_hall \
         --type=sidebyside \
         --ref={{REF_SIM}} \
         --ref2=experimental_methods/roberts/roberts.csv \
         --ref2-label="Roberts" \
         --observation=configs/sample_{{target}}.toml \
-        --rows=1 \
+        --rows=2 \
         --obs-style='line' \
         --vline-loc=0.020
