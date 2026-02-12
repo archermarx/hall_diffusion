@@ -211,6 +211,7 @@ function get_data_normalization(sims; target_std = 1.0)
 end
 
 function read_normalization_file(file)
+    @show file
     contents = readdlm(file, ',')[2:end, :]
 
     return (;

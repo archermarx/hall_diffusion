@@ -403,7 +403,7 @@ function save_sim(file::String, args...; kwargs...)
     open(file, "w") do f
         serialize(f, sim_dict)
     end
-    println("Saved $(file)")
+    #println("Saved $(file)")
     return sim_dict
 end
 
