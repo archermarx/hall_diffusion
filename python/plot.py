@@ -41,11 +41,12 @@ matplotlib.rcParams["font.serif"] = "Computer Modern"
 
 # === Plotting style args ===
 # linestyle: (offset, (on, off, ...))
-DATA_LINESTYLE = (0, (4.0, 4.0))
+DATA_LINESTYLE = (0, (3.0, 4.0))
 DATA_LINE_ARGS = dict(linewidth=2.5, linestyle=DATA_LINESTYLE)
 OBS_COLOR = "orange"
 XLABEL = "z (channel lengths)"
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
+COLORS = ["tab:blue", "tab:orange", "tab:green"]
 
 # Build quantiles/credible intervals we want to plot
 CREDIBLE_INTERVALS = [0.5, 0.95]
@@ -95,25 +96,31 @@ FIELD_INFO = {
         ylabel=r"Plasma density (m$^{-3}$)",
         ylog=True,
         title="Plasma density",
-        letter_pos = "top right",
+        letter_pos="top right",
+    ),
+    "ni_all": dict(
+        ylabel=r"Ion density (m$^{-3}$)",
+        ylog=True,
+        title="Ion density",
+        letter_pos="top right",
     ),
     "ni_1": dict(
-        ylabel=r"Ion density (1) (m$^{-3}$)",
+        ylabel=r"Ion density (m$^{-3}$)",
         ylog=True,
-        title="Ion density (1)",
-        letter_pos = "top right",
+        title="Ion density",
+        letter_pos="top right",
     ),
     "ni_2": dict(
-        ylabel=r"Ion density (2) (m$^{-3}$)",
+        ylabel=r"Ion density (m$^{-3}$)",
         ylog=True,
-        title="Ion density (2)",
-        letter_pos = "top right",
+        title="Ion density",
+        letter_pos="top right",
     ),
     "ni_3": dict(
-        ylabel=r"Ion density (3) (m$^{-3}$)",
+        ylabel=r"Ion density (m$^{-3}$)",
         ylog=True,
-        title="Ion density (3)",
-        letter_pos = "top right",
+        title="Ion density",
+        letter_pos="top right",
     ),
     "ui_1": dict(
         ylabel=r"Ion velocity (km/s)",
@@ -122,13 +129,19 @@ FIELD_INFO = {
         letter_pos="top",
     ),
     "ui_2": dict(
-        ylabel=r"Ion velocity (2) (km/s)",
+        ylabel=r"Ion velocity (km/s)",
         yscalefactor=1 / 1000,
         title="Ion velocity",
         letter_pos="top",
     ),
     "ui_3": dict(
-        ylabel=r"Ion velocity (3) (km/s)",
+        ylabel=r"Ion velocity (km/s)",
+        yscalefactor=1 / 1000,
+        title="Ion velocity",
+        letter_pos="top",
+    ),
+    "ui_1": dict(
+        ylabel=r"Ion velocity (km/s)",
         yscalefactor=1 / 1000,
         title="Ion velocity",
         letter_pos="top",
@@ -137,7 +150,8 @@ FIELD_INFO = {
         ylabel=r"Electron velocity (km/s)",
         yscalefactor=1 / 1000,
         title="Electron velocity",
-        letter_pos="top",
+        letter_pos="top right",
+        ylim = (-30, 5),
     ),
     "E": dict(
         ylabel=r"Electric field (kV/m)",
@@ -284,12 +298,14 @@ def plot_field(
 def get_field(field, field_names, data):
     index_dict = {n: i for (i, n) in enumerate(field_names)}
 
-    if field == "inv_hall":
+    if "," in field:
+        return {f: get_field(f, field_names, data)[f] for f in field.split(",")}
+    elif field == "inv_hall":
         q_e = 1.6e-19
         m_e = 9.1e-31
         nu_an = data[:, index_dict["nu_e"], :]
         w_ce = data[:, index_dict["B"], :] * q_e / m_e
-        return nu_an / w_ce
+        return {field: nu_an / w_ce}
     elif field == "nu_iz":
         nn = data[:, index_dict["nn"], :]
         ne = data[:, index_dict["ne"], :]
@@ -302,10 +318,10 @@ def get_field(field, field_names, data):
         kiz_1 = np.interp(energy, rate_coeff_1["Energy (eV)"], rate_coeff_1["Rate coefficient (m^3/s)"])
         kiz_2 = np.interp(energy, rate_coeff_2["Energy (eV)"], rate_coeff_2["Rate coefficient (m^3/s)"])
         kiz_3 = np.interp(energy, rate_coeff_3["Energy (eV)"], rate_coeff_3["Rate coefficient (m^3/s)"])
-        return (kiz_1 + kiz_2 + kiz_3) * nn * ni_1 / ne
+        return {field: (kiz_1 + kiz_2 + kiz_3) * nn * ni_1 / ne}
     else:
         f = data[:, index_dict[field], :]
-        return f
+        return {field: f}
 
 
 def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=None, ref2=None, ref2_label=None, observation=None, obs_style='marker', **FIELD_PLOT_ARGS):
@@ -316,11 +332,11 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
     # TODO: load this before this function
     # TODO: support arbitrary reference simulation data
     refs = []
-    lw = DATA_LINE_ARGS["linewidth"]
+    lw = 2.0 #DATA_LINE_ARGS["linewidth"]
     if ref is not None:
-        refs.append(dict(file=ref, style=dict(color="black", label="Reference", linestyle="--", linewidth=lw, zorder=10)))
+        refs.append(dict(file=ref, style=dict(label="Reference", linestyle=(0, (2, 3)), linewidth=lw, zorder=1000)))
     if ref2 is not None:
-        refs.append(dict(file=ref2, style=dict(color="red", label=ref2_label, linewidth=lw, zorder=8)))
+        refs.append(dict(file=ref2, style=dict(label=ref2_label, linewidth=lw, zorder=1002, linestyle="solid")))
 
     for ref in refs:
         if os.path.isdir(ref["file"]):
@@ -330,70 +346,89 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
         else:
             raise FileNotFoundError(ref["file"])
 
+    if observation is not None and "nu_an" in observation["fields"]:
+        observation["fields"]["inv_hall"] = observation["fields"]["nu_an"]
+
     for ax, field in zip(axes, fields):
         # Load data from tensor and plot
-        y = get_field(field, field_names, samples)
-        scale_factor = FIELD_INFO[field].get("yscalefactor", 1.0)
-        plot_field(ax, x, y, **FIELD_INFO[field], **FIELD_PLOT_ARGS)
+        field_data = get_field(field, field_names, samples)
 
-        # Plot reference simulations
-        for (i, ref) in enumerate(refs):
-            if observation is not None and field in observation["fields"]:
-                # Don't plot ref_2 if we have an observation or any ref if we plot markers
-                if i == 1 or obs_style=='marker':
-                    continue
+        for ifield, (subfield, y) in enumerate(field_data.items()):
+            scale_factor = FIELD_INFO[subfield].get("yscalefactor", 1.0)
+            plot_field(ax, x, y, color=COLORS[ifield], **FIELD_INFO[subfield], **FIELD_PLOT_ARGS)
 
-            ref_dataset = ref["dataset"]
-            ref_data = ref["data"]
+            # Plot reference simulations
+            for (i, ref) in enumerate(refs):
+                
+                if observation is not None and subfield in observation["fields"]:
+                    print(f"{subfield=}")
+                    if obs_style=='marker':
+                        continue
 
-            if ref_data is not None and ref_dataset is not None:
-                # Ref data is a normalized tensor
-                y_ref = get_field(field, field_names, ref_data)[0, :] * scale_factor
-                ax.plot(ref_dataset.grid / CHANNEL_LENGTH, y_ref, **ref["style"])
+                if i == 0 and len(field_data.keys()) == 1:
+                    ref["style"]["color"] = "black"
+                elif i == 1 :
+                    ref["style"]["color"] = "black"
 
-            elif ref_data is not None and field in ref_data.columns:
-                # Ref data is in a pandas dataframe
-                y_ref = ref_data[field] * scale_factor
-                x_ref = ref_data["z"] / CHANNEL_LENGTH
+                ref_dataset = ref["dataset"]
+                ref_data = ref["data"]
+
+                if ref_data is not None and ref_dataset is not None:
+                    # Ref data is a normalized tensor
+                    ref_field = get_field(subfield, field_names, ref_data)
+                    y_ref = ref_field[subfield][0, :] * scale_factor
+                    x_ref = ref_dataset.grid / CHANNEL_LENGTH
+                    #ax.plot(ref_dataset.grid / CHANNEL_LENGTH, y_ref, **ref["style"])
+
+                elif ref_data is not None and subfield in ref_data.columns:
+                    # Ref data is in a pandas dataframe
+                    y_ref = ref_data[subfield].to_numpy() * scale_factor
+                    x_ref = ref_data["z"].to_numpy() / CHANNEL_LENGTH
+                    #ax.plot(x_ref, y_ref, **ref["style"])
+                else:
+                    raise ValueError("Invalid reference data format")
+
                 ax.plot(x_ref, y_ref, **ref["style"])
 
-        # Plot observations
-        # TODO: treat observations as another ref simulaiton
-        if observation is not None and field in observation["fields"]:
-            y_ref_obs = (
-                get_field(field, field_names, observation["ref"])[0, :] * scale_factor
-            )
+            # Plot observations
+            # TODO: treat observations as another ref simulaiton
+            if observation is not None and subfield in observation["fields"]:
+                y_ref_obs = (
+                    get_field(subfield, field_names, observation["ref"])[subfield][0, :] * scale_factor
+                )
 
-            _, x_data, y_data = utils.get_observation_locs(
-                observation["fields"],
-                field,
-                x * CHANNEL_LENGTH,
-                normalizer=observation["data"].norm,
-                form="denormalized",
-            )
+                _, x_data, y_data = utils.get_observation_locs(
+                    observation["fields"],
+                    subfield,
+                    x * CHANNEL_LENGTH,
+                    normalizer=observation["data"].norm,
+                    form="denormalized",
+                )
 
-            x_data = x_data / CHANNEL_LENGTH
+                x_data = x_data / CHANNEL_LENGTH
 
-            if len(x_data) != len(y_ref_obs):
-                if y_data is None:
-                    y_data = np.interp(x_data, x, y_ref_obs)
-                else:
-                    y_data = y_data * scale_factor
+                # if len(x_data) != len(y_ref_obs):
+                #     if y_data is None:
+                #         y_data = np.interp(x_data, x, y_ref_obs)
+                #     else:
+                #         y_data = y_data * scale_factor
 
-                if obs_style == 'marker':
-                    ax.scatter(x_data, y_data, **obs_args)
-                else:
-                    ax.plot(x_data, y_data, **obs_args, linewidth=lw)
-            else:
-                ax.plot(x_data, y_ref_obs, linewidth=lw, **obs_args)
-            
-        # Add optional vertical line to plot
-        if vline_loc is not None:
-            ax.axvline(vline_loc / CHANNEL_LENGTH, color = 'black')
+                #     if obs_style == 'marker':
+                #         ax.scatter(x_data, y_data, **obs_args)
+                #     else:
+                #         ax.plot(x_data, y_data, **obs_args, linewidth=lw, linestyle = DATA_LINESTYLE)
+                # else:
+                #     ax.plot(x_data, y_ref_obs, linewidth=lw, **obs_args, linestyle=DATA_LINESTYLE)
+                
+                # Add optional vertical line to plot
+                if vline_loc is not None:
+                    #ax.axvline(vline_loc / CHANNEL_LENGTH, color = 'black')
+                    ax.axvspan(vline_loc / CHANNEL_LENGTH, 4, color = (0.9, 0.9, 0.9))
 
 
 def add_letter(ax, field, ind):
-    letter_pos = FIELD_INFO[field].get("letter_pos", "")
+    f = field.split(",")[0]
+    letter_pos = FIELD_INFO[f].get("letter_pos", "")
     ax.annotate(f"({LETTERS[ind]})", **letter_args(letter_pos, 0.05))
 
 def get_handles_labels(axes):
@@ -459,8 +494,9 @@ def plot_multifield_comparison(args, **kwargs):
     for i in range(num_cols):
         ymin = min(ax.get_ylim()[0] for ax in axs[:,i])
         ymax = max(ax.get_ylim()[1] for ax in axs[:,i])
+        ylim = FIELD_INFO[fields[i].split(",")[0]].get("ylim",(ymin, ymax))
         for (j, ax) in enumerate(axs[:, i]):
-            ax.set(ylim=(ymin, ymax))
+            ax.set(ylim=(ylim))
             add_letter(ax, fields[i], 2*i + j)
 
     ylabel_args = dict(fontweight="bold", fontsize=25)
@@ -472,12 +508,12 @@ def plot_multifield_comparison(args, **kwargs):
 
 def plot_sidebyside(args, **kwargs):
     col_width = 3
-    row_height = 3.5
+    row_height = 3
     num_fields = len(args.fields)
 
     num_rows = args.rows
     num_cols = math.ceil(num_fields / num_rows)
-    figsize = (col_width * num_cols, row_height * num_rows)
+    figsize = (col_width * num_cols, row_height * num_rows + 0.5)
     fig, axs = plt.subplots(
         num_rows, num_cols, figsize=figsize, layout="constrained", dpi=200
     )
@@ -497,11 +533,16 @@ def plot_sidebyside(args, **kwargs):
 
     # Add plot letters and collect handles
     for i, (field, ax) in enumerate(zip(args.fields, axes_linear)):
-        add_letter(ax, field, i)
+        f = field.split(",")[0]
+        add_letter(ax, f, i)
+        ylim = FIELD_INFO[f].get("ylim", ax.get_ylim())
+        ax.set(ylim=ylim)
         
     # Add legend
     handles, labels = get_handles_labels(axs)
-    axes_linear[0].legend(handles, labels, fontsize=12)
+
+    # TODO: make legend pos relocatable
+    axes_linear[3].legend(handles, labels, fontsize=12)
 
     # Remove xlabels and ticks on all but last row of plots
     for (i, row) in enumerate(axs):

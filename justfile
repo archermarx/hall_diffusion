@@ -54,12 +54,12 @@ plot_roberts target="roberts" +fields=DEFAULT_FIELDS:
     uv run python/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"roberts.png" \
-        -f ui_3 ne Tev E ue ni_1 nn inv_hall \
+        -f ui_1,ui_2,ui_3 ne Tev E ue ni_1,ni_2,ni_3 nn inv_hall \
         --type=sidebyside \
         --ref={{REF_SIM}} \
         --ref2=experimental_methods/roberts/roberts.csv \
         --ref2-label="Roberts" \
-        --observation=configs/sample_{{target}}.toml \
         --rows=2 \
         --obs-style='line' \
-        --vline-loc=0.020
+        --vline-loc=0.020 \
+        --observation=configs/sample_{{target}}.toml
