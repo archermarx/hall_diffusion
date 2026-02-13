@@ -211,7 +211,6 @@ function get_data_normalization(sims; target_std = 1.0)
 end
 
 function read_normalization_file(file)
-    @show file
     contents = readdlm(file, ',')[2:end, :]
 
     return (;
@@ -232,10 +231,11 @@ Given a list of files, normalizes them and saves them disk in numpy npz format.
 - out_dir: Directory into which files will be output. The simulations will be written to `out_dir/data`, while `out_dir` will contain a metadata file.
 - target_std: Standard deviation that each QoI should have after normalization
 - subset_size: Size of the random subset of the data that is used to compute the normalization factors.
+- norm_file_dir: directory including "norm_data.csv" and "norm_params.csv" from other normalization runs to reuse normalizations.
 """
-function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset_size = 100_000, norm_file_data = nothing, norm_file_params = nothing)
+function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset_size = 100_000, norm_file_dir = nothing)
 
-    if (norm_file_data === nothing || norm_file_params === nothing)
+    if norm_file_dir === nothing
         # Calculate normalization details from scratch
 
         # Get normalization factors from a subset of the total dataset, to avoid needing to pass over the entire dataset twice.
@@ -251,8 +251,8 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
     else
         # Load normalization info from file
         println("Reading normalization data from files")
-        param_norm = read_normalization_file(norm_file_params)
-        tensor_norm = read_normalization_file(norm_file_data)
+        param_norm = read_normalization_file(joinpath(norm_file_dir, "norm_params.csv"))
+        tensor_norm = read_normalization_file(joinpath(norm_file_dir, "norm_data.csv"))
     end
 
     println("Writing normalization files")
@@ -330,7 +330,7 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
     return nothing
 end
 
-function normalize_data(dir::String, out_dir; target_std = 1.0, subset_size = 100_000, norm_file_data = nothing, norm_file_params = nothing)
+function normalize_data(dir::String, out_dir; target_std = 1.0, subset_size = 100_000, norm_file_dir=nothing)
     files = readdir(dir, join = true)
-    return normalize_data(files, out_dir; target_std, subset_size, norm_file_data, norm_file_params)
+    return normalize_data(files, out_dir; target_std, subset_size, norm_file_dir)
 end

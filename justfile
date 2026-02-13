@@ -3,6 +3,7 @@ MODEL := "saved_models/edm2_small_old/checkpoint.pth.tar"
 NUM_MCMC := "1024"
 DEFAULT_FIELDS := "ui_1 ne Tev nu_an"
 REF_SIM := "mcmc_reference/ref_3charge/normalized"
+MCMC_DIR := "mcmc_reference/mcmc_3charge/normalized"
 
 # Sample from a provided sampling config
 sample target:
@@ -28,7 +29,7 @@ plot_forward target +fields=DEFAULT_FIELDS:
 plot_mcmc target +fields=DEFAULT_FIELDS:
     uv run python/plot.py \
         --samples=samples/{{target}} \
-        --mcmc=mcmc_reference/results_noTe/normalized \
+        --mcmc={{MCMC_DIR}} \
         --ref={{REF_SIM}} \
         --mode="quantiles" \
         -o samples/{{target}}/"mcmc.png" \
@@ -50,7 +51,7 @@ plot_perez_luna target="perez_luna" +fields="ui_1 E nu_iz nu_an":
         --rows=1 \
 
 # Plot comparisons to Roberts and Jorns' method
-plot_roberts target="roberts" +fields=DEFAULT_FIELDS:
+plot_roberts target="roberts":
     uv run python/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"roberts.png" \

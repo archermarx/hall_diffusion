@@ -334,9 +334,9 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
     refs = []
     lw = 2.0 #DATA_LINE_ARGS["linewidth"]
     if ref is not None:
-        refs.append(dict(file=ref, style=dict(label="Reference", linestyle=(0, (2, 3)), linewidth=lw, zorder=1000)))
+        refs.append(dict(file=ref, style=dict(label="Reference", linestyle=(0, (2, 3)), linewidth=lw, zorder=1001)))
     if ref2 is not None:
-        refs.append(dict(file=ref2, style=dict(label=ref2_label, linewidth=lw, zorder=1002, linestyle="solid")))
+        refs.append(dict(file=ref2, style=dict(label=ref2_label, linewidth=lw, zorder=1002, linestyle="--")))
 
     for ref in refs:
         if os.path.isdir(ref["file"]):
@@ -359,15 +359,12 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
 
             # Plot reference simulations
             for (i, ref) in enumerate(refs):
-                
-                if observation is not None and subfield in observation["fields"]:
-                    print(f"{subfield=}")
-                    if obs_style=='marker':
-                        continue
 
                 if i == 0 and len(field_data.keys()) == 1:
                     ref["style"]["color"] = "black"
                 elif i == 1 :
+                    ref["style"]["color"] = "red"
+                else:
                     ref["style"]["color"] = "black"
 
                 ref_dataset = ref["dataset"]
@@ -378,13 +375,11 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
                     ref_field = get_field(subfield, field_names, ref_data)
                     y_ref = ref_field[subfield][0, :] * scale_factor
                     x_ref = ref_dataset.grid / CHANNEL_LENGTH
-                    #ax.plot(ref_dataset.grid / CHANNEL_LENGTH, y_ref, **ref["style"])
 
                 elif ref_data is not None and subfield in ref_data.columns:
                     # Ref data is in a pandas dataframe
                     y_ref = ref_data[subfield].to_numpy() * scale_factor
                     x_ref = ref_data["z"].to_numpy() / CHANNEL_LENGTH
-                    #ax.plot(x_ref, y_ref, **ref["style"])
                 else:
                     raise ValueError("Invalid reference data format")
 
@@ -477,7 +472,7 @@ def plot_multifield_comparison(args, **kwargs):
 
     # Plot fields
     plot_multifield(axs[0, :], x, samples_mcmc, fields=fields, field_names=field_names, **kwargs, **multifield_args)
-    plot_multifield(axs[1, :], x, samples_generated, fields=fields, field_name=field_names, **kwargs, **multifield_args)
+    plot_multifield(axs[1, :], x, samples_generated, fields=fields, field_names=field_names, **kwargs, **multifield_args)
 
     # Remove redundant titles and xlabels
     for (i, row) in enumerate(axs):

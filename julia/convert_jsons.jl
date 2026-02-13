@@ -6,7 +6,7 @@ using ArgParse
 function parse_cli_args(args)
     parser = ArgParseSettings()
     @add_arg_table! parser begin
-        "json_dir"
+        "json-dir"
             help = "directory containing jsons"
             required = true
         "--out-dir", "-o"
@@ -22,23 +22,13 @@ function parse_cli_args(args)
     return parse_args(args, parser)
 end
 
-function convert_jsons(json_dir, out_dir, norm_dir, norm_param_dir = nothing)
+function convert_jsons(json_dir, out_dir, norm_dir, norm_file_dir=nothing)
     process_jsons(json_dir, out_dir)
-
-    norm_file_data, norm_file_params = if norm_param_dir === nothing
-        nothing, nothing
-    else
-        norm_data = joinpath(norm_param_dir, "norm_data.csv")
-        norm_params = joinpath(norm_param_dir, "norm_params.csv")
-        norm_data, norm_params
-    end
-
-    normalize_data(out_dir, norm_dir; norm_file_data, norm_file_params)
+    normalize_data(out_dir, norm_dir; norm_file_dir)
 end
 
 function (@main)(args)
     parsed_args = parse_cli_args(args)
-    for (arg, val) in parsed_args
-        println("$arg => $val")
-    end
+    print(keys(parsed_args))
+    convert_jsons(parsed_args["json-dir"], parsed_args["out-dir"], parsed_args["norm-dir"], parsed_args["norm-param-dir"])
 end
