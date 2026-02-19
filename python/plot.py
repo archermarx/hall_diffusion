@@ -34,19 +34,26 @@ parser.add_argument("--vline-loc", type=float)
 parser.add_argument("--ref2", type=Path)
 parser.add_argument("--ref2-label", type=str)
 
-matplotlib.rcParams["text.usetex"] = True
-matplotlib.rcParams["font.size"] = 15
-matplotlib.rcParams["font.family"] = "serif"
-matplotlib.rcParams["font.serif"] = "Computer Modern"
+usetex = False
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": "cambria",
+    "font.size": 18,
+    "mathtext.fontset": "dejavuserif",
+    "text.usetex": usetex,
+    "axes.formatter.use_mathtext": False,
+    "axes.titlesize": "medium",
+})
 
 # === Plotting style args ===
 # linestyle: (offset, (on, off, ...))
-DATA_LINESTYLE = (0, (3.0, 4.0))
+DATA_LINESTYLE = (0, (4.0, 3.0))
 DATA_LINE_ARGS = dict(linewidth=2.5, linestyle=DATA_LINESTYLE)
 OBS_COLOR = "orange"
 XLABEL = "z (channel lengths)"
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
 COLORS = ["tab:blue", "tab:orange", "tab:green"]
+LEGEND_ARGS = dict(fancybox=False, framealpha=1.0, labelspacing=0.4, borderaxespad=0, borderpad=0.25, handlelength=1.5, edgecolor='black')
 
 # Build quantiles/credible intervals we want to plot
 CREDIBLE_INTERVALS = [0.5, 0.95]
@@ -178,6 +185,16 @@ FIELD_INFO = {
     )
 }
 
+FILETYPES = [".png", ".pdf"]
+
+def savefig(fig, output_file: Path, dpi=200, filetypes: list[str] | None=None):
+    if filetypes is None:
+        filetypes = FILETYPES
+
+    base, _ = os.path.splitext(output_file)
+    for filetype in filetypes:
+        fig.savefig(base+filetype, dpi=dpi)
+
 def letter_args(pos, pad):
     # default: top left
     x = pad
@@ -238,7 +255,7 @@ def plot_quantiles(ax, x, qs, color=None, zorder=0):
             color=alpha_blend(color, QUANTILE_ALPHAS[i], "white"),
             linewidth=0,
             zorder=zorder + len(CREDIBLE_INTERVALS) - i - 1,
-            label=f"{round(ci * 100):d}\\% CI",
+            label=f"{round(ci * 100):d}{"\\" if usetex else ""}%CI",
         )
 
 
@@ -283,6 +300,7 @@ def plot_field(
         title=ylabel if show_title else None,
         yscale="log" if ylog else "linear",
         xlim=(0, x[-1]),
+        xticks=range(math.floor(x[-1]) + 1)
     )
 
     if mode == "quantiles":
@@ -334,7 +352,7 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
     refs = []
     lw = 2.0 #DATA_LINE_ARGS["linewidth"]
     if ref is not None:
-        refs.append(dict(file=ref, style=dict(label="Reference", linestyle=(0, (2, 3)), linewidth=lw, zorder=1001)))
+        refs.append(dict(file=ref, style=dict(label="Reference", linestyle=DATA_LINESTYLE, linewidth=lw)))
     if ref2 is not None:
         refs.append(dict(file=ref2, style=dict(label=ref2_label, linewidth=lw, zorder=1002, linestyle="--")))
 
@@ -381,7 +399,7 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
                     y_ref = ref_data[subfield].to_numpy() * scale_factor
                     x_ref = ref_data["z"].to_numpy() / CHANNEL_LENGTH
                 else:
-                    raise ValueError("Invalid reference data format")
+                    continue
 
                 ax.plot(x_ref, y_ref, **ref["style"])
 
@@ -402,18 +420,18 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
 
                 x_data = x_data / CHANNEL_LENGTH
 
-                # if len(x_data) != len(y_ref_obs):
-                #     if y_data is None:
-                #         y_data = np.interp(x_data, x, y_ref_obs)
-                #     else:
-                #         y_data = y_data * scale_factor
+                if len(x_data) != len(y_ref_obs):
+                    if y_data is None:
+                        y_data = np.interp(x_data, x, y_ref_obs)
+                    else:
+                        y_data = y_data * scale_factor
 
-                #     if obs_style == 'marker':
-                #         ax.scatter(x_data, y_data, **obs_args)
-                #     else:
-                #         ax.plot(x_data, y_data, **obs_args, linewidth=lw, linestyle = DATA_LINESTYLE)
-                # else:
-                #     ax.plot(x_data, y_ref_obs, linewidth=lw, **obs_args, linestyle=DATA_LINESTYLE)
+                    if obs_style == 'marker':
+                        ax.scatter(x_data, y_data, **obs_args)
+                    else:
+                        ax.plot(x_data, y_data, **obs_args, linewidth=lw, linestyle = DATA_LINESTYLE)
+                else:
+                    ax.plot(x_data, y_ref_obs, linewidth=lw, **obs_args, linestyle=DATA_LINESTYLE)
                 
                 # Add optional vertical line to plot
                 if vline_loc is not None:
@@ -483,7 +501,7 @@ def plot_multifield_comparison(args, **kwargs):
 
     # Add legend
     handles, labels = get_handles_labels(axs)
-    axs[-1,0].legend(handles, labels, fontsize=12)
+    axs[-1,0].legend(handles, labels, fontsize=12, **LEGEND_ARGS)
 
     # Shared y-limits per field and plot numbering
     for i in range(num_cols):
@@ -492,17 +510,17 @@ def plot_multifield_comparison(args, **kwargs):
         ylim = FIELD_INFO[fields[i].split(",")[0]].get("ylim",(ymin, ymax))
         for (j, ax) in enumerate(axs[:, i]):
             ax.set(ylim=(ylim))
-            add_letter(ax, fields[i], 2*i + j)
+            add_letter(ax, fields[i], i + num_cols * j)
 
-    ylabel_args = dict(fontweight="bold", fontsize=25)
+    ylabel_args = dict(fontsize=25)
     axs[0, 0].set_ylabel("MCMC", **ylabel_args)
     axs[1, 0].set_ylabel("Diffusion", **ylabel_args)
 
-    fig.savefig(args.output)
+    savefig(fig, args.output)
 
 
 def plot_sidebyside(args, **kwargs):
-    col_width = 3
+    col_width = 3.6
     row_height = 3
     num_fields = len(args.fields)
 
@@ -514,7 +532,7 @@ def plot_sidebyside(args, **kwargs):
     )
     axes_linear = axs.ravel()
 
-    multifield_args = dict(show_ylabel=False, show_title=True)
+    multifield_args = dict(show_ylabel=True, show_title=False)
 
     dataset, samples = load_samples(args.samples)
     x = dataset.grid / CHANNEL_LENGTH
@@ -537,15 +555,14 @@ def plot_sidebyside(args, **kwargs):
     handles, labels = get_handles_labels(axs)
 
     # TODO: make legend pos relocatable
-    axes_linear[3].legend(handles, labels, fontsize=12)
+    axes_linear[0].legend(handles, labels, fontsize=12, **LEGEND_ARGS)
 
     # Remove xlabels and ticks on all but last row of plots
     for (i, row) in enumerate(axs):
         if i < num_rows - 1:
             [ax.set(xlabel="", xticklabels=[]) for ax in row]
 
-    fig.savefig(args.output)
-
+    savefig(fig, args.output)
 
 if __name__ == "__main__":
     args = parser.parse_args()

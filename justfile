@@ -1,7 +1,7 @@
 
 MODEL := "saved_models/edm2_small_old/checkpoint.pth.tar"
 NUM_MCMC := "1024"
-DEFAULT_FIELDS := "ui_1 ne Tev nu_an"
+DEFAULT_FIELDS := "ui_1 ne Tev inv_hall"
 REF_SIM := "mcmc_reference/ref_3charge/normalized"
 MCMC_DIR := "mcmc_reference/mcmc_3charge/normalized"
 
