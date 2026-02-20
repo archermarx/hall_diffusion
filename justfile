@@ -1,6 +1,6 @@
 
 MODEL := "saved_models/edm2_small_old/checkpoint.pth.tar"
-NUM_MCMC := "1024"
+NUM_MCMC := "50_000"
 DEFAULT_FIELDS := "ui_1 ne Tev inv_hall"
 REF_SIM := "mcmc_reference/ref_3charge/normalized"
 MCMC_DIR := "mcmc_reference/mcmc_3charge/normalized"
@@ -40,7 +40,7 @@ plot_mcmc target +fields=DEFAULT_FIELDS:
         --type=comparison
 
 # Plot comparisons to Perez-Luna
-plot_perez_luna target="perez_luna" +fields="ui_1 E nu_iz nu_an":
+plot_perez_luna target="perez_luna" +fields="ui_1 E nu_iz inv_hall":
         uv run python/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"perez-luna.png" \

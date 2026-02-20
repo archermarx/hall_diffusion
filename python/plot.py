@@ -188,7 +188,7 @@ FIELD_INFO = {
     )
 }
 
-FILETYPES = [".png", ".pdf"]
+FILETYPES = [".png", ".pdf", ".svg"]
 
 def savefig(fig, output_file: Path, dpi=200, filetypes: list[str] | None=None):
     if filetypes is None:
@@ -198,9 +198,10 @@ def savefig(fig, output_file: Path, dpi=200, filetypes: list[str] | None=None):
     for filetype in filetypes:
         fig.savefig(base+filetype, dpi=dpi)
 
-def load_samples(sample_dir, num_samples=None):
+def load_samples(sample_dir, num_samples=None, burn_frac=0.0):
     dataset = ThrusterDataset(sample_dir)
-    indices = np.arange(len(dataset))
+    start_ind = round(burn_frac * len(dataset))
+    indices = np.arange(start_ind, len(dataset))
     if num_samples is not None:
         indices = np.random.choice(indices, size=num_samples)
 
@@ -482,7 +483,7 @@ def get_handles_labels(axes):
 
 def plot_multifield_comparison(args, **kwargs):
     dataset_gen, samples_generated = load_samples(args.samples)
-    _, samples_mcmc = load_samples(args.mcmc, num_samples=args.num_mcmc)
+    _, samples_mcmc = load_samples(args.mcmc, num_samples=args.num_mcmc, burn_frac=0.5)
 
     x = dataset_gen.grid / CHANNEL_LENGTH
     field_names = list(dataset_gen.fields())
@@ -589,25 +590,30 @@ def plot_anom(args):
     grid, basis_functions = run_mcmc.setup_grid(domain, N, L_ch)
     grid_norm = grid / L_ch
 
-    axs[0].set(yscale="log", xticks=range(math.ceil(grid_norm[-1])), xlabel="z (channel lengths)", ylabel = "Inverse Hall parameter")
+    eig_ind = 0
+    anom_ind = 1
+    ax_eig = axs[0]
+    ax_anom = axs[1]
+
+    ax_anom.set(yscale="log", xticks=range(math.ceil(grid_norm[-1])), xlabel="z (channel lengths)", ylabel = "Inverse Hall parameter")
 
     num_samples = 3
     for i in range(num_samples):
         params = run_mcmc.sample_parameters()
         f_base, f_withnoise = run_mcmc.anom_model_with_noise(grid, params, basis_functions, L_ch)
-        axs[0].plot(grid_norm, f_base, color=COLORS[i])
-        axs[0].plot(grid_norm, f_withnoise, color=COLORS[i], linestyle="-.")
+        ax_anom.plot(grid_norm, f_base, color=COLORS[i])
+        ax_anom.plot(grid_norm, f_withnoise, color=COLORS[i], linestyle="-.")
 
-    add_letter(axs[0], 0, "bottom right")
-    add_letter(axs[1], 1, "bottom right")
+    add_letter(ax_anom, anom_ind, "bottom right")
+    add_letter(ax_eig, eig_ind, "bottom right")
 
-    axs[1].set(ylim=(-1,1), xlabel="z (channel lengths)", ylabel="$\\phi(z)$")
+    ax_eig.set(ylim=(-1,1), xlabel="z (channel lengths)", ylabel="$\\phi(z)$")
     for (i, b) in enumerate(basis_functions.T):
-        axs[1].plot(grid_norm, b, label = f"$\\phi_{i}$")
+        ax_eig.plot(grid_norm, b, label = f"$\\phi_{i}$")
 
     legend_args = LEGEND_ARGS.copy()
     legend_args.update(loc="upper center", ncols=len(basis_functions.T), fontsize=12, columnspacing=0.5, handlelength=0.7)
-    axs[1].legend(**legend_args)
+    ax_eig.legend(**legend_args)
 
     savefig(fig, args.output)
 
