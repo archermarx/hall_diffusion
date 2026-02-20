@@ -9,8 +9,8 @@ from pathlib import Path
 
 #%%
 # Directories
-HOME = Path(".")
 SCRIPT_DIR = Path(os.path.split(__file__)[0])
+HOME = SCRIPT_DIR / ".." / ".."
 REF_DIR = HOME / "mcmc_reference" / "ref_3charge"
 
 # %%
@@ -59,29 +59,54 @@ def moment(vdf, order):
     integrand = (vdf.v**order) * vdf.g
     return scipy.integrate.trapezoid(integrand, vdf.v)
 
-z = np.array([v.z / 1000 for v in vdfs])
+def resample(vdf):
+    N = len(vdf.v)
+    inds = np.unique(np.sort(np.random.choice(np.arange(N), size=N)))
+    return VDF(vdf.v[inds], vdf.g[inds], vdf.z)
 
-u1 = np.array([moment(vdf, 1) for vdf in vdfs])
-u2 = np.array([moment(vdf, 2) for vdf in vdfs])
-u3 = np.array([moment(vdf, 3) for vdf in vdfs])
-w1 = u1
-w2 = u2/u1
-w3 = u3/u2
+def calc_perez_luna(vdfs, bootstrap=False):
 
-q = 1.6e-19
-M = 131.293 / 6.022e26
+    if bootstrap:
+        vdfs = [resample(vdf) for vdf in vdfs]
 
-w2_spline = scipy.interpolate.splrep(z, w2)
-w3_spline = scipy.interpolate.splrep(z, w3)
-w2_spline_eval = scipy.interpolate.splev(z, w2_spline, der=0)
-dw2_dz = scipy.interpolate.splev(z, w2_spline, der=1)
-dw3_dz = scipy.interpolate.splev(z, w3_spline, der=1)
+    z = np.array([v.z / 1000 for v in vdfs])
+    u1 = np.array([moment(vdf, 1) for vdf in vdfs])
+    u2 = np.array([moment(vdf, 2) for vdf in vdfs])
+    u3 = np.array([moment(vdf, 3) for vdf in vdfs])
+    w1 = u1
+    w2 = u2/u1
+    w3 = u3/u2
 
-a_z = (w1 * w2) / (2 * w1 - w3) * dw3_dz
-E_z = M / q * a_z
-nu_iz = np.abs(a_z / w2 - (w1 / w2) * dw2_dz)
+    q = 1.6e-19
+    M = 131.293 / 6.022e26
 
-u_mp = np.array([v.v[np.argmax(v.g)] for v in vdfs])
+    u_mp = np.array([v.v[np.argmax(v.g)] for v in vdfs])
+    u_mp_spline = scipy.interpolate.splrep(z, u_mp)
+
+
+    u_spline = scipy.interpolate.splrep(z, u1)
+    w2_spline = scipy.interpolate.splrep(z, w2)
+    w3_spline = scipy.interpolate.splrep(z, w3)
+    du_dz = scipy.interpolate.splev(z, u_mp_spline, der=1)
+    dw2_dz = scipy.interpolate.splev(z, w2_spline, der=1)
+    dw3_dz = scipy.interpolate.splev(z, w3_spline, der=1)
+
+    a_z = (w1 * w2) / (2 * w1 - w3) * dw3_dz
+    E_z = M / q * a_z
+    Ez_simple = M / q * u1 * du_dz
+    nu_iz = np.abs(a_z / w2 - (w1 / w2) * dw2_dz)
+    
+    return z, u_mp, E_z, Ez_simple, nu_iz
+
+z, u_mp, Ez, Ez_simple, nu_iz = calc_perez_luna(vdfs)
+
+bootstrap_results = [calc_perez_luna(vdfs, bootstrap=True) for _ in range(200)]
+Ez_bootstrap = np.array([res[2] for res in bootstrap_results]).T
+iz_bootstrap = np.array([res[4] for res in bootstrap_results]).T
+
+quantiles = [0.025, 0.5, 0.975]
+E_lo, E_mid, E_hi = np.quantile(Ez_bootstrap, quantiles, axis=1)
+iz_lo, iz_mid, iz_hi = np.quantile(iz_bootstrap, quantiles, axis=1)
 
 # %%
 # Plot perez luna predictions
@@ -92,21 +117,28 @@ fig, axs = plt.subplots(1,3, layout='constrained', figsize=(3 * col_width, row_h
 xargs = dict(xlim=(0, 0.08/0.025), xlabel="z (channel lengths)")
 axs[0].set(ylabel = "Ion velocity [km/s]", **xargs)
 axs[1].set(ylabel = "Electric field [kV/m]", **xargs)
-axs[2].set(ylabel = "Ionization freq. [Hz]", **xargs)
+axs[2].set(ylabel = "Ionization freq. [Hz]", yscale = 'log', **xargs)
 
 z_lch = z / 0.025 + 1
 axs[0].plot(z_lch, u_mp)
-axs[1].plot(z_lch, E_z/1000)
-axs[2].plot(z_lch, nu_iz)
+axs[1].plot(z_lch, E_mid/1000, label = "Perez-luna")
+axs[1].fill_between(z_lch, E_lo/1000, E_hi/1000, color = "tab:blue", alpha=0.5)
+axs[1].plot(z_lch, Ez_simple / 1000, label = "Simple")
+
+axs[2].plot(z_lch, iz_mid)
+axs[2].fill_between(z_lch, iz_lo, iz_hi, color = "tab:blue", alpha=0.5)
 
 fig.savefig(SCRIPT_DIR / "perez_luna.png", dpi=200)
 
 # %%
-# Write observation file
+# Write observation file (1)
 z_abs = z + 0.025
-out_dict = {"z": z_abs, "ui_1": u_mp, "E": E_z, "nu_iz": nu_iz}
-df = pd.DataFrame(out_dict)
+df = pd.DataFrame({"z": z_abs, "E": E_mid, "E_lo": E_lo, "E_hi": E_hi, "nu_iz": iz_mid, "nu_iz_lo": iz_lo, "nu_iz_hi": iz_hi})
 df.to_csv(SCRIPT_DIR / "perez_luna.csv", index=False)
+
+# Write observation file (2)
+df_simple = pd.DataFrame({"z": z_abs, "E": Ez_simple})
+df_simple.to_csv(SCRIPT_DIR / "E_simple.csv", index=False)
 
 # %%
 # Write TOML output

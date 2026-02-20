@@ -8,20 +8,23 @@ import tomllib
 import math
 import pandas as pd
 import os
+import run_mcmc
 
 from utils import utils
 from utils.thruster_data import ThrusterDataset
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--anom", action="store_true", help="Generate plots of anomalous transport profiles + eigenfuncions")
 parser.add_argument("--samples", type=Path)
 parser.add_argument("--mcmc", type=Path)
 parser.add_argument("--ref", type=Path)
+parser.add_argument("--ref-label", type=str, default="Reference")
 parser.add_argument("--num-mcmc", type=int, default=2**14)
 parser.add_argument("-o", "--output", type=str, default="_plt.png")
 parser.add_argument(
     "-m", "--mode", choices=["traces", "quantiles", "curves"], default="quantiles"
 )
-parser.add_argument("-f", "--fields", nargs="+", required=True)
+parser.add_argument("-f", "--fields", nargs="+", required=False)
 parser.add_argument("--observation", type=Path)
 parser.add_argument(
     "--type", choices=["sidebyside", "comparison"], default="comparison"
@@ -195,30 +198,6 @@ def savefig(fig, output_file: Path, dpi=200, filetypes: list[str] | None=None):
     for filetype in filetypes:
         fig.savefig(base+filetype, dpi=dpi)
 
-def letter_args(pos, pad):
-    # default: top left
-    x = pad
-    y = 1 - pad
-    ha = "left"
-    va = "top"
-
-    if "top" in pos:
-        y = 1 - pad
-        va = "top"
-    elif "bottom" in pos:
-        y = pad
-        va = "bottom"
-
-    if "left" in pos:
-        x = pad
-        ha = "left"
-    elif "right" in pos:
-        x = 1 - pad
-        ha = "right"
-
-    return dict(xy=(x, y), ha=ha, va=va, xycoords="axes fraction", fontsize=25)
-
-
 def load_samples(sample_dir, num_samples=None):
     dataset = ThrusterDataset(sample_dir)
     indices = np.arange(len(dataset))
@@ -255,7 +234,7 @@ def plot_quantiles(ax, x, qs, color=None, zorder=0):
             color=alpha_blend(color, QUANTILE_ALPHAS[i], "white"),
             linewidth=0,
             zorder=zorder + len(CREDIBLE_INTERVALS) - i - 1,
-            label=f"{round(ci * 100):d}{"\\" if usetex else ""}%CI",
+            label=f"{round(ci * 100):d}{"\\" if usetex else ""}% CI",
         )
 
 
@@ -342,7 +321,7 @@ def get_field(field, field_names, data):
         return {field: f}
 
 
-def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=None, ref2=None, ref2_label=None, observation=None, obs_style='marker', **FIELD_PLOT_ARGS):
+def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=None, ref_label=None, ref2=None, ref2_label=None, observation=None, obs_style='marker', **FIELD_PLOT_ARGS):
     assert len(axes) == len(fields)
     obs_args = dict(color=OBS_COLOR, label="Observation", zorder=9)
 
@@ -352,9 +331,9 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
     refs = []
     lw = 2.0 #DATA_LINE_ARGS["linewidth"]
     if ref is not None:
-        refs.append(dict(file=ref, style=dict(label="Reference", linestyle=DATA_LINESTYLE, linewidth=lw)))
+        refs.append(dict(file=ref, style=dict(label=ref_label, linestyle=DATA_LINESTYLE, linewidth=lw)))
     if ref2 is not None:
-        refs.append(dict(file=ref2, style=dict(label=ref2_label, linewidth=lw, zorder=1002, linestyle="--")))
+        refs.append(dict(file=ref2, style=dict(label=ref2_label, linewidth=lw, zorder=1002, linestyle="-.")))
 
     for ref in refs:
         if os.path.isdir(ref["file"]):
@@ -393,15 +372,24 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
                     ref_field = get_field(subfield, field_names, ref_data)
                     y_ref = ref_field[subfield][0, :] * scale_factor
                     x_ref = ref_dataset.grid / CHANNEL_LENGTH
-
+                    ax.plot(x_ref, y_ref, **ref["style"])
+                elif ref_data is not None and subfield in ref_data.columns and (subfield + "_lo") in ref_data.columns and (subfield + "_hi") in ref_data.columns:
+                    # Ref data is in a pandas dataframe
+                    y_ref = ref_data[subfield].to_numpy() * scale_factor
+                    y_lo = ref_data[subfield + "_lo"].to_numpy() * scale_factor
+                    y_hi = ref_data[subfield + "_hi"].to_numpy() * scale_factor
+                    x_ref = ref_data["z"].to_numpy() / CHANNEL_LENGTH
+                    if "linestyle" in ref["style"]:
+                        ref["style"].pop("linestyle")
+                    ax.plot(x_ref, y_ref, "-o", **ref["style"])
+                    ax.fill_between(x_ref, y_lo, y_hi, color = 'gray', alpha=0.4, zorder=0, linewidth=0)
                 elif ref_data is not None and subfield in ref_data.columns:
                     # Ref data is in a pandas dataframe
                     y_ref = ref_data[subfield].to_numpy() * scale_factor
                     x_ref = ref_data["z"].to_numpy() / CHANNEL_LENGTH
+                    ax.plot(x_ref, y_ref, **ref["style"])
                 else:
                     continue
-
-                ax.plot(x_ref, y_ref, **ref["style"])
 
             # Plot observations
             # TODO: treat observations as another ref simulaiton
@@ -420,29 +408,53 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
 
                 x_data = x_data / CHANNEL_LENGTH
 
-                if len(x_data) != len(y_ref_obs):
-                    if y_data is None:
-                        y_data = np.interp(x_data, x, y_ref_obs)
-                    else:
-                        y_data = y_data * scale_factor
+                # Indicate observations either with shaded gray region or with orange dashed line
+                if vline_loc is None:
+                    if len(x_data) != len(y_ref_obs):
+                        if y_data is None:
+                            y_data = np.interp(x_data, x, y_ref_obs)
+                        else:
+                            y_data = y_data * scale_factor
 
-                    if obs_style == 'marker':
-                        ax.scatter(x_data, y_data, **obs_args)
+                        if obs_style == 'marker':
+                            ax.scatter(x_data, y_data, **obs_args)
+                        else:
+                            ax.plot(x_data, y_data, **obs_args, linewidth=lw, linestyle = DATA_LINESTYLE)
                     else:
-                        ax.plot(x_data, y_data, **obs_args, linewidth=lw, linestyle = DATA_LINESTYLE)
+                        ax.plot(x_data, y_ref_obs, linewidth=lw, **obs_args, linestyle=DATA_LINESTYLE)
+            
                 else:
-                    ax.plot(x_data, y_ref_obs, linewidth=lw, **obs_args, linestyle=DATA_LINESTYLE)
-                
-                # Add optional vertical line to plot
-                if vline_loc is not None:
-                    #ax.axvline(vline_loc / CHANNEL_LENGTH, color = 'black')
-                    ax.axvspan(vline_loc / CHANNEL_LENGTH, 4, color = (0.9, 0.9, 0.9))
+                    ax.axvspan(vline_loc / CHANNEL_LENGTH, 4, color = (0.9, 0.9, 0.9), label = "Observation")
 
 
-def add_letter(ax, field, ind):
+def add_letter_field(ax, field, ind):
     f = field.split(",")[0]
     letter_pos = FIELD_INFO[f].get("letter_pos", "")
-    ax.annotate(f"({LETTERS[ind]})", **letter_args(letter_pos, 0.05))
+    add_letter(ax, ind, pos=letter_pos)
+
+def add_letter(ax, ind, pos="top left", pad=0.05):
+    x = pad
+    y = 1 - pad
+    ha = "left"
+    va = "top"
+
+    if "top" in pos:
+        y = 1 - pad
+        va = "top"
+    elif "bottom" in pos:
+        y = pad
+        va = "bottom"
+
+    if "left" in pos:
+        x = pad
+        ha = "left"
+    elif "right" in pos:
+        x = 1 - pad
+        ha = "right"
+
+    LETTERS = "abcdefghijklmnopqrstuvwxyz"
+    args = dict(xy=(x, y), ha=ha, va=va, xycoords="axes fraction", fontsize=25)
+    ax.annotate(f"({LETTERS[ind]})", **args)
 
 def get_handles_labels(axes):
     # Find all handles and labels
@@ -510,7 +522,7 @@ def plot_multifield_comparison(args, **kwargs):
         ylim = FIELD_INFO[fields[i].split(",")[0]].get("ylim",(ymin, ymax))
         for (j, ax) in enumerate(axs[:, i]):
             ax.set(ylim=(ylim))
-            add_letter(ax, fields[i], i + num_cols * j)
+            add_letter_field(ax, fields[i], i + num_cols * j)
 
     ylabel_args = dict(fontsize=25)
     axs[0, 0].set_ylabel("MCMC", **ylabel_args)
@@ -547,7 +559,7 @@ def plot_sidebyside(args, **kwargs):
     # Add plot letters and collect handles
     for i, (field, ax) in enumerate(zip(args.fields, axes_linear)):
         f = field.split(",")[0]
-        add_letter(ax, f, i)
+        add_letter_field(ax, f, i)
         ylim = FIELD_INFO[f].get("ylim", ax.get_ylim())
         ax.set(ylim=ylim)
         
@@ -555,7 +567,7 @@ def plot_sidebyside(args, **kwargs):
     handles, labels = get_handles_labels(axs)
 
     # TODO: make legend pos relocatable
-    axes_linear[0].legend(handles, labels, fontsize=12, **LEGEND_ARGS)
+    axes_linear[0].legend(handles, labels, fontsize=13, **LEGEND_ARGS)
 
     # Remove xlabels and ticks on all but last row of plots
     for (i, row) in enumerate(axs):
@@ -564,8 +576,47 @@ def plot_sidebyside(args, **kwargs):
 
     savefig(fig, args.output)
 
+def plot_anom(args):
+    col_width = 3.6
+    row_height = 3.5
+
+    figsize = (col_width * 2, row_height)
+    fig, axs = plt.subplots(1, 2, figsize=figsize, layout="constrained", dpi=200)
+
+    L_ch = CHANNEL_LENGTH
+    domain = (0.0, 0.08)
+    N = 128
+    grid, basis_functions = run_mcmc.setup_grid(domain, N, L_ch)
+    grid_norm = grid / L_ch
+
+    axs[0].set(yscale="log", xticks=range(math.ceil(grid_norm[-1])), xlabel="z (channel lengths)", ylabel = "Inverse Hall parameter")
+
+    num_samples = 3
+    for i in range(num_samples):
+        params = run_mcmc.sample_parameters()
+        f_base, f_withnoise = run_mcmc.anom_model_with_noise(grid, params, basis_functions, L_ch)
+        axs[0].plot(grid_norm, f_base, color=COLORS[i])
+        axs[0].plot(grid_norm, f_withnoise, color=COLORS[i], linestyle="-.")
+
+    add_letter(axs[0], 0, "bottom right")
+    add_letter(axs[1], 1, "bottom right")
+
+    axs[1].set(ylim=(-1,1), xlabel="z (channel lengths)", ylabel="$\\phi(z)$")
+    for (i, b) in enumerate(basis_functions.T):
+        axs[1].plot(grid_norm, b, label = f"$\\phi_{i}$")
+
+    legend_args = LEGEND_ARGS.copy()
+    legend_args.update(loc="upper center", ncols=len(basis_functions.T), fontsize=12, columnspacing=0.5, handlelength=0.7)
+    axs[1].legend(**legend_args)
+
+    savefig(fig, args.output)
+
 if __name__ == "__main__":
     args = parser.parse_args()
+
+    if args.anom:
+        plot_anom(args)
+        quit()
 
     if args.observation is None:
         observation = None
@@ -581,6 +632,7 @@ if __name__ == "__main__":
         observation=observation,
         mode=args.mode,
         ref=args.ref,
+        ref_label = args.ref_label,
         obs_style=args.obs_style,
         vline_loc=args.vline_loc,
         ref2 = args.ref2,

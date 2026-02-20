@@ -48,6 +48,9 @@ plot_perez_luna target="perez_luna" +fields="ui_1 E nu_iz nu_an":
         --observation=configs/sample_{{target}}.toml \
         --type=sidebyside \
         --ref=experimental_methods/perez_luna/perez_luna.csv \
+        --ref-label="Perez-Luna et al." \
+        --ref2=experimental_methods/perez_luna/E_simple.csv \
+        --ref2-label="Simplified \$E_z\$" \
         --rows=1 \
 
 # Plot comparisons to Roberts and Jorns' method
@@ -64,3 +67,7 @@ plot_roberts target="roberts":
         --obs-style='line' \
         --vline-loc=0.020 \
         --observation=configs/sample_{{target}}.toml
+
+# Plot anom collision freq
+plot_anom:
+    uv run python/plot.py --anom -o "anom.png"

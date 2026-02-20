@@ -12,7 +12,7 @@ out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale = 1.00
+step_scale = 1.0
 # ODE method
 method = "midpoint"
 

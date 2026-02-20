@@ -10,3 +10,6 @@ samples/
 *.png
 *.hto
 .ipynb_checkpoints
+anom.pdf
+anom.png
+*.tar.gz

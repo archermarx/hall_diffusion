@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "htucker",
     "matplotlib>=3.10.3",
+    "mcmciterators",
     "numpy>=2.3.0",
     "pandas>=2.3.0",
     "scipy>=1.16.3",
@@ -20,6 +21,7 @@ py-modules = []
 
 [tool.uv.sources]
 htucker = { git = "https://github.com/gorodetsky-umich/htucker_incremental" }
+mcmciterators = { git = "https://github.com/goroda/MCMCIterators" }
 
 [dependency-groups]
 dev = [

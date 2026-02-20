@@ -1,5 +1,5 @@
 # Number of independent sample traces to generate
-num_samples = 256
+num_samples = 32
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
@@ -12,7 +12,7 @@ out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale = 1.00
+step_scale = 1.05
 # ODE method
 method = "midpoint"
 
@@ -20,5 +20,5 @@ method = "midpoint"
 base_sim = "mcmc_reference/ref_3charge/normalized"
 
 [observation.fields]
-B = {locs = "all", error_type = "relative", std_dev = 0.7}
+B = {locs = "all", error_type = "relative", stddev = 1.0}
 nu_an = {locs = "all", error_type = "relative", stddev = 1.0}
