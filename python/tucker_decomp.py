@@ -86,7 +86,7 @@ def compress(rtol, batch_size, data_dir, test_dir, output_file, no_test):
 
     test_errors = []
 
-    if test_loader is not None:
+    if test_loader is not None and not no_test:
         for _, _, test_snapshot in test_loader:
             test_snapshot = transform(test_snapshot)
             rec = compressor.reconstruct(
