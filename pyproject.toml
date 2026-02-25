@@ -24,7 +24,7 @@ line-length=120
 
 [tool.uv.sources]
 htucker = { git = "https://github.com/gorodetsky-umich/htucker_incremental" }
-mcmciterators = { git = "https://github.com/goroda/MCMCIterators" }
+mcmciterators = { git = "https://github.com/goroda/MCMCIterators.git" }
 
 [dependency-groups]
 dev = [

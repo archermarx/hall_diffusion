@@ -12,15 +12,31 @@ import htucker
 import numpy as np
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-d", "--dir", type=Path, )
-parser.add_argument("-n", "--num-samples", type=int, help="Number of samples to load and compress. If not specified, the whole dataset is compressed")
+parser.add_argument(
+    "-d",
+    "--dir",
+    type=Path,
+)
+parser.add_argument(
+    "-n",
+    "--num-samples",
+    type=int,
+    help="Number of samples to load and compress. If not specified, the whole dataset is compressed",
+)
 parser.add_argument("-c", "--compressor", type=Path, help="Path to .hto (Hierarchical Tucker) data compression file")
-parser.add_argument("-o", "--output-file", type=Path, default=Path("mmd.npy"), help="Output file into which compressed data is put")
+parser.add_argument(
+    "-o", "--output-file", type=Path, default=Path("mmd.npy"), help="Output file into which compressed data is put"
+)
 parser.add_argument("--num-charge", type=int, default=3, help="Number of charge states used in compression")
+parser.add_argument(
+    "--resolution", type=int, default=128, help="Resolution (spatial) of the reconstructed data tensors"
+)
+parser.add_argument(
+    "--channels", type=int, default=17, help="Size of channel dimension of the reconstructed data tensors"
+)
 
-M0 = 17
 
-def load_and_compress(dataset_dir, field_indices: list[int], compressor, num: int | None = None):
+def load_and_compress(dataset_dir, compressor, channels: int, resolution: int, num: int | None = None):
     core = compressor.root.core
     batch_dim = compressor.batch_dimension
     idx = [slice(None)] * core.ndim
@@ -28,19 +44,20 @@ def load_and_compress(dataset_dir, field_indices: list[int], compressor, num: in
     core_slice = core[tuple(idx)]
     dimension = np.prod(core_slice.shape)
 
-    directory= Path(dataset_dir)
+    directory = Path(dataset_dir)
     files = os.listdir(directory)
 
-    if num == None:
+    if num is None:
         num = len(files)
         indices = np.arange(len(files))
     else:
         indices = np.random.choice(np.arange(len(files)), size=num)
 
     reshape = (dimension, num)
-    samples = np.array([np.load(directory/files[i])["data"] for i in indices])
-    tensor = samples.transpose(2,1,0).reshape(128, M0, num)[:, field_indices, :]
+    samples = np.array([np.load(directory / files[i])["data"] for i in indices])
+    tensor = samples.transpose(2, 1, 0).reshape(resolution, channels, num)
     return compressor.project(tensor, batch=True, batch_dimension=2).reshape(reshape)
+
 
 def main(args):
     directory, file = os.path.split(args.compressor)
@@ -48,12 +65,16 @@ def main(args):
         raise FileNotFoundError(args.compressor)
 
     compressor = htucker.HTucker.load(str(file), str(directory))
-    assert compressor is not None
-    
-    compressed = load_and_compress(args.dir / "data", compressor, args.num_samples)
+
+    compressed = load_and_compress(
+        args.dir / "data", compressor, channels=args.channels, resolution=args.resolution, num=args.num_samples
+    )
+
     np.save(args.output_file, compressed)
     return compressed
+
 
 if __name__ == "__main__":
     args = parser.parse_args()
     main(args)
+
