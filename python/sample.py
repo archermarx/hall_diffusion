@@ -26,11 +26,13 @@ parser.add_argument("model", type=str, nargs="?")
 parser.add_argument("config", type=str, nargs="?")
 parser.add_argument("-o", "--out-dir", type=str)
 parser.add_argument("-n", "--num-samples", type=int)
+parser.add_argument("-b", "--batch-size", type=int)
 parser.add_argument("-s", "--num-steps", type=int)
 parser.add_argument("--test-residual", action="store_true")
 parser.add_argument("--test-dir", type=Path)
 
 DEVICE = torch.device("cpu")
+
 
 def build_observation(dataset, observations, default_stddev=1.0):
     _, param_vec, data_tensor = dataset[0]
@@ -85,7 +87,7 @@ def build_observation(dataset, observations, default_stddev=1.0):
                 print(obs_field + ":\tusing data from ref sim at selected axial locs.")
                 obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
             else:
-                print(obs_field +":\tusing data from file.")
+                print(obs_field + ":\tusing data from file.")
                 obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32, device=DEVICE)
 
     # Dimensions
@@ -113,6 +115,7 @@ def build_observation(dataset, observations, default_stddev=1.0):
 
     return obs_A, obs_y, obs_var, param_vec
 
+
 def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
     inv_rho = 1 / exponent
     i = torch.arange(0, num_steps)
@@ -126,9 +129,10 @@ def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent):
 def print_grad_hook(grad):
     print(f"Gradient received: shape={grad.shape}, norm={grad.norm():.4f}")
 
-#=====================================================
+
+# =====================================================
 # Physics residuals
-#=====================================================
+# =====================================================
 
 # Constants
 q_e = 1.6e-19
@@ -140,17 +144,20 @@ q_0 = q_e
 m_0 = m_e
 phi_0 = 0.01
 n_0 = 1e18
-L_0 = 1/math.cbrt(n_0)
+L_0 = 1 / math.cbrt(n_0)
 u_0 = math.sqrt(q_0 * phi_0 / m_0)
 t_0 = L_0 / u_0
-f_0 = 1/t_0
+f_0 = 1 / t_0
 E_0 = phi_0 / L_0
+
 
 def interior_gradient(x, dx):
     return (x[:, 2:] - x[:, :-2]) / (2 * dx)
 
+
 def residual_result(a, b):
-    return (a-b)**2, a, b
+    return (a - b) ** 2, a, b
+
 
 def residual_E(x_0, dataset):
     """
@@ -166,6 +173,7 @@ def residual_E(x_0, dataset):
     # Compute normalized electric field residual
     return residual_result(E_calc, E[:, 1:-1])
 
+
 def residual_grad_pe(x_0, dataset):
     """
     Compute pressure gradient residual: gradpe = grad(pe)
@@ -179,6 +187,7 @@ def residual_grad_pe(x_0, dataset):
 
     # Compute squared normalized pressure gradient residual
     return residual_result(grad_pe_calc, grad_pe[:, 1:-1])
+
 
 def residual_ohm(x_0, dataset):
     """
@@ -194,14 +203,14 @@ def residual_ohm(x_0, dataset):
     ue = dataset.get_denorm(x_0, "ue") / u_0
 
     # Get ion properties for ion drag calculations
-    ni_1 = dataset.get_field(x_0, f"ni_1", action="denormalize") / n_0
-    ni_2 = dataset.get_field(x_0, f"ni_2", action="denormalize") / n_0
-    ni_3 = dataset.get_field(x_0, f"ni_3", action="denormalize") / n_0
+    ni_1 = dataset.get_field(x_0, "ni_1", action="denormalize") / n_0
+    ni_2 = dataset.get_field(x_0, "ni_2", action="denormalize") / n_0
+    ni_3 = dataset.get_field(x_0, "ni_3", action="denormalize") / n_0
 
-    ui_1 = dataset.get_field(x_0, f"ui_1", action="denormalize") / u_0
-    ui_2 = dataset.get_field(x_0, f"ui_2", action="denormalize") / u_0
-    ui_3 = dataset.get_field(x_0, f"ui_3", action="denormalize") / u_0
-    
+    ui_1 = dataset.get_field(x_0, "ui_1", action="denormalize") / u_0
+    ui_2 = dataset.get_field(x_0, "ui_2", action="denormalize") / u_0
+    ui_3 = dataset.get_field(x_0, "ui_3", action="denormalize") / u_0
+
     niui = ni_1 * ui_1 + ni_2 * ui_2 + ni_3 * ui_3
 
     # Compute electron current using normalized ohm's law
@@ -211,42 +220,45 @@ def residual_ohm(x_0, dataset):
 
     return residual_result(neue_calc[:, 1:-1], (ne * ue)[:, 1:-1])
 
+
 def residual_ne(x_0, dataset):
     """
     Compute ne residual: ne = sum(Z * ni_Z)
     """
     # Get electron density
-    ne   = dataset.get_field(x_0, "ne", action="denormalize") / n_0
-    ni_1 = dataset.get_field(x_0, f"ni_1", action="denormalize") / n_0
-    ni_2 = dataset.get_field(x_0, f"ni_2", action="denormalize") / n_0
-    ni_3 = dataset.get_field(x_0, f"ni_3", action="denormalize") / n_0
+    ne = dataset.get_field(x_0, "ne", action="denormalize") / n_0
+    ni_1 = dataset.get_field(x_0, "ni_1", action="denormalize") / n_0
+    ni_2 = dataset.get_field(x_0, "ni_2", action="denormalize") / n_0
+    ni_3 = dataset.get_field(x_0, "ni_3", action="denormalize") / n_0
     ne_calc = 1 * ni_1 + 2 * ni_2 + 3 * ni_3
 
     return residual_result(ne_calc, ne)
 
+
 # Register allowed physics residuals and some metadata
 PHYSICS_RESIDUALS = dict(
-    E = dict(
-        func = residual_E,
-        unit = "V/m",
-        normalizer = E_0,
-     ),
-    grad_pe = dict(
-        func = residual_grad_pe,
-        unit = "eV/m^4",
-        normalizer = phi_0 * n_0 / L_0,
+    E=dict(
+        func=residual_E,
+        unit="V/m",
+        normalizer=E_0,
     ),
-    ohm = dict(
-        func = residual_ohm,
-        unit = "A/m^2",
-        normalizer = q_0 * n_0 * u_0,
+    grad_pe=dict(
+        func=residual_grad_pe,
+        unit="eV/m^4",
+        normalizer=phi_0 * n_0 / L_0,
     ),
-    ne = dict(
-        func = residual_ne,
-        unit = "m^{-3}",
-        normalizer = n_0,
+    ohm=dict(
+        func=residual_ohm,
+        unit="A/m^2",
+        normalizer=q_0 * n_0 * u_0,
+    ),
+    ne=dict(
+        func=residual_ne,
+        unit="m^{-3}",
+        normalizer=n_0,
     ),
 )
+
 
 # Compute physics residual and some stats
 def physics_residual_info(x_0, dataset, res_name, res_info):
@@ -258,46 +270,77 @@ def physics_residual_info(x_0, dataset, res_name, res_info):
 
     status = f"{res_name}: {mean_res:.2e} ({min_res:.2e} - {max_res:.2e})"
 
-    return {"residual": residual, "mean": mean_res, "min": min_res, "max": max_res, "status": status}
+    return {
+        "residual": residual,
+        "mean": mean_res,
+        "min": min_res,
+        "max": max_res,
+        "status": status,
+    }
+
 
 def calc_physics_residuals(x_0, dataset):
-    return {res_name: physics_residual_info(x_0, dataset, res_name, res_info) for (res_name, res_info) in PHYSICS_RESIDUALS.items()}
+    return {
+        res_name: physics_residual_info(x_0, dataset, res_name, res_info)
+        for (res_name, res_info) in PHYSICS_RESIDUALS.items()
+    }
 
 
-#=====================================================
+# =====================================================
 # Conditioning on observations and PDEs
-#=====================================================
+# =====================================================
+
 
 def guidance_score(x_t, x_0, observation, proc_var, pde_strength, pde_args, dataset):
     (batch_size, _, _) = x_0.shape
 
     total_loss = torch.tensor(0.0, device=DEVICE)
+    guidance = False
 
     if observation["var"] is not None:
         obs_vec = observation["data"]
         var = observation["var"]
         H = observation["operator"]
 
-        #=====================================================
+        # =====================================================
+        # # Pseudoinverse guidance (with noise)
+        # n, m = H.shape
+        # assert obs_vec.shape == (n,)
+
+        # mat1 = torch.inverse(proc_var * H @ H.T + var * torch.eye(n, device=DEVICE)) @ H
+        # assert mat1.shape == (n, m)
+
+        # x_vec = x_0.reshape(batch_size, -1)
+        # vec1 = (obs_vec[None, ...] - torch.matmul(H, x_vec.T).T)
+        # assert vec1.shape == (batch_size, n)
+
+        # vec2 = (vec1 @ mat1)
+        # assert vec2.shape == (batch_size, m)
+
+        # mat_x = (vec2.detach() * x_vec).sum()
+        # score = torch.autograd.grad(mat_x, x_t)[0]
+
+        # =====================================================
         # Diffusion posterior sampling (get observation loss)
-        #=====================================================
+        # =====================================================
         x_vec = x_0.reshape(batch_size, -1)
         measurement = torch.matmul(H, x_vec.T).T
         total_var = var + proc_var
-        obs_loss = torch.sum((measurement - obs_vec[None, ...])**2 / total_var)
+        obs_loss = torch.sum((measurement - obs_vec[None, ...]) ** 2 / total_var)
 
         total_loss += obs_loss
+        guidance = True
 
     if pde_strength > 0:
-        #=====================================================
+        # =====================================================
         # DiffusionPDE loss (get physics/PDE loss)
-        #=====================================================
+        # =====================================================
         print_residuals = pde_args.get("print_residuals", False)
         pde_errs = calc_physics_residuals(x_0, dataset)
         pde_weights = pde_args.get("strengths", dict())
 
         pde_loss = torch.tensor(0.0, device=DEVICE)
-        for (k, v) in pde_errs.items():
+        for k, v in pde_errs.items():
             err = v["residual"].mean()
             w = pde_weights.get(k, 0.0)
 
@@ -308,11 +351,16 @@ def guidance_score(x_t, x_0, observation, proc_var, pde_strength, pde_args, data
             print(" | ".join([x["status"] for x in pde_errs.values()]))
 
         total_loss += pde_strength * pde_loss
+        guidance = True
 
     # Take gradient
-    score = -torch.autograd.grad(total_loss, x_t)[0]
+    if guidance:
+        score = -torch.autograd.grad(total_loss, x_t)[0]
+    else:
+        score = total_loss
 
     return score
+
 
 def reverse_step(
     denoiser,
@@ -369,7 +417,7 @@ def reverse_step(
         pde_start = pde_args.get("start_time", 1.0)
         pde_stop = pde_args.get("stop_time", 0.0)
 
-        if (pde_stop <= t <= pde_start):
+        if pde_stop <= t <= pde_start:
             pde_strength = abs(dt) * pde_args.get("strengths", dict()).get("base", 0.0) / (t**2 + 1)
         else:
             pde_strength = 0.0
@@ -377,10 +425,8 @@ def reverse_step(
         pde_strength = 0.0
 
     # Guidance loss
-    if t_mid < t_max_guidance:
-        obs_score = guidance_score(
-            x_t, x_denoised, observation, proc_var, pde_strength, pde_args, dataset
-        )
+    if (observation["var"] is not None or pde_strength > 0) and t_mid < t_max_guidance:
+        obs_score = guidance_score(x_t, x_denoised, observation, proc_var, pde_strength, pde_args, dataset)
         # x_1 += dt * t_mid * obs_score
         x_pred += obs_score
 
@@ -458,27 +504,22 @@ def sample(model, noise_sampler, num_samples, args):
     # If not, we're sampling unconditionally
     # If we sample unconditonally, we need to get some scalar parameters to condition on
     # These are drawn from the same distributions as the training set
+    print(args)
     if "observation" in args:
         obs_args = utils.read_observation(args["observation"])
         obs_file = Path(obs_args["base_sim"])
 
         # Load data for conditioning
         dataset = ThrusterDataset(obs_file)
-        obs_operator, obs_data, obs_var, param_vec = build_observation(
-            dataset, obs_args
-        )
+        obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args)
         obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
     elif "unconditional_data_dir" in args:
         dataset = ThrusterDataset(args["unconditional_data_dir"])
         obs = dict(operator=None, var=None, data=None)
         param_vec_inds = random.choices(range(len(dataset)), k=num_samples)
-        param_vec = torch.tensor(
-            np.array([dataset[i][1] for i in param_vec_inds]), device=DEVICE
-        )
+        param_vec = torch.tensor(np.array([dataset[i][1] for i in param_vec_inds]), device=DEVICE)
     else:
-        raise NotImplementedError(
-            "Observation not provided and no data directory for unconditional sample generation."
-        )
+        raise NotImplementedError("Observation not provided and no data directory for unconditional sample generation.")
 
     # Sample initial noise
     xt = noise_sampler.sample(num_samples) * noise_max
@@ -496,7 +537,7 @@ def sample(model, noise_sampler, num_samples, args):
         step_scale=step_scale,
         method=method,
         model_args=dict(condition_vector=param_vec),
-        pde_args=args.get("pde_guidance", None)
+        pde_args=args.get("pde_guidance", None),
     )
 
     final = output[-1, ...]
@@ -519,12 +560,13 @@ def sample(model, noise_sampler, num_samples, args):
         tens = final[i, :].cpu().numpy()
         np.savez(file, data=tens, params=param_vec.cpu().numpy())
 
+
 def test_residual(test_dir):
     dataset = ThrusterDataset(test_dir)
     x = dataset.grid
     x_int = x[1:-1]
 
-    fig, axes = plt.subplots(2,2, figsize=(8,8), layout="constrained")
+    fig, axes = plt.subplots(2, 2, figsize=(8, 8), layout="constrained")
     axes = axes.ravel()
 
     _, _, tensor = dataset[4]
@@ -542,41 +584,42 @@ def test_residual(test_dir):
     print("==========================")
 
     for ax in axes:
-        ax.axhline([0.0], color = 'black', zorder=0, linestyle='--')
+        ax.axhline([0.0], color="black", zorder=0, linestyle="--")
 
     # E vs grad_phi
     E_res, E_calc, E_base = residual_E(tensor, dataset)
-    axes[0].set(xlabel = "z (m)", ylabel = "Electric field (norm)", title = "E = -grad(phi)")
-    axes[0].plot(x_int, E_calc[0, :], label = "Extracted")
-    axes[0].plot(x_int, E_base[0, :], label = "Calculated", linestyle = "--")
-    axes[0].plot(x_int, np.sqrt(E_res[0, :]), label = "Residual")
+    axes[0].set(xlabel="z (m)", ylabel="Electric field (norm)", title="E = -grad(phi)")
+    axes[0].plot(x_int, E_calc[0, :], label="Extracted")
+    axes[0].plot(x_int, E_base[0, :], label="Calculated", linestyle="--")
+    axes[0].plot(x_int, np.sqrt(E_res[0, :]), label="Residual")
     axes[0].legend()
 
     # pe vs grad_pe
     grad_pe_res, grad_pe_calc, grad_pe_base = residual_grad_pe(tensor, dataset)
-    axes[1].set(xlabel = "z (m)", ylabel = "Pressure gradient (norm)", title = "Pressure gradient")
-    axes[1].plot(x_int, grad_pe_base[0, :], label = "Extracted")
-    axes[1].plot(x_int, grad_pe_calc[0, :], label = "Calculated", linestyle = "--")
-    axes[1].plot(x_int, np.sqrt(grad_pe_res[0, :]), label = "Residual")
+    axes[1].set(xlabel="z (m)", ylabel="Pressure gradient (norm)", title="Pressure gradient")
+    axes[1].plot(x_int, grad_pe_base[0, :], label="Extracted")
+    axes[1].plot(x_int, grad_pe_calc[0, :], label="Calculated", linestyle="--")
+    axes[1].plot(x_int, np.sqrt(grad_pe_res[0, :]), label="Residual")
     axes[1].legend()
 
     # Ohm's law
     je_res, je_calc, je_base = residual_ohm(tensor, dataset)
-    axes[2].set(xlabel = "z (m)", ylabel = "Electron current density (norm)", title = "Ohm's law")
-    axes[2].plot(x_int, je_base[0, :], label = "Extracted")
-    axes[2].plot(x_int, je_calc[0, :], label = "Calculated", linestyle = "--")
-    axes[2].plot(x_int, np.sqrt(je_res[0, :]), label = "Residual")
+    axes[2].set(xlabel="z (m)", ylabel="Electron current density (norm)", title="Ohm's law")
+    axes[2].plot(x_int, je_base[0, :], label="Extracted")
+    axes[2].plot(x_int, je_calc[0, :], label="Calculated", linestyle="--")
+    axes[2].plot(x_int, np.sqrt(je_res[0, :]), label="Residual")
     axes[2].legend()
 
     # Number densities
     ne_res, ne_calc, ne_base = residual_ne(tensor, dataset)
-    axes[3].set(xlabel = "z (m)", ylabel = "Number density (norm)", title = "ne = sum(Z ni)")
-    axes[3].plot(x, ne_base[0, :], label = "Extracted")
-    axes[3].plot(x, ne_calc[0, :], label = "Calculated", linestyle = "--")
-    axes[3].plot(x, np.sqrt(ne_res[0, :]), label = "Residual")
+    axes[3].set(xlabel="z (m)", ylabel="Number density (norm)", title="ne = sum(Z ni)")
+    axes[3].plot(x, ne_base[0, :], label="Extracted")
+    axes[3].plot(x, ne_calc[0, :], label="Calculated", linestyle="--")
+    axes[3].plot(x, np.sqrt(ne_res[0, :]), label="Residual")
     axes[3].legend()
 
     plt.savefig("residuals.png", dpi=200)
+
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -600,6 +643,9 @@ if __name__ == "__main__":
 
     if args.num_samples is not None:
         sampling_config["num_samples"] = args.num_samples
+
+    if args.batch_size is not None:
+        sampling_config["batch_size"] = args.batch_size
 
     # Load model and config from checkpoint
     model_dict = torch.load(args.model, weights_only=False)
@@ -643,9 +689,7 @@ if __name__ == "__main__":
     elif noise_sampler_args["type"] == "rbf":
         scale = noise_sampler_args["scale"]
         assert isinstance(scale, float | int)
-        noise_sampler = noise.RBFKernel(
-            channels, resolution, scale=scale, device=DEVICE
-        )
+        noise_sampler = noise.RBFKernel(channels, resolution, scale=scale, device=DEVICE)
     else:
         raise NotImplementedError()
 
