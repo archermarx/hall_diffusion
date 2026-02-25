@@ -43,15 +43,13 @@ def load_and_compress(dataset_dir, field_indices: list[int], compressor, num: in
     return compressor.project(tensor, batch=True, batch_dimension=2).reshape(reshape)
 
 def main(args):
-    if args.num_charge == 2:
-        field_indices = [0,1,2,3,4,5,6,8,9,11,12,13,14,15,16]
-    elif args.num_charge == 1:
-        field_indices = [0,1,2,3,4,5,8,11,12,13,14,15,16]
-    else:
-        field_indices = list(range(M0))
-
     directory, file = os.path.split(args.compressor)
+    if not os.path.exists(args.compressor):
+        raise FileNotFoundError(args.compressor)
+
     compressor = htucker.HTucker.load(str(file), str(directory))
+    assert compressor is not None
+    
     compressed = load_and_compress(args.dir / "data", compressor, args.num_samples)
     np.save(args.output_file, compressed)
     return compressed
