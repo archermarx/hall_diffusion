@@ -502,8 +502,8 @@ def plot_multifield_comparison(args, **kwargs):
     multifield_args = dict(show_ylabel=False, show_title=True)
 
     # Plot fields
-    plot_multifield(axs[0, :], x, samples_mcmc, fields=fields, field_names=field_names, **kwargs, **multifield_args)
-    plot_multifield(axs[1, :], x, samples_generated, fields=fields, field_names=field_names, **kwargs, **multifield_args)
+    plot_multifield(axs[0, :], x, samples_mcmc, fields=fields, field_names=field_names, **kwargs, **multifield_args) # type: ignore
+    plot_multifield(axs[1, :], x, samples_generated, fields=fields, field_names=field_names, **kwargs, **multifield_args) # type: ignore
 
     # Remove redundant titles and xlabels
     for (i, row) in enumerate(axs):
@@ -541,7 +541,7 @@ def plot_sidebyside(args, **kwargs):
     num_cols = math.ceil(num_fields / num_rows)
     figsize = (col_width * num_cols, row_height * num_rows + 0.5)
     fig, axs = plt.subplots(
-        num_rows, num_cols, figsize=figsize, layout="constrained", dpi=200
+        num_rows, num_cols, figsize=figsize, layout="constrained", dpi=200, squeeze=False
     )
     axes_linear = axs.ravel()
 

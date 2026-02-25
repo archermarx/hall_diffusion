@@ -16,7 +16,7 @@ parser.add_argument("-d", "--dir", type=Path, )
 parser.add_argument("-n", "--num-samples", type=int, help="Number of samples to load and compress. If not specified, the whole dataset is compressed")
 parser.add_argument("-c", "--compressor", type=Path, help="Path to .hto (Hierarchical Tucker) data compression file")
 parser.add_argument("-o", "--output-file", type=Path, default=Path("mmd.npy"), help="Output file into which compressed data is put")
-parser.add_argument("--num-charge", type=Int, default=3, help="Number of charge states used in compression")
+parser.add_argument("--num-charge", type=int, default=3, help="Number of charge states used in compression")
 
 M0 = 17
 
