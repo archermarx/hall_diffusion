@@ -106,9 +106,7 @@ def compress(rtol, batch_size, data_dir, test_dir, output_file, no_test):
         )
 
     save_interval = 100
-
     data_size = batch_size
-    max_size = 2**20
 
     for _, _, training_snapshot in train_iterator:
         if batch_idx % 20 == 0:
@@ -152,8 +150,6 @@ def compress(rtol, batch_size, data_dir, test_dir, output_file, no_test):
             f"   {batch_idx:06d} {batch_norm:12.5f}   {round(error_before_update, 5):0.5f}  {round(error_after_update, 5):0.5f}    {round(compressor.compression_ratio, 5):09.5f}     {round(np.mean(test_errors),5):0.5f}  {' '.join(map(lambda x: f'{x:03d}', ranks))}"  # noqa: E501
         )
         data_size += batch_size
-        if data_size >= max_size:
-            break
 
     compressor.save(str(output_file))
 
