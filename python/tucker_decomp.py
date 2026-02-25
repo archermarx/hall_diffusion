@@ -16,22 +16,22 @@ parser.add_argument("--no-test", action = "store_true", help = "Whether to evalu
 
 def compress(rtol, batch_size, data_dir, test_dir, output_file, no_test):
     train_dataset = thruster_data.ThrusterDataset(data_dir)
-    M0 = 128
-    C0 = 17
+    M = len(train_dataset.grid)
+    C = len(train_dataset.fields().keys())
+
+    print(f'{M=}, {C=}')
 
     batch_idx = 0
     transpose = (2, 1, 0)
-    reshape = (M0, C0, batch_size)
+    reshape = (M, C, batch_size)
     batch_dim = len(reshape)-1
 
     def transform(input_tensor):
-        N = 128
-        N = 17
-        assert input_tensor.shape == (batch_size, N, N)
+        assert input_tensor.shape == (batch_size, C, M)
 
         output_tensor = input_tensor.numpy()
         output_tensor = output_tensor.transpose(*transpose)
-        assert output_tensor.shape == (128, 17, batch_size)
+        assert output_tensor.shape == (M, C, batch_size)
 
         output_tensor = output_tensor.reshape(*reshape)
         return output_tensor
