@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
+import random
 
 from .normalization import Normalizer
 
@@ -64,6 +65,11 @@ class ThrusterDataset(Dataset):
             return param
         else:
             raise NameError(f"Action '{name}' not allowed. Action must be 'normalize', 'denormalize' or `None`.")
+
+    def sample_params(self, num_samples, device):
+        param_vec_inds = random.choices(range(len(self)), k=num_samples)
+        param_vecs = torch.tensor(np.array([self[i][1] for i in param_vec_inds]), device=device)
+        return param_vecs
 
     def __len__(self):
         return len(self.files)
@@ -139,7 +145,6 @@ class ThrusterPlotter1D:
         else:
             x = np.linspace(0, self.xmax, w)
             ax.set_xlabel("Axial location [channel lengths]")
-
 
         norm_tensor = self.norm.norm_tensor
         ind = norm_tensor["names"][field]

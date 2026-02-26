@@ -12,8 +12,9 @@ out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
-step_scale = 1.1
+step_scale = 1.00
 # ODE method
 method = "midpoint"
 
 observation = "experimental_methods/perez_luna/observation.toml"
+unconditional_data_dir = "data/batch_3/normalized_test_large"
