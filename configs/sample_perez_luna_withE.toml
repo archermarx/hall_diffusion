@@ -16,10 +16,5 @@ step_scale = 1.00
 # ODE method
 method = "midpoint"
 
-[observation]
-base_sim = "mcmc_reference/ref_3charge/normalized"
-stddev = 0.028
-
-[observation.fields]
-B = {locs = "all", error_type = "relative"}
-ui_1 = {locs = "all", error_type = "relative"}
+observation = "experimental_methods/perez_luna/observation_withE.toml"
+unconditional_data_dir = "data/batch_3/normalized_test_large"

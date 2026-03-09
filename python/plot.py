@@ -324,7 +324,7 @@ def get_field(field, field_names, data):
 
 def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=None, ref_label=None, ref2=None, ref2_label=None, observation=None, obs_style='marker', **FIELD_PLOT_ARGS):
     assert len(axes) == len(fields)
-    obs_args = dict(color=OBS_COLOR, label="Observation", zorder=9)
+    obs_args = dict(color=OBS_COLOR, label="Observation", zorder=2000)
 
     # Load and process reference simulation data 
     # TODO: load this before this function
@@ -374,16 +374,6 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
                     y_ref = ref_field[subfield][0, :] * scale_factor
                     x_ref = ref_dataset.grid / CHANNEL_LENGTH
                     ax.plot(x_ref, y_ref, **ref["style"])
-                elif ref_data is not None and subfield in ref_data.columns and (subfield + "_lo") in ref_data.columns and (subfield + "_hi") in ref_data.columns:
-                    # Ref data is in a pandas dataframe
-                    y_ref = ref_data[subfield].to_numpy() * scale_factor
-                    y_lo = ref_data[subfield + "_lo"].to_numpy() * scale_factor
-                    y_hi = ref_data[subfield + "_hi"].to_numpy() * scale_factor
-                    x_ref = ref_data["z"].to_numpy() / CHANNEL_LENGTH
-                    if "linestyle" in ref["style"]:
-                        ref["style"].pop("linestyle")
-                    ax.plot(x_ref, y_ref, "-o", **ref["style"])
-                    ax.fill_between(x_ref, y_lo, y_hi, color = 'gray', alpha=0.4, zorder=0, linewidth=0)
                 elif ref_data is not None and subfield in ref_data.columns:
                     # Ref data is in a pandas dataframe
                     y_ref = ref_data[subfield].to_numpy() * scale_factor

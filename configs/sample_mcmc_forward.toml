@@ -1,5 +1,5 @@
 # Number of independent sample traces to generate
-num_samples = 64
+num_samples = 256
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
@@ -18,7 +18,7 @@ method = "midpoint"
 
 [observation]
 base_sim = "mcmc_reference/ref_3charge/normalized"
-stddev = 1.0
+stddev = 0.05
 
 [observation.fields]
 B = {locs = "all", error_type = "relative"}

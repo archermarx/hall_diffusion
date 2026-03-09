@@ -43,7 +43,7 @@ plot_mcmc target +fields=DEFAULT_FIELDS:
 plot_perez_luna target="perez_luna" +fields="ui_1 E nu_iz inv_hall":
         uv run python/plot.py \
         --samples=samples/{{target}} \
-        -o samples/{{target}}/"perez-luna.png" \
+        -o samples/{{target}}/"{{target}}.png" \
         -f {{fields}} \
         --observation=configs/sample_{{target}}.toml \
         --type=sidebyside \
@@ -57,15 +57,13 @@ plot_perez_luna target="perez_luna" +fields="ui_1 E nu_iz inv_hall":
 plot_roberts target="roberts":
     uv run python/plot.py \
         --samples=samples/{{target}} \
-        -o samples/{{target}}/"roberts.png" \
+        -o samples/{{target}}/"{{target}}.png" \
         -f ui_1,ui_2,ui_3 ne Tev E ue ni_1,ni_2,ni_3 nn inv_hall \
         --type=sidebyside \
         --ref={{REF_SIM}} \
         --ref2=experimental_methods/roberts/roberts.csv \
         --ref2-label="Roberts" \
         --rows=2 \
-        --obs-style='line' \
-        --vline-loc=0.020 \
         --observation=configs/sample_{{target}}.toml
 
 # Plot anom collision freq
