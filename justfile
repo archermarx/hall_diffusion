@@ -61,10 +61,10 @@ plot_roberts target="roberts":
         -f ui_1,ui_2,ui_3 ne Tev E ue ni_1,ni_2,ni_3 nn inv_hall \
         --type=sidebyside \
         --ref={{REF_SIM}} \
-        --ref2=experimental_methods/roberts/roberts.csv \
-        --ref2-label="Roberts" \
         --rows=2 \
-        --observation=configs/sample_{{target}}.toml
+        --observation=configs/sample_{{target}}.toml \
+        # --ref2=experimental_methods/roberts/roberts.csv \
+        # --ref2-label="Roberts" \
 
 # Plot anom collision freq
 plot_anom:
