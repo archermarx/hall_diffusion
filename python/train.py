@@ -64,16 +64,23 @@ class LossFunction(ABC):
 # ----------------------------------------------------------------------------
 # Loss function for Flow matching
 class FlowMatchingLoss:
-    def __init__(self, t_loc=0.0, t_scale=1.0, **kwargs):
+    def __init__(self, t_loc=0.0, t_scale=1.0, noise_sampler="logit", **kwargs):
         self.t_loc = t_loc
         self.t_scale = t_scale
+        self.noise_sampler = noise_sampler
 
     def __call__(self, x, model, t=None, condition_vec=None):
         batch_size, _, _ = x.shape
 
         # Sample t from a logit-normal distribution if not provided
         if t is None:
-            t = torch.sigmoid(self.t_loc + self.t_scale * torch.randn([batch_size, 1, 1], device=x.device))
+            match self.noise_sampler:
+                case "logit":
+                    t = torch.sigmoid(self.t_loc + self.t_scale * torch.randn([batch_size, 1, 1], device=x.device))
+                case "uniform":
+                    t = 0.999 * torch.rand(x.shape())
+                case _:
+                    raise NotImplementedError()
 
         # Convert t to a sigma to work with EDM2 preconditioning
         sigma = t / (1 - t + 1e-8)
