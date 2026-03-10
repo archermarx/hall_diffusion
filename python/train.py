@@ -5,6 +5,7 @@ import math
 import json
 import os
 import shutil
+from abc import ABC, abstractmethod
 import tomllib
 
 # External deps
@@ -37,8 +38,7 @@ SCRIPT_DIR = utils.get_script_dir()
 ROOT_DIR = SCRIPT_DIR / ".."
 
 # Noise levels at which we plot progress during training
-NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 1.0]
-
+NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 0.75]
 
 # ----------------------------------------------------------------------------
 # Learning rate decay schedule used in the paper "Analyzing and Improving the Training Dynamics of Diffusion Models". (EDM2)
@@ -52,6 +52,44 @@ def learning_rate_schedule(
         lr *= min(cur_nimg / (rampup_batches * batch_size), 1)
     return lr
 
+# ----------------------------------------------------------------------------
+class LossFunction(ABC):
+    def __init__(self, *args, **kwargs):
+        pass
+
+    @abstractmethod
+    def __call__(self, x, model, noise_std, condition_vec) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor]:
+        pass
+
+# ----------------------------------------------------------------------------
+# Loss function for Flow matching
+class FlowMatchingLoss:
+    def __init__(self, t_loc=0.0, t_scale=1.0, **kwargs):
+        self.t_loc = t_loc
+        self.t_scale = t_scale
+
+    def __call__(self, x, model, t=None, condition_vec=None):
+        batch_size, _, _ = x.shape
+
+        # Sample t from a logit-normal distribution if not provided
+        if t is None:
+            t = torch.sigmoid(self.t_loc + self.t_scale * torch.randn([batch_size, 1, 1], device=x.device))
+
+        # Convert t to a sigma to work with EDM2 preconditioning
+        sigma = t / (1 - t + 1e-8)
+
+        # Blend image with noise and then denoise
+        xi = torch.randn_like(x, device=x.device)
+        noisy_im = (1 - t) * x + t * xi
+        denoised = model(noisy_im, sigma, condition_vec)
+
+        # Calculate loss
+        # Note: this is the reconstruction loss, which is identical to the flow-matching loss
+        # if we have a model that predicts x, i.e.
+        # (v - (xi - x))**2 == (D(x; sigma) - x)**2 if v = xi - D(x; sigma)
+        loss = ((denoised - x)**2).mean()
+
+        return loss, loss.item(), noisy_im, denoised
 
 # ----------------------------------------------------------------------------
 # Loss function for EDM2 model
@@ -417,9 +455,6 @@ def train(args):
             ema.step_start = 0
             print("EMA loaded from checkpoint")
 
-    # ---------------------------------------------
-    # Loss args
-    loss_args = train_args["loss"]
 
     # ---------------------------------------------
     # Print a string of the current epoch, batch, and stage
@@ -482,9 +517,8 @@ def train(args):
     val_loss = val_losses[-1] if len(val_losses) > 0 else np.inf
     ema_loss = ema_losses[-1] if len(ema_losses) > 0 else np.inf
 
-    start_epoch = max_epochs
-
-    # Loss function
+    # ---------------------------------------------
+    # Noise args
     channels = train_dataset.num_fields
     resolution = len(train_dataset.grid)
     print(f"{channels=}, {resolution=}")
@@ -492,16 +526,26 @@ def train(args):
     noise_sampler_args = train_args.get("noise_sampler", dict(type="gaussian"))
     train_args["noise_sampler"] = noise_sampler_args
 
-    if noise_sampler_args["type"] == "gaussian":
-        noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
-    elif noise_sampler_args["type"] == "rbf":
-        noise_sampler = noise.RBFKernel(
-            channels, resolution, scale=noise_sampler_args["scale"], device=DEVICE
-        )
-    else:
-        raise NotImplementedError()
+    match noise_sampler_args["type"]:
+        case "gaussian":
+            noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
+        case "rbf":
+            noise_sampler = noise.RBFKernel(
+                channels, resolution, scale=noise_sampler_args["scale"], device=DEVICE
+            )
+        case _:
+            raise NotImplementedError()
 
-    loss_fn = EDM2Loss(noise_sampler, **loss_args)
+    # ---------------------------------------------
+    # Loss args
+    loss_args = train_args["loss"]
+    match (loss_args.get("type", "edm2")):
+        case "edm2":
+            loss_fn = EDM2Loss(noise_sampler, **loss_args)
+        case "flow matching":
+            loss_fn = FlowMatchingLoss()
+        case _:
+            raise NotImplementedError
 
     # ---------------------------------------------
     # Main training loop
