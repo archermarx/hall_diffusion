@@ -170,7 +170,7 @@ def reverse_step(
     dt = t - t_prev
     t_mid = 0.5 * (t + t_prev)
 
-    use_const_guidance=False
+    use_const_guidance=True
 
     if use_const_guidance:
         proc_var = lambda t: t**2 / (t**2 + 1)
@@ -202,9 +202,11 @@ def reverse_step(
 
     if method == "midpoint" or (method == "heun" and t > 0):
         # Compute corrector step
-        x_pred = x_pred.detach()
-        x_pred.requires_grad = True
-        denoiser.zero_grad()
+        if not use_const_guidance:
+            x_pred = x_pred.detach()
+            x_pred.requires_grad = True
+            denoiser.zero_grad()
+
         t2 = t_mid if method == "midpoint" else t
         x_denoised = denoiser(x_pred, t2 * ones, **model_args)
         deriv_2 = -step_scale * (x_denoised - x_t) / t2
@@ -223,7 +225,7 @@ def reverse_step(
 
     # Guidance loss
     if use_const_guidance and observation["var"] is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_t, x_denoised, observation, proc_var)
+        obs_score = guidance_score(x_t, x_denoised, observation, proc_var(t_mid))
         x_pred += obs_score
 
     return x_pred.detach()
@@ -422,7 +424,7 @@ if __name__ == "__main__":
     # Load model and config from checkpoint
     model_dict = torch.load(args.model, weights_only=False)
     model_config = model_dict["model_config"]
-    model = models.from_config(model_dict, device=DEVICE)
+    model = models.from_config(model_config, device=DEVICE)
 
     # Determine which weights to load
     model_type = sampling_config.get("model_type", "ema")

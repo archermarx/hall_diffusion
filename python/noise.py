@@ -9,7 +9,7 @@ def get_fixed_coords(Ln1, Ln2):
 
 class NoiseSampler(object):
     @torch.no_grad()
-    def __init__(self, channels: int, resolution: int, device: torch.Device):
+    def __init__(self, channels: int, resolution: int, device: torch.device):
         self.channels=channels
         self.resolution=resolution
         self.device=device
@@ -39,19 +39,17 @@ class RandomNoise(NoiseSampler):
 
 class RBFKernel(NoiseSampler):
     @torch.no_grad()
-    def __init__(self, in_channels, Ln, scale=1.0, eps=0.01, device=None):
-        self.in_channels = in_channels
-        self.Ln = Ln
-        self.device = device
+    def __init__(self, *args, scale=1.0, eps=0.01):
+        super().__init__(*args)
         self.scale = scale
 
         # (s, 1)
-        grid = torch.linspace(0, 1, steps=Ln+1)[0:-1].unsqueeze(1)
+        grid = torch.linspace(0, 1, steps=self.resolution+1)[0:-1].unsqueeze(1)
         
         # (s, s)
-        C = torch.exp(-torch.cdist(grid, grid) / (2 * scale**2)).to(device)
+        C = torch.exp(-torch.cdist(grid, grid) / (2 * scale**2)).to(self.device)
         # Need to add some regularisation or else the sqrt won't exist
-        I = torch.eye(C.size(-1)).to(device)
+        I = torch.eye(C.size(-1)).to(self.device)
 
         # Not memory efficient
         # C = C + (eps**2) * I
@@ -74,15 +72,15 @@ class RBFKernel(NoiseSampler):
         # z_mat = torch.randn((N, self.Ln1*self.Ln2, 2)).to(self.device)
         # sample = torch.bmm(L_padded, z_mat)
 
-        samples = torch.zeros((N, self.Ln, self.in_channels)).to(self.device)
+        samples = torch.zeros((N, self.resolution, self.channels), device=self.device)
 
         for ix in range(N):
             # (s^2, s^2) * (s^2, 2) -> (s^2, 2)
-            this_z = torch.randn(self.Ln, self.in_channels).to(self.device)
+            this_z = torch.randn(self.resolution, self.channels, device=self.device)
             samples[ix] = torch.matmul(self.L, this_z)
 
         # reshape into (N, s, n_in)
-        sample_rshp = samples.reshape(-1, self.Ln, self.in_channels)
+        sample_rshp = samples.reshape(-1, self.resolution, self.channels)
 
         # reshape into (N, n_in, s)
         sample_rshp = sample_rshp.transpose(-1, -2)

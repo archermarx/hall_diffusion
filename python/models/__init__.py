@@ -1,14 +1,11 @@
 import torch
-import edm2
-from abc import ABC, abstractmethod
+from . import edm2
 
-class DenoisingDiffusionModel(ABC, torch.nn.Module):
-    pass
-
-def from_config(config, device: torch.Device) -> DenoisingDiffusionModel:
+def from_config(config, device: torch.device):
     # Load model and config from checkpoint
     arch = config.get("architecture", "edm2")
     assert arch in set(["edm2"])
+    print(config)
     match arch:
         case "edm2":
             model = edm2.EDM2Denoiser.from_config(config).to(device)

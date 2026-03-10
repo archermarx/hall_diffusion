@@ -14,7 +14,6 @@ import torch
 import numpy as np
 import tomllib
 import argparse
-from . import DenoisingDiffusionModel
 
 # ----------------------------------------------------------------------------
 # Cached construction of constant tensors. Avoids CPU=>GPU copy when the
@@ -402,7 +401,7 @@ class UNet(torch.nn.Module):
 # ----------------------------------------------------------------------------
 # Preconditioning and uncertainty estimation.
 
-class EDM2Denoiser(DenoisingDiffusionModel, torch.nn.Module):
+class EDM2Denoiser(torch.nn.Module):
     def __init__(
         self,
         resolution,  # Image resolution.
