@@ -78,7 +78,7 @@ class FlowMatchingLoss:
                 case "logit":
                     t = torch.sigmoid(self.t_loc + self.t_scale * torch.randn([batch_size, 1, 1], device=x.device))
                 case "uniform":
-                    t = 0.999 * torch.rand(x.shape())
+                    t = 0.999 * torch.rand([batch_size, 1, 1], device=x.device)
                 case _:
                     raise NotImplementedError()
 
