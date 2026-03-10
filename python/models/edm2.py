@@ -14,13 +14,13 @@ import torch
 import numpy as np
 import tomllib
 import argparse
+from . import DenoisingDiffusionModel
 
 # ----------------------------------------------------------------------------
 # Cached construction of constant tensors. Avoids CPU=>GPU copy when the
 # same constant is used multiple times.
 
 _constant_cache = dict()
-
 
 def constant(value, shape=None, dtype=None, device=None, memory_format=None):
     value = np.asarray(value)
@@ -273,7 +273,6 @@ class Block(torch.nn.Module):
 # ----------------------------------------------------------------------------
 # EDM2 U-Net model (Figure 21).
 
-
 class UNet(torch.nn.Module):
     def __init__(
         self,
@@ -403,8 +402,7 @@ class UNet(torch.nn.Module):
 # ----------------------------------------------------------------------------
 # Preconditioning and uncertainty estimation.
 
-
-class Denoiser(torch.nn.Module):
+class EDM2Denoiser(DenoisingDiffusionModel, torch.nn.Module):
     def __init__(
         self,
         resolution,  # Image resolution.
@@ -465,7 +463,7 @@ class Denoiser(torch.nn.Module):
         batch_size = 1024
         label_dim = 8
         for dim in (1,):
-            model = Denoiser(
+            model = EDM2Denoiser(
                 resolution=resolution,
                 in_channels=channels,
                 base_channels=base_channels,
@@ -482,7 +480,7 @@ class Denoiser(torch.nn.Module):
     @staticmethod
     @torch.no_grad
     def from_config(config):
-        return Denoiser(
+        return EDM2Denoiser(
             in_channels=config["in_channels"],
             resolution=config["resolution"],
             base_channels=config["base_channels"],
@@ -496,7 +494,7 @@ class Denoiser(torch.nn.Module):
     def from_config_file(config_file):
         with open(config_file, "rb") as fp:
             config = tomllib.load(fp)
-        return Denoiser.from_config(config["model"])
+        return EDM2Denoiser.from_config(config["model"])
 
 
 # ----------------------------------------------------------------------------
@@ -509,7 +507,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    Denoiser.check_shape(
+    EDM2Denoiser.check_shape(
         resolution=args.resolution,
         channels=args.in_channels,
         base_channels=args.base_channels,

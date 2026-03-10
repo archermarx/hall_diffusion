@@ -7,22 +7,34 @@ def get_fixed_coords(Ln1, Ln2):
     coords = torch.cat([yy.reshape(-1, 1), xx.reshape(-1, 1)], dim=-1)
     return coords
 
-
 class NoiseSampler(object):
+    @torch.no_grad()
+    def __init__(self, channels: int, resolution: int, device: torch.Device):
+        self.channels=channels
+        self.resolution=resolution
+        self.device=device
+
     def sample(self, N):
-        raise NotImplementedError()
-    
+        raise NotImplementedError() 
+
+    @staticmethod
+    def from_config(*args, **kwargs):
+        match kwargs.get("type", "gaussian"):
+            case "gaussian":
+                return RandomNoise(*args)
+            case "rbf":
+                return RBFKernel(*args, scale=kwargs["scale"])
+            case _:
+                raise NotImplementedError()
 
 class RandomNoise(NoiseSampler):
     @torch.no_grad()
-    def __init__(self, in_channels, Ln, device=None):
-        self.in_channels = in_channels
-        self.Ln = Ln
-        self.device = device
+    def __init__(self, *args):
+        super().__init__(*args)
 
     @torch.no_grad()
     def sample(self, N):
-        return torch.randn((N, self.in_channels, self.Ln), device=self.device)
+        return torch.randn((N, self.channels, self.resolution), device=self.device)
 
 
 class RBFKernel(NoiseSampler):

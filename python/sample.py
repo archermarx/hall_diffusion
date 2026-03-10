@@ -6,21 +6,18 @@ import os
 import shutil
 import uuid
 import math
-import random
 from typing import Literal
 
 # Third-party deps
 import torch
 from tqdm import tqdm
 import numpy as np
-import matplotlib.pyplot as plt
 
 # Local deps
-import models.edm
-import models.edm2
+import models
 from utils import utils
 from utils.thruster_data import ThrusterDataset
-import noise
+from noise import NoiseSampler
 
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str, nargs="?")
@@ -425,12 +422,7 @@ if __name__ == "__main__":
     # Load model and config from checkpoint
     model_dict = torch.load(args.model, weights_only=False)
     model_config = model_dict["model_config"]
-    print(f"{model_config=}")
-    arch = model_config.get("architecture", "edm2")
-    if arch == "edm2":
-        model = models.edm2.Denoiser.from_config(model_config).to(DEVICE)
-    else:
-        model = models.edm.Denoiser.from_config(model_config).to(DEVICE)
+    model = models.from_config(model_dict, device=DEVICE)
 
     # Determine which weights to load
     model_type = sampling_config.get("model_type", "ema")
@@ -459,14 +451,7 @@ if __name__ == "__main__":
     channels = model.img_channels
     resolution = model.img_resolution
 
-    if noise_sampler_args["type"] == "gaussian":
-        noise_sampler = noise.RandomNoise(channels, resolution, device=DEVICE)
-    elif noise_sampler_args["type"] == "rbf":
-        scale = noise_sampler_args["scale"]
-        assert isinstance(scale, float | int)
-        noise_sampler = noise.RBFKernel(channels, resolution, scale=scale, device=DEVICE)
-    else:
-        raise NotImplementedError()
+    noise_sampler = NoiseSampler.from_config(model.img_channels, model.img_resolution, DEVICE, **noise_sampler_args)
 
     # Sample in batches
     for i, batch_num_samples in enumerate(batches):
