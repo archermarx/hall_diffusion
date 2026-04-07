@@ -21,16 +21,16 @@ class NoiseSampler(object):
     def from_config(*args, **kwargs):
         match kwargs.get("type", "gaussian"):
             case "gaussian":
-                return RandomNoise(*args)
+                return RandomNoise(*args, **kwargs)
             case "rbf":
-                return RBFKernel(*args, scale=kwargs["scale"])
+                return RBFKernel(*args, **kwargs, scale=kwargs["scale"])
             case _:
                 raise NotImplementedError()
 
 class RandomNoise(NoiseSampler):
     @torch.no_grad()
-    def __init__(self, *args):
-        super().__init__(*args)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     @torch.no_grad()
     def sample(self, N):
@@ -39,8 +39,8 @@ class RandomNoise(NoiseSampler):
 
 class RBFKernel(NoiseSampler):
     @torch.no_grad()
-    def __init__(self, *args, scale=1.0, eps=0.01):
-        super().__init__(*args)
+    def __init__(self, *args, scale=1.0, eps=0.01, **kwargs):
+        super().__init__(*args, **kwargs)
         self.scale = scale
 
         # (s, 1)

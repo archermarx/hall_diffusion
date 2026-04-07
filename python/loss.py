@@ -14,11 +14,11 @@ class LossFunction(ABC):
     def from_config(noise_sampler=None, **kwargs):
         match (kwargs.get("type", "edm2")):
             case "edm2":
-                loss_fn = EDM2Loss(noise_sampler, **kwargs)
+                return EDM2Loss(noise_sampler, **kwargs)
             case "flow matching":
-                loss_fn = FlowMatchingLoss(**kwargs)
+                return FlowMatchingLoss(**kwargs)
             case _:
-                raise NotImplementedError
+                raise NotImplementedError()
 
 # ----------------------------------------------------------------------------
 # Loss function for Flow matching

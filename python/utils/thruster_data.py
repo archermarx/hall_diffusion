@@ -11,7 +11,7 @@ import random
 from .normalization import Normalizer
 
 class ThrusterDataset(Dataset):
-    def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, files=None):
+    def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, scalars_in_tensor=False, files=None):
         super().__init__()
         self.dir = Path(dir)
         self.data_dir = self.dir / "data"
@@ -29,6 +29,7 @@ class ThrusterDataset(Dataset):
         self.norm = Normalizer(dir)
         self.num_fields = len(self.norm.norm_tensor["names"])
         self.num_params = len(self.norm.norm_params["names"])
+        self.scalars_in_tensor = scalars_in_tensor
 
     def write_metadata(self, path: Path | str):
         path = Path(path)
@@ -77,8 +78,15 @@ class ThrusterDataset(Dataset):
     def __getitem__(self, idx):
         data = np.load(self.data_dir / self.files[idx])
 
-        tensor = data["data"]
-        params = data["params"]
+        tensor = torch.tensor(data["data"], dtype=torch.float32)
+        params = torch.tensor(data["params"], dtype=torch.float32)
+
+        if self.scalars_in_tensor:
+            # Add params to the end of the tensor as constant channels
+            p = params.unsqueeze(1).expand(-1, tensor.shape[1])
+            assert p.shape == (self.num_params, tensor.shape[1])
+            tensor = torch.cat([tensor, p], dim=0)
+            params = torch.tensor([])
 
         return self.files[idx], params, tensor
 

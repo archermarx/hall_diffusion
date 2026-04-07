@@ -6,6 +6,7 @@ import numpy as np
 import bisect
 import pandas as pd
 import tomllib
+import traceback
 
 def get_script_dir():
     return Path(os.path.dirname(os.path.realpath(sys.argv[0])))
@@ -13,6 +14,8 @@ def get_script_dir():
 def get_device():
     # Device setup
     device = torch.device("cpu")
+    # print("get_device called!")
+    # traceback.print_stack()
 
     if torch.backends.mps.is_available():
         # Apple metal performance shaders

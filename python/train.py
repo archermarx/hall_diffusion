@@ -256,8 +256,9 @@ def train(args):
     log_file = out_dir / train_args["log_file"]
 
     # Set up training and test data loaders
-    train_dataset = thruster_data.ThrusterDataset(train_data_dir)
-    test_dataset = thruster_data.ThrusterDataset(test_data_dir)
+    scalars_in_tensor = config["model"].get("scalars_in_tensor", False)
+    train_dataset = thruster_data.ThrusterDataset(train_data_dir, scalars_in_tensor=scalars_in_tensor)
+    test_dataset = thruster_data.ThrusterDataset(test_data_dir, scalars_in_tensor=scalars_in_tensor)
 
     # Check that normalization is the same between training and test datasets
     assert train_dataset.norm == test_dataset.norm
@@ -268,7 +269,6 @@ def train(args):
         batch_size=batch_size,
         shuffle=True,
         pin_memory=pin,
-        pin_memory_device=DEVICE.type,
         num_workers=load_workers,
     )
     test_loader = DataLoader(
@@ -276,13 +276,22 @@ def train(args):
         batch_size=batch_size,
         shuffle=False,
         pin_memory=pin,
-        pin_memory_device=DEVICE.type,
         num_workers=load_workers,
     )
 
     # ---------------------------------------------
     # Model configuration
     # Load model from config file and print some summary statistics
+    # TODO: is there a need to specify input channels in the TOML file or can they always be inferred?
+    if scalars_in_tensor:
+        config["model"]["in_channels"] = train_dataset.num_fields + train_dataset.num_params
+        config["model"]["label_dim"] = 0
+    else:
+        config["model"]["in_channels"] = train_dataset.num_fields
+        config["model"]["label_dim"] = train_dataset.num_params
+
+    config["model"]["resolution"] = len(train_dataset.grid)
+
     model = models.from_config(config["model"], device=DEVICE)
 
     print(
@@ -397,8 +406,8 @@ def train(args):
 
     # ---------------------------------------------
     # Noise args
-    channels = train_dataset.num_fields
-    resolution = len(train_dataset.grid)
+    channels = config["model"]["in_channels"]
+    resolution = config["model"]["resolution"]
     print(f"{channels=}, {resolution=}")
 
     noise_sampler = NoiseSampler.from_config(channels, resolution, device=DEVICE, **train_args.get("noise_sampler", {}))

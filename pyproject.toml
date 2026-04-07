@@ -22,9 +22,20 @@ py-modules = []
 [tool.ruff]
 line-length=120
 
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
 [tool.uv.sources]
 htucker = { git = "https://github.com/gorodetsky-umich/htucker_incremental" }
 mcmciterators = { git = "https://github.com/goroda/MCMCIterators.git" }
+torch = [
+  { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
 
 [dependency-groups]
 dev = [
