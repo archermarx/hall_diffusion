@@ -270,6 +270,49 @@ class Block(torch.nn.Module):
 
 
 # ----------------------------------------------------------------------------
+# Shared encoder construction helpers.
+# Used by both UNet and ControlNet to avoid duplicated architecture code.
+
+def _encoder_channel_dims(base_channels, channel_mult, channel_mult_noise, channel_mult_emb):
+    """Compute (cblock, cnoise, cemb) from the standard multiplier args."""
+    cblock = [base_channels * x for x in channel_mult]
+    cnoise = base_channels * channel_mult_noise if channel_mult_noise is not None else cblock[0]
+    cemb = base_channels * channel_mult_emb if channel_mult_emb is not None else max(cblock)
+    return cblock, cnoise, cemb
+
+
+def _build_embeddings(cnoise, cemb, condition_dim):
+    """Return (emb_fourier, emb_noise, emb_label) embedding modules."""
+    emb_fourier = MPFourier(cnoise)
+    emb_noise = MPConv(cnoise, cemb, kernel=[])
+    emb_label = MPConv(condition_dim, cemb, kernel=[]) if condition_dim != 0 else None
+    return emb_fourier, emb_noise, emb_label
+
+
+def _encoder_blocks(resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs):
+    """Yield (name, block, cout) for every encoder stage in order.
+
+    The stem conv at level 0 receives ``in_channels + 1`` input channels
+    (the +1 is the constant ones channel added in ``forward``).
+    """
+    cout = in_channels + 1
+    for level, channels in enumerate(cblock):
+        res = resolution >> level
+        if level == 0:
+            cin, cout = cout, channels
+            yield f"{res}x{res}_conv", MPConv(cin, cout, kernel=[3]), cout
+        else:
+            yield f"{res}x{res}_down", Block(cout, cout, cemb, flavor="enc", resample_mode="down", **block_kwargs), cout
+        for idx in range(num_blocks):
+            cin, cout = cout, channels
+            yield (
+                f"{res}x{res}_block{idx}",
+                Block(cin, cout, cemb, flavor="enc", attention=(res in attn_resolutions), **block_kwargs),
+                cout,
+            )
+
+
+# ----------------------------------------------------------------------------
 # EDM2 U-Net model (Figure 21).
 
 class UNet(torch.nn.Module):
@@ -295,52 +338,33 @@ class UNet(torch.nn.Module):
         **block_kwargs,  # Arguments for Block.
     ):
         super().__init__()
-        cblock = [base_channels * x for x in channel_mult]
-        cnoise = (
-            base_channels * channel_mult_noise
-            if channel_mult_noise is not None
-            else cblock[0]
+        cblock, cnoise, cemb = _encoder_channel_dims(
+            base_channels, channel_mult, channel_mult_noise, channel_mult_emb
         )
-        cemb = (
-            base_channels * channel_mult_emb
-            if channel_mult_emb is not None
-            else max(cblock)
-        )
+        self.resolution = resolution
+        self.in_channels = in_channels
+        self.base_channels = base_channels
+        self.channel_mult = list(channel_mult)
+        self.channel_mult_noise = channel_mult_noise
+        self.channel_mult_emb = channel_mult_emb
+        self.num_blocks = num_blocks
+        self.attn_resolutions = list(attn_resolutions)
         self.label_balance = label_balance
         self.concat_balance = concat_balance
         self.out_gain = torch.nn.Parameter(torch.zeros([]))
 
         # Embedding.
-        self.emb_fourier = MPFourier(cnoise)
-        self.emb_noise = MPConv(cnoise, cemb, kernel=[])
-        self.emb_label = (
-            MPConv(condition_dim, cemb, kernel=[]) if condition_dim != 0 else None
+        self.emb_fourier, self.emb_noise, self.emb_label = _build_embeddings(
+            cnoise, cemb, condition_dim
         )
 
         # Encoder.
         self.enc = torch.nn.ModuleDict()
-        cout = in_channels + 1
-        for level, channels in enumerate(cblock):
-            res = resolution >> level
-            if level == 0:
-                cin = cout
-                cout = channels
-                self.enc[f"{res}x{res}_conv"] = MPConv(cin, cout, kernel=[3])
-            else:
-                self.enc[f"{res}x{res}_down"] = Block(
-                    cout, cout, cemb, flavor="enc", resample_mode="down", **block_kwargs
-                )
-            for idx in range(num_blocks):
-                cin = cout
-                cout = channels
-                self.enc[f"{res}x{res}_block{idx}"] = Block(
-                    cin,
-                    cout,
-                    cemb,
-                    flavor="enc",
-                    attention=(res in attn_resolutions),
-                    **block_kwargs,
-                )
+        cout = in_channels + 1  # updated by the loop; needed by the decoder
+        for name, block, cout in _encoder_blocks(
+            resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs
+        ):
+            self.enc[name] = block
 
         # Decoder.
         self.dec = torch.nn.ModuleDict()

@@ -14,7 +14,10 @@ model behaves identically to the unmodified UNet.
 import numpy as np
 import torch
 
-from .edm2 import Block, MPConv, MPFourier, mp_silu, mp_sum
+from .edm2 import (
+    MPConv, mp_silu, mp_sum,
+    _encoder_channel_dims, _build_embeddings, _encoder_blocks,
+)
 
 
 class ControlNet(torch.nn.Module):
@@ -34,66 +37,32 @@ class ControlNet(torch.nn.Module):
         **block_kwargs,         # Forwarded to Block (same as UNet).
     ):
         super().__init__()
-        cblock = [base_channels * x for x in channel_mult]
-        cnoise = (
-            base_channels * channel_mult_noise
-            if channel_mult_noise is not None
-            else cblock[0]
-        )
-        cemb = (
-            base_channels * channel_mult_emb
-            if channel_mult_emb is not None
-            else max(cblock)
+        cblock, cnoise, cemb = _encoder_channel_dims(
+            base_channels, channel_mult, channel_mult_noise, channel_mult_emb
         )
         self.resolution = resolution
         self.in_channels = in_channels
         self.label_balance = label_balance
 
         # Embedding layers — own copies, same architecture as UNet.
-        self.emb_fourier = MPFourier(cnoise)
-        self.emb_noise = MPConv(cnoise, cemb, kernel=[])
-        self.emb_label = (
-            MPConv(condition_dim, cemb, kernel=[]) if condition_dim != 0 else None
+        self.emb_fourier, self.emb_noise, self.emb_label = _build_embeddings(
+            cnoise, cemb, condition_dim
         )
 
         # Project (B, control_dim) → (B, in_channels * resolution).
         self.ctrl_linear = MPConv(control_dim, in_channels * resolution, kernel=[])
 
-        # Mirror UNet encoder (identical loop to UNet.__init__ lines 321-343).
+        # Mirror UNet encoder; attach zero-initialized output projections per stage.
         self.enc = torch.nn.ModuleDict()
         self.ctrl_conv = torch.nn.ModuleDict()
         self.ctrl_gain = torch.nn.ParameterDict()
 
-        cout = in_channels + 1
-        for level, channels in enumerate(cblock):
-            res = resolution >> level
-            if level == 0:
-                cin = cout
-                cout = channels
-                name = f"{res}x{res}_conv"
-                self.enc[name] = MPConv(cin, cout, kernel=[3])
-            else:
-                name = f"{res}x{res}_down"
-                self.enc[name] = Block(
-                    cout, cout, cemb, flavor="enc", resample_mode="down", **block_kwargs
-                )
+        for name, block, cout in _encoder_blocks(
+            resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs
+        ):
+            self.enc[name] = block
             self.ctrl_conv[name] = MPConv(cout, cout, kernel=[1])
             self.ctrl_gain[name] = torch.nn.Parameter(torch.zeros([]))
-
-            for idx in range(num_blocks):
-                cin = cout
-                cout = channels
-                name = f"{res}x{res}_block{idx}"
-                self.enc[name] = Block(
-                    cin,
-                    cout,
-                    cemb,
-                    flavor="enc",
-                    attention=(res in attn_resolutions),
-                    **block_kwargs,
-                )
-                self.ctrl_conv[name] = MPConv(cout, cout, kernel=[1])
-                self.ctrl_gain[name] = torch.nn.Parameter(torch.zeros([]))
 
     @classmethod
     def from_unet(cls, unet, control_dim, **block_kwargs):
@@ -118,83 +87,20 @@ class ControlNet(torch.nn.Module):
         """
         import copy
 
-        # --- Infer architecture kwargs from the UNet -----------------------
-        # Recover channel counts from the enc ModuleDict key names.
-        enc_keys = list(unet.enc.keys())
-        # Resolution of the first (largest) level: "RxR_conv" or "RxR_block0"
-        first_res = int(enc_keys[0].split("x")[0])
-        resolution = first_res
-
-        # in_channels: the stem conv has cin = in_channels + 1.
-        # MPConv stores weight as (out, in, *kernel), so in_channels = weight.shape[1].
-        stem_conv = unet.enc[enc_keys[0]]
-        in_channels = stem_conv.weight.shape[1] - 1
-
-        # Recover channel_mult, num_blocks, attn_resolutions from enc structure.
-        channel_mult = []
-        attn_resolutions = []
-        num_blocks = None
-
-        level_data = {}  # res → list of block names at that level
-        for key in enc_keys:
-            res_str = key.split("_")[0]  # e.g. "32x32"
-            level_data.setdefault(res_str, []).append(key)
-
-        base_channels = None
-        for res_str, keys in level_data.items():
-            res = int(res_str.split("x")[0])
-            # The block at this level that gives us the output channel count.
-            last_block = unet.enc[keys[-1]]
-            cout = last_block.out_channels
-            if base_channels is None:
-                # First level: stem conv, cout = base_channels * mult[0].
-                # We can infer base_channels from subsequent levels once we
-                # have the full list; defer until after the loop.
-                pass
-            channel_mult.append(cout)
-
-            # Count only block{idx} entries at this level for num_blocks.
-            blocks_at_level = [k for k in keys if "block" in k]
-            if num_blocks is None:
-                num_blocks = len(blocks_at_level)
-
-            # Check attention in the first block at this level (if any).
-            for k in blocks_at_level:
-                blk = unet.enc[k]
-                if hasattr(blk, "attn") and blk.attn is not None:
-                    attn_resolutions.append(res)
-                    break
-
-        # Infer base_channels: GCD of all channel counts should give it.
-        import math
-        base_channels = channel_mult[0]
-        for c in channel_mult[1:]:
-            base_channels = math.gcd(base_channels, c)
-        channel_mult = [c // base_channels for c in channel_mult]
-
-        # Embedding dimensions.
-        # emb_noise weight shape: (cemb, cnoise) — input to emb_noise comes from emb_fourier.
-        cnoise = unet.emb_noise.weight.shape[1]
-        cemb = unet.emb_noise.weight.shape[0]
-        channel_mult_noise = cnoise // base_channels if cnoise != channel_mult[0] * base_channels else None
-        channel_mult_emb = cemb // base_channels if cemb != max(c * base_channels for c in channel_mult) else None
-
         condition_dim = unet.emb_label.weight.shape[1] if unet.emb_label is not None else 0
-        label_balance = unet.label_balance
 
-        # --- Construct the ControlNet with the inferred architecture -------
         net = cls(
-            resolution=resolution,
-            in_channels=in_channels,
+            resolution=unet.resolution,
+            in_channels=unet.in_channels,
             control_dim=control_dim,
             condition_dim=condition_dim,
-            base_channels=base_channels,
-            channel_mult=channel_mult,
-            channel_mult_noise=channel_mult_noise,
-            channel_mult_emb=channel_mult_emb,
-            num_blocks=num_blocks,
-            attn_resolutions=attn_resolutions,
-            label_balance=label_balance,
+            base_channels=unet.base_channels,
+            channel_mult=unet.channel_mult,
+            channel_mult_noise=unet.channel_mult_noise,
+            channel_mult_emb=unet.channel_mult_emb,
+            num_blocks=unet.num_blocks,
+            attn_resolutions=unet.attn_resolutions,
+            label_balance=unet.label_balance,
             **block_kwargs,
         )
 
