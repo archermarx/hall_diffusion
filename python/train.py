@@ -257,8 +257,9 @@ def train(args):
 
     # Set up training and test data loaders
     scalars_in_tensor = config["model"].get("scalars_in_tensor", False)
-    train_dataset = thruster_data.ThrusterDataset(train_data_dir, scalars_in_tensor=scalars_in_tensor)
-    test_dataset = thruster_data.ThrusterDataset(test_data_dir, scalars_in_tensor=scalars_in_tensor)
+    downsample_res = config["model"].get("downsample_res", None)
+    train_dataset = thruster_data.ThrusterDataset(train_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
+    test_dataset = thruster_data.ThrusterDataset(test_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
 
     # Check that normalization is the same between training and test datasets
     assert train_dataset.norm == test_dataset.norm

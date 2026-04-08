@@ -11,7 +11,7 @@ import random
 from .normalization import Normalizer
 
 class ThrusterDataset(Dataset):
-    def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, scalars_in_tensor=False, files=None):
+    def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, scalars_in_tensor=False, files=None, downsample_res=None):
         super().__init__()
         self.dir = Path(dir)
         self.data_dir = self.dir / "data"
@@ -25,6 +25,11 @@ class ThrusterDataset(Dataset):
 
         self.metadata_grid = pd.read_csv(self.dir / "grid.csv")
         self.grid = self.metadata_grid["z (m)"].to_numpy()
+        self.downsample_res = downsample_res
+
+        if downsample_res is not None:
+            self.grid = np.linspace(self.grid[0], self.grid[-1], downsample_res)
+
         self.dx = self.grid[2] - self.grid[1]
         self.norm = Normalizer(dir)
         self.num_fields = len(self.norm.norm_tensor["names"])
@@ -87,6 +92,11 @@ class ThrusterDataset(Dataset):
             assert p.shape == (self.num_params, tensor.shape[1])
             tensor = torch.cat([tensor, p], dim=0)
             params = torch.tensor([])
+
+        if self.downsample_res is not None:
+            tensor = tensor.unsqueeze(0) # add batch dimension for interpolation
+            tensor = torch.nn.functional.interpolate(tensor, size=self.downsample_res, mode="linear", align_corners=True)
+            tensor = tensor.squeeze(0) # remove batch dimension
 
         return self.files[idx], params, tensor
 

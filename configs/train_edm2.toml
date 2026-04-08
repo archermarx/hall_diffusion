@@ -16,6 +16,8 @@ data_std = 0.5
 channels_per_head = 32
 # Whether to embed scalar parameters as constant channels in the input tensor. If false, parameters are passed as labels and embedded using a learned linear embedding layer.
 scalars_in_tensor = true
+# Resolution to downsample to for training. If not specified, uses the original resolution of the data.
+downsample_res = 64
 
 #=======================================================================================================================
 
@@ -65,7 +67,7 @@ weight_decay = 0.00
 # Folder to save results in
 out_dir = "saved_models/edm2"
 # Training data folder
-train_data_dir = "data/test_large"
+train_data_dir = "data/train_21"
 # test data folder
 test_data_dir = "data/test_small"
 
