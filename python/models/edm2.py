@@ -247,20 +247,17 @@ class Block(torch.nn.Module):
         x = mp_sum(x, y, t=self.res_balance)
 
         # Self-attention.
-        # Note: torch.nn.functional.scaled_dot_product_attention() could be used here,
-        # but we haven't done sufficient testing to verify that it produces identical results.
-
         if self.num_heads != 0:
             assert self.attn_qkv is not None
             assert self.attn_proj is not None
             y = self.attn_qkv(x)
+            # Shape: (B, heads, C_per_head, 3, L) — pixel-normalize across C_per_head, then split
             y = y.reshape(y.shape[0], self.num_heads, -1, 3, y.shape[2])
-            q, k, v = normalize(y, dim=2).unbind(3)  # pixel norm & split
-            w = torch.einsum("nhcq,nhck->nhqk", q, k / np.sqrt(q.shape[2])).softmax(
-                dim=3
-            )
-            y = torch.einsum("nhqk,nhck->nhcq", w, v)
-            y = self.attn_proj(y.reshape(*x.shape))
+            q, k, v = normalize(y, dim=2).unbind(3)  # (B, heads, C_per_head, L) each
+            # scaled_dot_product_attention expects (B, heads, L, C_per_head)
+            q, k, v = q.transpose(2, 3), k.transpose(2, 3), v.transpose(2, 3)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+            y = self.attn_proj(y.transpose(2, 3).reshape(*x.shape))
             x = mp_sum(x, y, t=self.attn_balance)
 
         # Clip activations.
