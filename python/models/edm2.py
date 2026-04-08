@@ -371,7 +371,7 @@ class UNet(torch.nn.Module):
                 )
         self.out_conv = MPConv(cout, in_channels, kernel=[3])
 
-    def forward(self, x, noise_labels, class_labels):
+    def forward(self, x, noise_labels, class_labels, controls=None):
         # Embedding.
         emb = self.emb_noise(self.emb_fourier(noise_labels))
         if self.emb_label is not None:
@@ -388,6 +388,13 @@ class UNet(torch.nn.Module):
         for name, block in self.enc.items():
             x = block(x) if "conv" in name else block(x, emb)
             skips.append(x)
+
+        # Inject ControlNet signals additively into skip list.
+        # Plain addition (not mp_sum) preserves the zero-init invariant:
+        # when controls are zero at init, skips are unchanged.
+        if controls is not None:
+            enc_keys = list(self.enc.keys())
+            skips = [skip + controls[key] for skip, key in zip(skips, enc_keys)]
 
         # Decoder.
         for name, block in self.dec.items():
@@ -426,7 +433,7 @@ class EDM2Denoiser(torch.nn.Module):
         self.logvar_linear = MPConv(logvar_channels, 1, kernel=[])
 
     def forward(
-        self, x, noise_std, condition_vector=None, return_logvar=False, **unet_kwargs
+        self, x, noise_std, condition_vector=None, return_logvar=False, controls=None, **unet_kwargs
     ):
         x = x.to(torch.float32)
         noise_std = noise_std.to(torch.float32).reshape(-1, 1, 1)
@@ -446,7 +453,7 @@ class EDM2Denoiser(torch.nn.Module):
 
         # Run the model.
         x_in = c_in * x
-        F_x = self.unet(x_in, c_noise, condition_vector, **unet_kwargs)
+        F_x = self.unet(x_in, c_noise, condition_vector, controls=controls, **unet_kwargs)
         D_x = c_skip * x + c_out * F_x.to(torch.float32)
 
         # Estimate uncertainty if requested.

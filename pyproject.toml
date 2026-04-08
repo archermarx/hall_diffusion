@@ -19,6 +19,10 @@ dependencies = [
 [tool.setuptools]
 py-modules = []
 
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+pythonpath = ["python"]
+
 [tool.ruff]
 line-length=120
 
@@ -40,4 +44,5 @@ torchvision = [
 [dependency-groups]
 dev = [
     "jupyterlab>=4.5.1",
+    "pytest>=9.0.3",
 ]
