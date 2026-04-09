@@ -1,3 +1,5 @@
+from dataclasses import field
+from attrs import field
 import os
 import numpy as np
 import torch
@@ -7,6 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import math
 import random
+import scipy.stats
 
 from .normalization import Normalizer
 
@@ -35,6 +38,10 @@ class ThrusterDataset(Dataset):
         self.num_fields = len(self.norm.norm_tensor["names"])
         self.num_params = len(self.norm.norm_params["names"])
         self.scalars_in_tensor = scalars_in_tensor
+        self.resolution = len(self.grid)
+
+        if self.scalars_in_tensor:
+            self.num_fields += self.num_params
 
     def write_metadata(self, path: Path | str):
         path = Path(path)
@@ -99,6 +106,55 @@ class ThrusterDataset(Dataset):
             tensor = tensor.squeeze(0) # remove batch dimension
 
         return self.files[idx], params, tensor
+
+    @staticmethod
+    def generate_measurements(sim: torch.Tensor):
+        """Mask whole and partial fields for conditioning, and add noise to unmasked pixels. Returns a precision mask and the resulting data tensor after masking and adding noise."""
+
+        def sample_mask(lo, hi):
+            return round(scipy.stats.beta(a=5, b=1).rvs() * (hi - lo) + lo)
+        
+        def sample_std(size=None):
+            return scipy.stats.beta(a=1, b=5).rvs(size) * 0.25
+
+        num_fields_to_mask = sample_mask(1, dataset.num_fields-1)
+        field_inds_to_mask = set(np.random.choice(dataset.num_fields, size=num_fields_to_mask, replace=False))
+        precision = torch.ones(dataset.num_fields, dataset.resolution, dtype=torch.float32)
+        masked_sim = torch.randn(sim.shape) * 0.5
+        num_fields = len(dataset.fields().keys())
+
+        for field_index in range(dataset.num_fields):
+            if field_index in field_inds_to_mask:
+                # Unobserved fields are set to zero precision.
+                precision[field_index, :] = 0.0
+            elif field_index >= num_fields:
+                # Parameters are masked uniformly in space and given a single uniform noise level.
+                std = sample_std()
+                masked_sim[field_index] = sim[field_index] + np.random.standard_normal() * std
+                precision[field_index, :] = 1 / std**2
+            else:
+                # Remove at least half of the pixels, but potentially up to all but one pixel
+                # The beta distribution biases toward removing more pixels.
+                num_pixels_to_remove = sample_mask(dataset.resolution // 2, dataset.resolution - 1)
+                num_pixels_left = dataset.resolution - num_pixels_to_remove
+
+                # Remove the decided number of pixels at random locations, creating a mask of which pixels were removed
+                pixels_to_remove = np.random.choice(dataset.resolution, size=num_pixels_to_remove, replace=False)
+                removal_mask = torch.zeros(dataset.resolution, dtype=torch.bool) 
+                removal_mask[pixels_to_remove] = True
+
+                # Set precision to 0 for removed pixels.
+                # The beta distribution biases toward smaller std (higher precision) but allows for some variability.
+                # The maximum allowed standard deviation is 0.25, as higher values would be unrealistic.
+                measurement_std = torch.tensor(sample_std(size=num_pixels_left), dtype=torch.float32)
+                precision[field_index, removal_mask] = 0.0
+                precision[field_index, ~removal_mask] = 1.0 / measurement_std**2
+                
+                # Add noise to the remaining pixels based on the sampled standard deviation
+                masked_sim[field_index, ~removal_mask] = sim[field_index, ~removal_mask] + torch.randn((num_pixels_left,), dtype=torch.float32) * measurement_std
+
+        return torch.log(1+precision), masked_sim
+
 
 
 class ThrusterPlotter1D:
@@ -214,16 +270,72 @@ class ThrusterPlotter1D:
 
         return fig, axes
 
-
 if __name__ == "__main__":
-    # Test loading and plotting
-    dataset = ThrusterDataset("data/training", None, 1)
-    batch_size = 4
+
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("data_dir", type=str, default="data/training")
+    args = parser.parse_args()
+
+    dataset = ThrusterDataset(args.data_dir, None, 1, scalars_in_tensor=True)
+    batch_size = 1
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     files, labels, sims = next(iter(loader))
-    sims = [sims[i] for i in range(batch_size)]
+    
+    names = [k for k in dataset.fields().keys()] + [k for k in dataset.params().keys()]
+    param_names = dataset.params().keys()
+    print(param_names)
 
-    plotter = ThrusterPlotter1D(dataset, sims)
-    fig, axes = plotter.plot(["nu_an", "ui_1", "ni_1", "E", "Tev", "nn"], denormalize=True, nrows=2)
-    fig.savefig("test.png")
+    sim = sims[0]
+    precision, measurements = ThrusterDataset.generate_measurements(sim)
+
+    sim_min, sim_max = -1, 1
+    sim_normalized = (sim - sim_min) / (sim_max - sim_min)
+    sim_rgb = sim_normalized.unsqueeze(2).repeat(1, 1, 3)
+    # Set masked pixels to magenta
+    sim_rgb[precision==0, :] = torch.tensor([1.0, 0.0, 1.0]) # Magenta color for masked pixels
+
+    fig, axs = plt.subplots(1, 3, figsize=(16,6), layout='constrained')
+    axs[0].imshow(sim_rgb, aspect='auto')
+    axs[1].imshow(precision, aspect='auto', cmap='gray')
+
+    # Remove green channel for masked pixels
+    masked_sim_rgb = measurements.unsqueeze(2).repeat(1, 1, 3)
+    masked_sim_rgb[precision==0, 1] = 0.0 # Set green channel to 0 for masked pixels
+    axs[2].imshow(masked_sim_rgb, aspect='auto', cmap='gray')
+
+    for (i, ax) in enumerate(axs):
+        ax.set(yticks = range(len(names)), yticklabels=names if i == 0 else [], xlabel = "Axial index")
+        ax.set_box_aspect(1)
+
+    axs[0].set_title(f"Sim with masked pixels in magenta")
+    axs[1].set_title(f"Measurement precision")
+    axs[2].set_title(f"Resulting data tensor")
+
+    # Need to add colorbar to right of second plot
+    cb = fig.colorbar(axs[1].images[0], ax=axs[1], location='right', shrink=0.5)
+    cb.set_label('log(1 / $\\sigma^2$)')
+
+    plt.show()
+
+    # Make 1D plots of each field showing original tensor and simulated data
+    for name, index in dataset.fields().items():
+        kept_index = precision[index] != 0
+        if sum(kept_index) == 0:
+            continue
+
+        fig, ax = plt.subplots(figsize=(8,4))
+        x = dataset.grid
+        ax.plot(x, sim[index].numpy(), label="Original sim")
+
+        precision_kept = precision[index, kept_index]
+        x_kept = x[kept_index]
+        sim_kept = measurements[index, kept_index].numpy()
+        error_bars = 2*torch.sqrt(1 / torch.exp(precision_kept)).numpy()
+        ax.scatter(x_kept, sim_kept, label="Simulated data with noise", color="orange", s=20, zorder=5)
+        ax.errorbar(x_kept, sim_kept, yerr=error_bars, fmt='none', ecolor='orange', alpha=0.5, zorder=4)
+        ax.set_title(name)
+        ax.set_xlabel("Axial index")
+        ax.legend()
+        plt.show()

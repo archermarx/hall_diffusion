@@ -5,12 +5,13 @@ import math
 import json
 import os
 import shutil
-from abc import ABC, abstractmethod
 import tomllib
+from pathlib import Path
+import pathlib
+from contextlib import contextmanager
 
 # External deps
 import numpy as np
-from pathlib import Path
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -228,7 +229,6 @@ def train_one_batch(
 
     return loss.item(), base_loss
 
-
 def train(args):
     config_file = args.config
 
@@ -284,11 +284,11 @@ def train(args):
     # Model configuration
     # Load model from config file and print some summary statistics
     # TODO: is there a need to specify input channels in the TOML file or can they always be inferred?
+
+    config["model"]["in_channels"] = train_dataset.num_fields
     if scalars_in_tensor:
-        config["model"]["in_channels"] = train_dataset.num_fields + train_dataset.num_params
         config["model"]["label_dim"] = 0
     else:
-        config["model"]["in_channels"] = train_dataset.num_fields
         config["model"]["label_dim"] = train_dataset.num_params
 
     config["model"]["resolution"] = len(train_dataset.grid)
@@ -334,6 +334,7 @@ def train(args):
     # Load checkpoint if found
     if load_checkpoint and os.path.exists(checkpoint_file):
         state = torch.load(checkpoint_file, weights_only=False)
+
         model.load_state_dict(state["model"])
         print("Model loaded from checkpoint")
         optimizer.load_state_dict(state["optimizer"])
@@ -537,6 +538,9 @@ def train(args):
             if os.path.exists(checkpoint_file):
                 shutil.move(checkpoint_file, old_checkpoint)
 
+            print(config["model"])
+            print(config["training"])
+
             out_dict = dict(
                 model=model.state_dict(),
                 model_config=config["model"],
@@ -547,7 +551,7 @@ def train(args):
                 ema=ema_model.state_dict(),
             )
 
-            torch.save(out_dict, checkpoint_file)
+            torch.save(utils.paths_to_strings(out_dict), checkpoint_file)
             progress.set_description(description(epoch_idx, batch_idx, "Plotting"))
 
             # Plot diagnostics

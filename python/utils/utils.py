@@ -7,6 +7,21 @@ import bisect
 import pandas as pd
 import tomllib
 import traceback
+from contextlib import contextmanager
+import pathlib
+
+def paths_to_strings(d: dict):
+    out = {}
+    for (k, v) in d.items():
+        if isinstance(v, pathlib.Path) or isinstance(v, pathlib.WindowsPath) or isinstance(v, pathlib.PosixPath):
+            out[k] = str(v)
+            print(f"Converted path {v} to string.")
+        elif isinstance(v, dict):
+            out[k] = paths_to_strings(v)
+        else:
+            out[k] = v
+
+    return out
 
 def get_script_dir():
     return Path(os.path.dirname(os.path.realpath(sys.argv[0])))
