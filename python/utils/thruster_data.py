@@ -11,7 +11,10 @@ import math
 import random
 import scipy.stats
 
-from .normalization import Normalizer
+if __name__ == "__main__":
+    from normalization import Normalizer
+else:
+    from .normalization import Normalizer
 
 class ThrusterDataset(Dataset):
     def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, scalars_in_tensor=False, files=None, downsample_res=None):
@@ -107,53 +110,66 @@ class ThrusterDataset(Dataset):
 
         return self.files[idx], params, tensor
 
-    @staticmethod
-    def generate_measurements(sim: torch.Tensor):
-        """Mask whole and partial fields for conditioning, and add noise to unmasked pixels. Returns a precision mask and the resulting data tensor after masking and adding noise."""
+    def generate_measurements(self, sim: torch.Tensor):
+        """Mask whole and partial fields for conditioning, and add noise to unmasked pixels.
+
+        Args:
+            sim: (B, num_fields, resolution) batch of simulations.
+
+        Returns:
+            precision:   (B, num_fields, resolution) log-precision tensor.
+            masked_sim:  (B, num_fields, resolution) noisy/masked simulation.
+        """
 
         def sample_mask(lo, hi):
             return round(scipy.stats.beta(a=5, b=1).rvs() * (hi - lo) + lo)
-        
+
         def sample_std(size=None):
             return scipy.stats.beta(a=1, b=5).rvs(size) * 0.25
 
-        num_fields_to_mask = sample_mask(1, dataset.num_fields-1)
-        field_inds_to_mask = set(np.random.choice(dataset.num_fields, size=num_fields_to_mask, replace=False))
-        precision = torch.ones(dataset.num_fields, dataset.resolution, dtype=torch.float32)
+        B = sim.shape[0]
+        num_spatial_fields = len(self.fields())
+        precision = torch.ones(B, self.num_fields, self.resolution, dtype=torch.float32)
         masked_sim = torch.randn(sim.shape) * 0.5
-        num_fields = len(dataset.fields().keys())
 
-        for field_index in range(dataset.num_fields):
-            if field_index in field_inds_to_mask:
-                # Unobserved fields are set to zero precision.
-                precision[field_index, :] = 0.0
-            elif field_index >= num_fields:
-                # Parameters are masked uniformly in space and given a single uniform noise level.
-                std = sample_std()
-                masked_sim[field_index] = sim[field_index] + np.random.standard_normal() * std
-                precision[field_index, :] = 1 / std**2
-            else:
-                # Remove at least half of the pixels, but potentially up to all but one pixel
-                # The beta distribution biases toward removing more pixels.
-                num_pixels_to_remove = sample_mask(dataset.resolution // 2, dataset.resolution - 1)
-                num_pixels_left = dataset.resolution - num_pixels_to_remove
+        for b in range(B):
+            num_fields_to_mask = sample_mask(1, self.num_fields - 1)
+            field_inds_to_mask = set(np.random.choice(self.num_fields, size=num_fields_to_mask, replace=False))
 
-                # Remove the decided number of pixels at random locations, creating a mask of which pixels were removed
-                pixels_to_remove = np.random.choice(dataset.resolution, size=num_pixels_to_remove, replace=False)
-                removal_mask = torch.zeros(dataset.resolution, dtype=torch.bool) 
-                removal_mask[pixels_to_remove] = True
+            for field_index in range(self.num_fields):
+                if field_index in field_inds_to_mask:
+                    # Unobserved fields are set to zero precision.
+                    precision[b, field_index, :] = 0.0
+                elif field_index >= num_spatial_fields:
+                    # Parameters are masked uniformly in space and given a single uniform noise level.
+                    std = sample_std()
+                    masked_sim[b, field_index] = sim[b, field_index] + np.random.standard_normal() * std
+                    precision[b, field_index, :] = 1 / std**2
+                else:
+                    # Remove at least half of the pixels, but potentially up to all but one pixel.
+                    # The beta distribution biases toward removing more pixels.
+                    num_pixels_to_remove = sample_mask(self.resolution // 2, self.resolution - 1)
+                    num_pixels_left = self.resolution - num_pixels_to_remove
 
-                # Set precision to 0 for removed pixels.
-                # The beta distribution biases toward smaller std (higher precision) but allows for some variability.
-                # The maximum allowed standard deviation is 0.25, as higher values would be unrealistic.
-                measurement_std = torch.tensor(sample_std(size=num_pixels_left), dtype=torch.float32)
-                precision[field_index, removal_mask] = 0.0
-                precision[field_index, ~removal_mask] = 1.0 / measurement_std**2
-                
-                # Add noise to the remaining pixels based on the sampled standard deviation
-                masked_sim[field_index, ~removal_mask] = sim[field_index, ~removal_mask] + torch.randn((num_pixels_left,), dtype=torch.float32) * measurement_std
+                    # Remove the decided number of pixels at random locations.
+                    pixels_to_remove = np.random.choice(self.resolution, size=num_pixels_to_remove, replace=False)
+                    removal_mask = torch.zeros(self.resolution, dtype=torch.bool)
+                    removal_mask[pixels_to_remove] = True
 
-        return torch.log(1+precision), masked_sim
+                    # Set precision to 0 for removed pixels.
+                    # The beta distribution biases toward smaller std (higher precision) but allows for some variability.
+                    # The maximum allowed standard deviation is 0.25, as higher values would be unrealistic.
+                    measurement_std = torch.tensor(sample_std(size=num_pixels_left), dtype=torch.float32)
+                    precision[b, field_index, removal_mask] = 0.0
+                    precision[b, field_index, ~removal_mask] = 1.0 / measurement_std**2
+
+                    # Add noise to the remaining pixels based on the sampled standard deviation.
+                    masked_sim[b, field_index, ~removal_mask] = (
+                        sim[b, field_index, ~removal_mask]
+                        + torch.randn((num_pixels_left,), dtype=torch.float32) * measurement_std
+                    )
+
+        return torch.log(1 + precision), masked_sim
 
 
 
@@ -287,8 +303,11 @@ if __name__ == "__main__":
     param_names = dataset.params().keys()
     print(param_names)
 
+    precision, measurements = dataset.generate_measurements(sims)
+
     sim = sims[0]
-    precision, measurements = ThrusterDataset.generate_measurements(sim)
+    precision = precision[0]
+    measurements = measurements[0]
 
     sim_min, sim_max = -1, 1
     sim_normalized = (sim - sim_min) / (sim_max - sim_min)
