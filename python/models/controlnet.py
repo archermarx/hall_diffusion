@@ -1,10 +1,12 @@
 """ControlNet adapter for the EDM2-style 1D UNet.
 
-The ControlNet mirrors the UNet encoder, takes a conditioning vector of
-dimension `control_dim`, projects it to (in_channels, resolution), runs it
-through the mirrored encoder, and returns a dict of zero-initialized control
-signals keyed by encoder stage name. These signals are injected additively
-into the UNet's skip-connection list before the decoder consumes them.
+The ControlNet mirrors the UNet encoder but replaces the stem conv's input
+with a (B, control_channels, resolution) control signal.  The stem conv
+projects control_channels → cblock[0] (base_channels at level 0), expanding
+rather than compressing, then the remaining mirrored encoder stages run as
+normal.  The output is a dict of zero-initialized control signals keyed by
+encoder stage name, injected additively into the UNet's skip-connection list
+before the decoder consumes them.
 
 At initialisation all control signals are exactly zero (via a learnable gain
 scalar starting at 0, matching the Block.emb_gain pattern), so the augmented
@@ -25,7 +27,7 @@ class ControlNet(torch.nn.Module):
         self,
         resolution,             # Must match UNet resolution.
         in_channels,            # Must match UNet in_channels.
-        control_dim,            # Dimensionality d of the (batch, d) control vector.
+        control_channels,       # Number of channels in the (B, control_channels, resolution) control signal.
         condition_dim,          # Must match UNet condition_dim. 0 = unconditional.
         base_channels=192,
         channel_mult=[1, 2, 3, 4, 5],
@@ -49,23 +51,28 @@ class ControlNet(torch.nn.Module):
             cnoise, cemb, condition_dim
         )
 
-        # Project (B, control_dim) → (B, in_channels * resolution).
-        self.ctrl_linear = MPConv(control_dim, in_channels * resolution, kernel=[])
-
-        # Mirror UNet encoder; attach zero-initialized output projections per stage.
+        # Mirror UNet encoder.  The stem conv is rebuilt with control_channels
+        # as its input (replacing in_channels + 1) so it expands directly into
+        # feature space without a separate projection layer.  All other blocks
+        # are kept identical to the UNet encoder.
         self.enc = torch.nn.ModuleDict()
         self.ctrl_conv = torch.nn.ModuleDict()
         self.ctrl_gain = torch.nn.ParameterDict()
 
+        first = True
         for name, block, cout in _encoder_blocks(
             resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs
         ):
+            if first:
+                # Replace stem conv input channels: control_channels → cblock[0].
+                block = MPConv(control_channels, cout, kernel=[3])
+                first = False
             self.enc[name] = block
             self.ctrl_conv[name] = MPConv(cout, cout, kernel=[1])
             self.ctrl_gain[name] = torch.nn.Parameter(torch.zeros([]))
 
     @classmethod
-    def from_unet(cls, unet, control_dim, **block_kwargs):
+    def from_unet(cls, unet, control_channels, **block_kwargs):
         """Build a ControlNet by copying weights from a trained UNet encoder.
 
         The ControlNet's embedding layers and encoder blocks are initialised
@@ -75,9 +82,10 @@ class ControlNet(torch.nn.Module):
         freshly initialised — they must be trained from scratch.
 
         Args:
-            unet:        A UNet instance whose embedding and encoder weights
-                         will be copied into the new ControlNet.
-            control_dim: Dimensionality of the (batch, d) control vector.
+            unet:             A UNet instance whose embedding and encoder weights
+                              will be copied into the new ControlNet.
+            control_channels: Number of channels in the (B, control_channels,
+                              resolution) control signal.
             **block_kwargs: Extra keyword arguments forwarded to ControlNet.__init__
                          (e.g. dropout).  Architecture hyperparameters are
                          inferred automatically from the UNet.
@@ -92,7 +100,7 @@ class ControlNet(torch.nn.Module):
         net = cls(
             resolution=unet.resolution,
             in_channels=unet.in_channels,
-            control_dim=control_dim,
+            control_channels=control_channels,
             condition_dim=condition_dim,
             base_channels=unet.base_channels,
             channel_mult=unet.channel_mult,
@@ -111,15 +119,17 @@ class ControlNet(torch.nn.Module):
             net.emb_label.load_state_dict(copy.deepcopy(unet.emb_label.state_dict()))
 
         for key in net.enc:
+            if "conv" in key:
+                continue  # stem conv has different input channels — cannot copy
             net.enc[key].load_state_dict(copy.deepcopy(unet.enc[key].state_dict()))
 
         return net
 
-    def forward(self, ctrl_vec, noise_labels, class_labels):
-        """Compute control signals from a conditioning vector.
+    def forward(self, ctrl, noise_labels, class_labels):
+        """Compute control signals from a spatial control input.
 
         Args:
-            ctrl_vec:     (B, control_dim) conditioning vector.
+            ctrl:         (B, control_channels, resolution) spatial control signal.
             noise_labels: (B,) pre-computed noise labels (log(sigma)/4),
                           same values used by the paired EDM2Denoiser call.
             class_labels: (B, condition_dim) class/parameter conditioning,
@@ -140,14 +150,9 @@ class ControlNet(torch.nn.Module):
             )
         emb = mp_silu(emb)
 
-        # Project control vector to spatial feature map.
-        B = ctrl_vec.shape[0]
-        x = self.ctrl_linear(ctrl_vec).reshape(B, self.in_channels, self.resolution)
-
-        # Add constant channel (same as UNet.forward).
-        x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
-
-        # Run mirrored encoder; apply zero-initialized output projections.
+        # Run mirrored encoder.  The stem conv (first block) accepts ctrl
+        # directly; remaining blocks are standard Block(x, emb) calls.
+        x = ctrl
         controls = {}
         for name, block in self.enc.items():
             x = block(x) if "conv" in name else block(x, emb)

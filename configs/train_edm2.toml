@@ -2,22 +2,22 @@
 # Architecture
 architecture = "edm2"
 # Number of up/down blocks at each level of the unet
-num_blocks = 3
+num_blocks = 2
 # Channels at top level
 base_channels = 64
 # Size of convolution kernel
 kernel_width = 3
 # Increase in channel count at each level
-channel_mult = [1, 2, 3, 4, 5]
+channel_mult = [1, 2, 3, 4]
 # Standard deviation of the data
 # The model works best if the data is normalized to a std of 0.5 and this argument is left untouched
 data_std = 0.5
 # Channels per attention head
-channels_per_head = 64
+channels_per_head = 32
 # Whether to embed scalar parameters as constant channels in the input tensor. If false, parameters are passed as labels and embedded using a learned linear embedding layer.
 scalars_in_tensor = true
 # Resolution to downsample to for training. If not specified, uses the original resolution of the data.
-downsample_res = 128
+downsample_res = 64
 
 #=======================================================================================================================
 
@@ -65,9 +65,9 @@ weight_decay = 0.00
 # Directory configuration
 [training.directories]
 # Folder to save results in
-out_dir = "saved_models/train_scalars"
+out_dir = "saved_models/train_scalars_lowres"
 # Training data folder
-train_data_dir = "data/train_21"
+train_data_dir = "data/test_large"
 # test data folder
 test_data_dir = "data/test_small"
 
@@ -76,4 +76,4 @@ test_data_dir = "data/test_small"
 # Whether to load from a checkpoint
 load_checkpoint = true
 # Frequency in batches with which checkpoints are saved. Set to -1 to disable checkpointing
-checkpoint_save_freq = 20
+checkpoint_save_freq = 100

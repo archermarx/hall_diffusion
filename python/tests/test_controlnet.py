@@ -16,7 +16,7 @@ from models.edm2 import EDM2Denoiser
 RESOLUTION = 32       # small for speed
 IN_CHANNELS = 4
 CONDITION_DIM = 3
-CONTROL_DIM = 8
+CONTROL_CHANNELS = 10  # intentionally larger than IN_CHANNELS
 BASE_CHANNELS = 16    # small for speed
 CHANNEL_MULT = [1, 2, 3]
 NUM_BLOCKS = 1
@@ -46,7 +46,7 @@ def denoiser(arch_kwargs):
 
 @pytest.fixture
 def controlnet(arch_kwargs):
-    net = ControlNet(control_dim=CONTROL_DIM, **arch_kwargs)
+    net = ControlNet(control_channels=CONTROL_CHANNELS, **arch_kwargs)
     net.eval()
     return net
 
@@ -58,14 +58,14 @@ def inputs():
     x = torch.randn(BATCH, IN_CHANNELS, RESOLUTION)
     noise_std = torch.rand(BATCH, 1, 1) * 0.5 + 0.1
     condition_vector = torch.randn(BATCH, CONDITION_DIM)
-    ctrl_vec = torch.randn(BATCH, CONTROL_DIM)
+    ctrl = torch.randn(BATCH, CONTROL_CHANNELS, RESOLUTION)
     # c_noise is the pre-computed noise label expected by ControlNet.forward
     c_noise = (noise_std.flatten().log() / 4)
     return dict(
         x=x,
         noise_std=noise_std,
         condition_vector=condition_vector,
-        ctrl_vec=ctrl_vec,
+        ctrl=ctrl,
         c_noise=c_noise,
     )
 
@@ -78,7 +78,7 @@ def test_controls_are_zero_at_init(controlnet, inputs):
     """All control tensors must be exactly zero before any training step."""
     with torch.no_grad():
         controls = controlnet(
-            inputs["ctrl_vec"],
+            inputs["ctrl"],
             inputs["c_noise"],
             inputs["condition_vector"],
         )
@@ -97,7 +97,7 @@ def test_control_shapes_match_encoder_skips(controlnet, denoiser, inputs):
     """controls[key].shape must equal the corresponding encoder skip shape."""
     with torch.no_grad():
         controls = controlnet(
-            inputs["ctrl_vec"],
+            inputs["ctrl"],
             inputs["c_noise"],
             inputs["condition_vector"],
         )
@@ -134,7 +134,7 @@ def test_denoiser_output_identical_with_zero_controls(denoiser, controlnet, inpu
     """denoiser(x, controls=zero_controls) == denoiser(x, controls=None) at init."""
     with torch.no_grad():
         controls = controlnet(
-            inputs["ctrl_vec"],
+            inputs["ctrl"],
             inputs["c_noise"],
             inputs["condition_vector"],
         )
@@ -175,7 +175,7 @@ def test_ctrl_gain_receives_gradients_when_unet_frozen(denoiser, controlnet, inp
     denoiser.train()
 
     controls = controlnet(
-        inputs["ctrl_vec"],
+        inputs["ctrl"],
         inputs["c_noise"],
         inputs["condition_vector"],
     )
@@ -221,7 +221,7 @@ def test_controls_nonzero_after_training_step(denoiser, controlnet, inputs):
     optimizer.zero_grad()
 
     controls = controlnet(
-        inputs["ctrl_vec"],
+        inputs["ctrl"],
         inputs["c_noise"],
         inputs["condition_vector"],
     )
@@ -238,7 +238,7 @@ def test_controls_nonzero_after_training_step(denoiser, controlnet, inputs):
     controlnet.eval()
     with torch.no_grad():
         controls_after = controlnet(
-            inputs["ctrl_vec"],
+            inputs["ctrl"],
             inputs["c_noise"],
             inputs["condition_vector"],
         )
@@ -255,13 +255,17 @@ def test_controls_nonzero_after_training_step(denoiser, controlnet, inputs):
 
 def test_from_unet_copies_encoder_weights(denoiser, inputs):
     """ControlNet.from_unet must produce identical encoder outputs to the UNet."""
-    net = ControlNet.from_unet(denoiser.unet, control_dim=CONTROL_DIM)
+    net = ControlNet.from_unet(denoiser.unet, control_channels=CONTROL_CHANNELS)
 
     # Architecture must match.
     assert list(net.enc.keys()) == list(denoiser.unet.enc.keys())
 
     # Encoder weights must be equal (deep copies, not aliases).
+    # The stem conv is intentionally excluded — it takes control_channels as
+    # input (not in_channels + 1) so its weights cannot be copied from the UNet.
     for key in net.enc:
+        if "conv" in key:
+            continue  # stem conv weights differ by design
         cn_sd = net.enc[key].state_dict()
         unet_sd = denoiser.unet.enc[key].state_dict()
         for param_name in unet_sd:
@@ -271,6 +275,8 @@ def test_from_unet_copies_encoder_weights(denoiser, inputs):
 
     # Encoder weights must be copies, not the same tensors.
     for key in net.enc:
+        if "conv" in key:
+            continue
         cn_sd = net.enc[key].state_dict()
         unet_sd = denoiser.unet.enc[key].state_dict()
         for param_name in unet_sd:
@@ -288,7 +294,7 @@ def test_from_unet_copies_encoder_weights(denoiser, inputs):
     # Zero-init invariant still holds after copying encoder weights.
     net.eval()
     with torch.no_grad():
-        controls = net(inputs["ctrl_vec"], inputs["c_noise"], inputs["condition_vector"])
+        controls = net(inputs["ctrl"], inputs["c_noise"], inputs["condition_vector"])
     for key, tensor in controls.items():
         assert tensor.abs().max().item() == 0.0, (
             f"Control '{key}' is non-zero at init even after from_unet"
