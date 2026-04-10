@@ -538,9 +538,6 @@ def train(args):
             if os.path.exists(checkpoint_file):
                 shutil.move(checkpoint_file, old_checkpoint)
 
-            print(config["model"])
-            print(config["training"])
-
             out_dict = dict(
                 model=model.state_dict(),
                 model_config=config["model"],
