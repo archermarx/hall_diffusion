@@ -23,15 +23,15 @@ downsample_res = 64
 
 [training]
 # Number of complete passes through the training data to complete
-epochs = 12000
+epochs = 1024
 # Training mini-batch size
 batch_size = 2048
 # Weight decay rate
 weight_decay = 0.00
 # Frequency in batches with which the model is tested on the validation set
 eval_freq = 100
-# Exponential moving average factor. Set to 1 to disable
-ema = 0.995
+# Exponential moving average factor. If omitted, auto-computed using EDM2 heuristic: t_half = 5% of total training images.
+# ema = 0.9999989
 # Whether to use automatic mixed precision (float16 where possible)
 use_amp = true
 # Log file name

@@ -6,20 +6,15 @@ class EMA:
         self.step_start = step_start
 
     def update_model_average(self, ema_model, model):
-        for current_param, ema_param in zip(model.parameters(), ema_model.parameters()):
-            old_weight, new_weight = ema_param.data, current_param.data
-            ema_param.data = self.update_average(old_weight, new_weight)
+        for old_param, new_param in zip(ema_model.parameters(), model.parameters()):
+            old_weight, new_weight = old_param.data, new_param.data
+            new_param.data = self.beta * old_weight + (1 - self.beta) * new_weight
 
-    def update_average(self, old, new):
-        return old * self.beta + (1 - self.beta) * new
-    
     def step_ema(self, ema_model, model):
         if self.step < self.step_start:
             self.reset_parameters(ema_model, model)
-            self.step +=1
-            return
-
-        self.update_model_average(ema_model, model)
+        else:
+            self.update_model_average(ema_model, model)
         self.step += 1
 
     def reset_parameters(self, ema_model, model):
