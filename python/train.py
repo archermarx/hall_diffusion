@@ -38,10 +38,6 @@ torch.manual_seed(10)
 SCRIPT_DIR = utils.get_script_dir()
 ROOT_DIR = SCRIPT_DIR / ".."
 
-# Noise levels at which we plot progress during training
-NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 0.75]
-
-
 @dataclass
 class TrainingState:
     """Bundles all mutable training state: model components and running metrics."""
@@ -80,7 +76,7 @@ def validation_loss(
     epoch_idx=0,
     out_folder=Path("."),
     data_dir: Path | str = "data/training",
-):
+) -> float:
     """Evaluate the loss on the validation set. Optionally visualize denoising progress, saving images to out_folder."""
     model.eval()
 
@@ -92,7 +88,7 @@ def validation_loss(
             vec = vec.float().to(DEVICE)
             _, loss, *_ = loss_fn(x, model, condition_vec=vec)
             losses.append(loss)
-    loss = np.mean(losses)
+    loss = float(np.mean(losses))
 
     if visualize:
         # Load first batch with fixed noise to visualize results
@@ -101,7 +97,7 @@ def validation_loss(
             vec = vec.float().to(DEVICE)
             y = y.float().to(DEVICE)
             noise_std = torch.rand((y.shape[0], 1, 1), device=DEVICE)
-            fixed_noise = torch.tensor(NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
+            fixed_noise = torch.tensor(visualization.NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
             noise_std[: len(fixed_noise), 0, 0] = fixed_noise
 
             _, _, noisy_im, denoise_pred = loss_fn(
@@ -109,17 +105,16 @@ def validation_loss(
             )
 
             suptitle = f"Epoch: {epoch_idx + 1:04d}, Loss: {loss:.4f}"
-            fig, _ = visualize_denoising(
+            visualization.plot_denoising_2d(
                 len(fixed_noise),
                 noisy_image=noisy_im.cpu(),
                 denoised_prediction=denoise_pred.cpu(),
                 ground_truth=y.cpu(),
                 title=suptitle,
+                folder=out_folder,
             )
-            fig.savefig(out_folder / "denoise_2d.png")
-            plt.close(fig)
 
-            visualize_denoising_1d(
+            visualization.plot_denoising_1d(
                 noisy_im.cpu(),
                 denoise_pred.cpu(),
                 y.cpu(),
@@ -128,71 +123,6 @@ def validation_loss(
             )
 
     return loss
-
-
-def visualize_denoising(N, noisy_image, denoised_prediction, ground_truth, title=""):
-    """Plot noised and denoised tensors for N noise levels."""
-    fig, axes = plt.subplots(3, N, constrained_layout=True, figsize=(7, 5.5))
-
-    data = (noisy_image, denoised_prediction, ground_truth)
-
-    if title:
-        fig.suptitle(title)
-
-    fig.supxlabel("Noise std. dev")
-
-    titles = [f"$\\sigma = {sigma}$" for sigma in NOISE_LEVELS_FOR_PLOTTING]
-    ylabels = ["Noisy", "Denoised", "Original"]
-
-    for irow, (row, dataset) in enumerate(zip(axes, data)):
-        for icol, ax in enumerate(row):
-            ax.imshow(
-                dataset[icol, ...],
-                aspect="auto",
-                vmin=-1.5,
-                vmax=1.5,
-                interpolation="none",
-                cmap="gray",
-            )
-            if icol == 0:
-                ax.set_ylabel(
-                    ylabels[irow], rotation="horizontal", va="center", ha="right"
-                )
-            if irow == 2:
-                ax.set_xlabel(titles[icol])
-
-            ax.set_xticks([])
-            ax.set_yticks([])
-            for direction in ["top", "left", "bottom", "right"]:
-                ax.spines[direction].set_visible(False)
-
-    return fig, axes
-
-
-def visualize_denoising_1d(
-    noisy_image,
-    denoised_prediction,
-    ground_truth,
-    folder=Path("."),
-    data_dir: Path | str = "data/training",
-):
-    """Plot 1D plasma properties with and without noise for a few example simulations."""
-    dataset = thruster_data.ThrusterDataset(Path(data_dir), None, 1)
-    colors = ["tab:blue", "tab:blue", "black"]
-    alphas = [0.25, 1.0, 1.0]
-    for i, sigma in enumerate(NOISE_LEVELS_FOR_PLOTTING):
-        plotter = thruster_data.ThrusterPlotter1D(
-            dataset,
-            [noisy_image[i], denoised_prediction[i], ground_truth[i]],
-            colors=colors,
-            alphas=alphas,
-        )
-        fig, _ = plotter.plot(
-            ["nu_an", "ui_1", "ni_1", "Tev", "phi", "E"], denormalize=True, nrows=2
-        )
-        fig.savefig(folder / f"denoise_1d_{sigma}.png")
-        plt.close(fig)
-
 
 def update_lr(optimizer, batch_idx, batch_size, ref_lr, decay_batches, min_lr):
     """Update the learning rate for all optimizer parameter groups and return the new lr."""

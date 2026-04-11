@@ -3,6 +3,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from . import thruster_data
+
+# Noise levels at which we plot progress during training
+NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 0.75]
 
 def plot_training_progress(log_file, out_dir, evaluation_iters, outlier_inds, outlier_losses):
     plot_df = pd.read_csv(log_file)
@@ -33,3 +37,67 @@ def plot_training_progress(log_file, out_dir, evaluation_iters, outlier_inds, ou
 
     fig.savefig(Path(out_dir) / "loss_prog.png", dpi=200)
     plt.close(fig)
+
+
+def plot_denoising_2d(N, noisy_image, denoised_prediction, ground_truth, title="", folder=Path(".")):
+    """Plot noised and denoised tensors for N noise levels."""
+    fig, axes = plt.subplots(3, N, constrained_layout=True, figsize=(7, 5.5))
+
+    data = (noisy_image, denoised_prediction, ground_truth)
+
+    if title:
+        fig.suptitle(title)
+
+    fig.supxlabel("Noise std. dev")
+
+    titles = [f"$\\sigma = {sigma}$" for sigma in NOISE_LEVELS_FOR_PLOTTING]
+    ylabels = ["Noisy", "Denoised", "Original"]
+
+    for irow, (row, dataset) in enumerate(zip(axes, data)):
+        for icol, ax in enumerate(row):
+            ax.imshow(
+                dataset[icol, ...],
+                aspect="auto",
+                vmin=-1.5,
+                vmax=1.5,
+                interpolation="none",
+                cmap="gray",
+            )
+            if icol == 0:
+                ax.set_ylabel(
+                    ylabels[irow], rotation="horizontal", va="center", ha="right"
+                )
+            if irow == 2:
+                ax.set_xlabel(titles[icol])
+
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for direction in ["top", "left", "bottom", "right"]:
+                ax.spines[direction].set_visible(False)
+
+    fig.savefig(folder / "denoise_2d.png")
+    plt.close(fig)
+
+def plot_denoising_1d(
+    noisy_image,
+    denoised_prediction,
+    ground_truth,
+    folder=Path("."),
+    data_dir: Path | str = "data/training",
+):
+    """Plot 1D plasma properties with and without noise for a few example simulations."""
+    dataset = thruster_data.ThrusterDataset(Path(data_dir), None, 1)
+    colors = ["tab:blue", "tab:blue", "black"]
+    alphas = [0.25, 1.0, 1.0]
+    for i, sigma in enumerate(NOISE_LEVELS_FOR_PLOTTING):
+        plotter = thruster_data.ThrusterPlotter1D(
+            dataset,
+            [noisy_image[i], denoised_prediction[i], ground_truth[i]],
+            colors=colors,
+            alphas=alphas,
+        )
+        fig, _ = plotter.plot(
+            ["nu_an", "ui_1", "ni_1", "Tev", "phi", "E"], denormalize=True, nrows=2
+        )
+        fig.savefig(folder / f"denoise_1d_{sigma}.png")
+        plt.close(fig)
