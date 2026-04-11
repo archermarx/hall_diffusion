@@ -203,7 +203,7 @@ def update_lr(optimizer, batch_idx, batch_size, ref_lr, decay_batches, min_lr):
 
 def compute_grad_norm(model):
     """Compute the global gradient norm across all model parameters."""
-    grads = [p.grad.detach().flatten().cpu() for p in model.parameters() if p.grad is not None]
+    grads = [p.grad.detach().flatten() for p in model.parameters() if p.grad is not None]
     norm = torch.concat(grads).norm().item() if grads else 0.0
     if not np.isfinite(norm):
         print(f"Warning: non-finite gradient norm encountered: {norm}")
@@ -496,7 +496,9 @@ def train(args):
                 prof_ctx.step()
 
             lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, decay_batches, min_lr)
-            grad_norm = compute_grad_norm(state.model)
+
+            with timer.section("grad_norm"):
+                grad_norm = compute_grad_norm(state.model)
 
             # Save outliers for later inspection and analysis
             # We check outliers by comparing the batch loss to recent validation losses
