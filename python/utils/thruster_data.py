@@ -1,5 +1,3 @@
-from dataclasses import field
-from attrs import field
 import os
 import numpy as np
 import torch
@@ -9,7 +7,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import math
 import random
-import scipy.stats
 
 if __name__ == "__main__":
     from normalization import Normalizer
@@ -117,61 +114,67 @@ class ThrusterDataset(Dataset):
             sim: (B, num_fields, resolution) batch of simulations.
 
         Returns:
-            precision:   (B, num_fields, resolution) log-precision tensor.
-            masked_sim:  (B, num_fields, resolution) noisy/masked simulation.
+            condition_tensor: (B, 2*num_fields, resolution) log-precision and noisy/masked simulation.
         """
-
-        def sample_mask(lo, hi):
-            return round(scipy.stats.beta(a=5, b=1).rvs() * (hi - lo) + lo)
-
-        def sample_std(size=None):
-            return scipy.stats.beta(a=1, b=5).rvs(size) * 0.25
-
         B = sim.shape[0]
-        num_spatial_fields = len(self.fields())
-        precision = torch.ones(B, self.num_fields, self.resolution, dtype=torch.float32)
-        masked_sim = torch.randn(sim.shape) * 0.5
+        num_spatial = len(self.fields())
+        num_params = self.num_fields - num_spatial
+        res = self.resolution
+        dev = sim.device
 
-        for b in range(B):
-            num_fields_to_mask = sample_mask(1, self.num_fields - 1)
-            field_inds_to_mask = set(np.random.choice(self.num_fields, size=num_fields_to_mask, replace=False))
+        # Beta(5,1) ~ U^0.2  and  Beta(1,5) ~ 1 - U^0.2  (inverse-CDF trick for Beta(a,1)/Beta(1,b))
+        # This keeps all sampling on-device with no CPU transfers.
+        def beta_hi(shape):  # Beta(5,1): biased toward 1
+            return torch.rand(shape, device=dev) ** 0.2
 
-            for field_index in range(self.num_fields):
-                if field_index in field_inds_to_mask:
-                    # Unobserved fields are set to zero precision.
-                    precision[b, field_index, :] = 0.0
-                elif field_index >= num_spatial_fields:
-                    # Parameters are masked uniformly in space and given a single uniform noise level.
-                    std = sample_std()
-                    masked_sim[b, field_index] = sim[b, field_index] + np.random.standard_normal() * std
-                    precision[b, field_index, :] = 1 / std**2
-                else:
-                    # Remove at least half of the pixels, but potentially up to all but one pixel.
-                    # The beta distribution biases toward removing more pixels.
-                    num_pixels_to_remove = sample_mask(self.resolution // 2, self.resolution - 1)
-                    num_pixels_left = self.resolution - num_pixels_to_remove
+        def beta_lo(shape):  # Beta(1,5): biased toward 0
+            return 1.0 - torch.rand(shape, device=dev) ** 0.2
 
-                    # Remove the decided number of pixels at random locations.
-                    pixels_to_remove = np.random.choice(self.resolution, size=num_pixels_to_remove, replace=False)
-                    removal_mask = torch.zeros(self.resolution, dtype=torch.bool)
-                    removal_mask[pixels_to_remove] = True
+        # --- Field masking ---
+        # Sample a mask probability per sample; Beta(5,1) biases toward masking more fields.
+        p_mask = beta_hi((B,))  # (B,)
+        field_masked = torch.rand(B, self.num_fields, device=dev) < p_mask[:, None]  # (B, num_fields)
 
-                    # Set precision to 0 for removed pixels.
-                    # The beta distribution biases toward smaller std (higher precision) but allows for some variability.
-                    # The maximum allowed standard deviation is 0.25, as higher values would be unrealistic.
-                    measurement_std = torch.tensor(sample_std(size=num_pixels_left), dtype=torch.float32)
-                    precision[b, field_index, removal_mask] = 0.0
-                    precision[b, field_index, ~removal_mask] = 1.0 / measurement_std**2
+        # --- Initialize outputs (masked/removed entries keep random noise) ---
+        precision = torch.zeros(B, self.num_fields, res, device=dev)
+        masked_sim = torch.randn(B, self.num_fields, res, device=dev) * 0.5
 
-                    # Add noise to the remaining pixels based on the sampled standard deviation.
-                    masked_sim[b, field_index, ~removal_mask] = (
-                        sim[b, field_index, ~removal_mask]
-                        + torch.randn((num_pixels_left,), dtype=torch.float32) * measurement_std
-                    )
+        # --- Spatial fields ---
+        sf_mask = field_masked[:, :num_spatial]  # (B, num_spatial)
 
-        return torch.log(1 + precision), masked_sim
+        # Sample a removal probability per (b, f); Beta(5,1) biases toward removing more pixels.
+        p_remove = beta_hi((B, num_spatial))  # (B, num_spatial)
+        pixel_kept = torch.rand(B, num_spatial, res, device=dev) >= p_remove[:, :, None]  # (B, num_spatial, res)
 
+        # Beta(1,5) biases toward smaller std (higher precision); max std = 0.25.
+        stds_s = beta_lo((B, num_spatial, res)) * 0.25
+        noise_s = torch.randn(B, num_spatial, res, device=dev) * stds_s
 
+        active_s = (~sf_mask[:, :, None]) & pixel_kept  # unmasked field + kept pixel
+        masked_sim[:, :num_spatial] = torch.where(
+            active_s, sim[:, :num_spatial] + noise_s, masked_sim[:, :num_spatial]
+        )
+        precision[:, :num_spatial] = torch.where(active_s, 1.0 / stds_s**2, torch.zeros_like(stds_s))
+
+        # --- Parameter fields (constant across space; single noise draw per field) ---
+        if num_params > 0:
+            pf_mask = field_masked[:, num_spatial:]  # (B, num_params)
+
+            stds_p = beta_lo((B, num_params)) * 0.25
+            noise_p = torch.randn(B, num_params, device=dev) * stds_p
+
+            active_p = ~pf_mask  # (B, num_params)
+            masked_sim[:, num_spatial:] = torch.where(
+                active_p[:, :, None],
+                sim[:, num_spatial:] + noise_p[:, :, None],
+                masked_sim[:, num_spatial:],
+            )
+            precision[:, num_spatial:] = torch.where(
+                active_p[:, :, None], (1.0 / stds_p**2)[:, :, None], torch.zeros_like(precision[:, num_spatial:])
+            )
+
+        condition_tensor = torch.cat([torch.log(precision + 1), masked_sim], dim=1)
+        return condition_tensor
 
 class ThrusterPlotter1D:
     def __init__(
@@ -294,7 +297,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     dataset = ThrusterDataset(args.data_dir, None, 1, scalars_in_tensor=True)
-    batch_size = 1
+    batch_size = 2
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     files, labels, sims = next(iter(loader))
@@ -303,7 +306,9 @@ if __name__ == "__main__":
     param_names = dataset.params().keys()
     print(param_names)
 
-    precision, measurements = dataset.generate_measurements(sims)
+    condition_tensor = dataset.generate_measurements(sims)
+    precision = condition_tensor[:, :dataset.num_fields, :]
+    measurements = condition_tensor[:, dataset.num_fields:, :]
 
     sim = sims[0]
     precision = precision[0]
