@@ -160,12 +160,6 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False):
         loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec)
         loss.backward()
 
-    # Make sure gradients are finite
-    # For some reason, this causes strange training dynamics (stair-stepping, grad norms approach zero)
-    # for param in state.model.parameters():
-    #     if param.grad is not None:
-    #         torch.nan_to_num(param.grad, nan=0, posinf=0, neginf=0, out=param.grad)
-
     if use_amp:
         state.scaler.step(state.optimizer)
         state.scaler.update()
@@ -363,14 +357,7 @@ def train(args):
 
             _, batch_loss = train_one_batch(y, state, loss_fn, condition_vec=vec, use_amp=use_amp)
             lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, decay_batches, min_lr)
-            # Without the grad checks, we still hit non-finite grad norms occasionally.
-            # Despite that, things seem to keep chugging along -- these must have been the cause of the stair-steps.
             grad_norm = compute_grad_norm(state.model)
-
-            # Exit on encountering a non-finite batch loss
-            if not np.isfinite(batch_loss):
-                print("Non-finite batch loss detected. Exiting")
-                return
 
             # Save outliers for later inspection and analysis
             # We check outliers by comparing the batch loss to recent validation losses
