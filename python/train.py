@@ -146,6 +146,8 @@ def compute_grad_norm(model):
     """Compute the global gradient norm across all model parameters."""
     grads = [p.grad.detach().flatten().cpu() for p in model.parameters() if p.grad is not None]
     norm = torch.concat(grads).norm().item() if grads else 0.0
+    if not np.isfinite(norm):
+        print("Warning: non-finite gradient norm encountered: {norm}")
     return norm
 
 
