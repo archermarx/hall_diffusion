@@ -121,6 +121,15 @@ class ControlNet(torch.nn.Module):
         if net.emb_label is not None and unet.emb_label is not None:
             net.emb_label.load_state_dict(copy.deepcopy(unet.emb_label.state_dict()))
 
+        # Freeze embeddings — they are copied so the ControlNet encoder
+        # processes noise-level and class conditioning in the same
+        # representation space as the UNet.  Allowing them to drift would
+        # misalign the injected controls with the UNet decoder's expectations.
+        net.emb_fourier.requires_grad_(False)
+        net.emb_noise.requires_grad_(False)
+        if net.emb_label is not None:
+            net.emb_label.requires_grad_(False)
+
         for key in net.enc:
             if "conv" in key:
                 continue  # stem conv has different input channels — cannot copy
@@ -178,6 +187,19 @@ class ControlNetDenoiser(torch.nn.Module):
         super().__init__()
         self.denoiser = denoiser    # frozen — requires_grad_(False) at construction
         self.controlnet = controlnet  # trainable
+
+    def train(self, mode: bool = True):
+        """Keep the frozen denoiser in eval mode regardless of the training flag.
+
+        nn.Module.train() propagates to all submodules, which would put the
+        denoiser's MPConv layers into training mode and trigger forced weight
+        normalization (self.weight.copy_(...)) on every forward pass.  That
+        in-place write accumulates floating-point rounding error into the
+        frozen weights over thousands of steps.
+        """
+        super().train(mode)
+        self.denoiser.eval()   # always eval — never touch frozen weights
+        return self
 
     def forward(self, x, noise_std, condition_vector=None, ctrl=None, return_logvar=False):
         controls = None

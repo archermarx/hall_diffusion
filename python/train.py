@@ -14,7 +14,6 @@ from typing import Any
 # External deps
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # Pytorch deps
