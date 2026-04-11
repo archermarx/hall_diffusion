@@ -1,17 +1,19 @@
 # Python deps
 import argparse
 import copy
+import itertools
 import math
 import json
 import os
 import shutil
 import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
-import pathlib
-from contextlib import contextmanager
+from typing import Any
 
 # External deps
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -25,13 +27,12 @@ import models
 from models.ema import EMA
 from loss import LossFunction
 from noise import NoiseSampler
-from utils import utils, thruster_data
+from utils import utils, thruster_data, visualization
 
 DEVICE = utils.get_device()
 
-# Set RNG seed and save initial seeded RNG state
+# Set RNG seed
 torch.manual_seed(10)
-start_state = torch.get_rng_state()
 
 # Get directory in which script is being run as well as the root directory of the project.
 SCRIPT_DIR = utils.get_script_dir()
@@ -40,11 +41,30 @@ ROOT_DIR = SCRIPT_DIR / ".."
 # Noise levels at which we plot progress during training
 NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 0.75]
 
-# ----------------------------------------------------------------------------
-# Learning rate decay schedule used in the paper "Analyzing and Improving the Training Dynamics of Diffusion Models". (EDM2)
+
+@dataclass
+class TrainingState:
+    """Bundles all mutable training state: model components and running metrics."""
+    model: Any
+    ema_model: Any
+    optimizer: Any
+    ema: Any
+    scaler: Any
+    val_loss: float = math.inf
+    ema_loss: float = math.inf
+    best_loss: float = math.inf
+    best_params: Any = None
+    outlier_inds: list = field(default_factory=list)
+    outlier_losses: list = field(default_factory=list)
+    outliers: dict = field(default_factory=dict)
+    batch_idx: int = -1
+    example_idx: int = -1
+
+
 def learning_rate_schedule(
     cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3, rampup_batches=0
 ):
+    """Learning rate decay schedule from "Analyzing and Improving the Training Dynamics of Diffusion Models" (EDM2)."""
     lr = ref_lr
     if ref_batches > 0:
         lr /= np.sqrt(max(cur_nimg / (ref_batches * batch_size), 1))
@@ -52,10 +72,6 @@ def learning_rate_schedule(
         lr *= min(cur_nimg / (rampup_batches * batch_size), 1)
     return lr
 
-# ----------------------------------------------------------------------------
-# Evaluate the loss on the validation set.
-# The validation set is loaded by `val_loader`
-# Optionally, visualize progress on some validation set examples, with images saved to `out_folder`
 def validation_loss(
     model,
     loss_fn,
@@ -65,7 +81,7 @@ def validation_loss(
     out_folder=Path("."),
     data_dir: Path | str = "data/training",
 ):
-    # Set model into evaluation mode
+    """Evaluate the loss on the validation set. Optionally visualize denoising progress, saving images to out_folder."""
     model.eval()
 
     # Iterate through dataset and compute the loss on each batch
@@ -114,9 +130,8 @@ def validation_loss(
     return loss
 
 
-# ----------------------------------------------------------------------------
-# Plot noised and denoised tensors for N noise levels
 def visualize_denoising(N, noisy_image, denoised_prediction, ground_truth, title=""):
+    """Plot noised and denoised tensors for N noise levels."""
     fig, axes = plt.subplots(3, N, constrained_layout=True, figsize=(7, 5.5))
 
     data = (noisy_image, denoised_prediction, ground_truth)
@@ -154,8 +169,6 @@ def visualize_denoising(N, noisy_image, denoised_prediction, ground_truth, title
     return fig, axes
 
 
-# ----------------------------------------------------------------------------
-# Plot 1D plasma properties with and without noise for a few example simulations
 def visualize_denoising_1d(
     noisy_image,
     denoised_prediction,
@@ -163,6 +176,7 @@ def visualize_denoising_1d(
     folder=Path("."),
     data_dir: Path | str = "data/training",
 ):
+    """Plot 1D plasma properties with and without noise for a few example simulations."""
     dataset = thruster_data.ThrusterDataset(Path(data_dir), None, 1)
     colors = ["tab:blue", "tab:blue", "black"]
     alphas = [0.25, 1.0, 1.0]
@@ -173,66 +187,91 @@ def visualize_denoising_1d(
             colors=colors,
             alphas=alphas,
         )
-        fig, axes = plotter.plot(
+        fig, _ = plotter.plot(
             ["nu_an", "ui_1", "ni_1", "Tev", "phi", "E"], denormalize=True, nrows=2
         )
         fig.savefig(folder / f"denoise_1d_{sigma}.png")
         plt.close(fig)
 
 
-# ----------------------------------------------------------------------------
-# Perform one step of the optimization procedure on a batch of data
-def train_one_batch(
-    y,
-    model,
-    loss_fn,
-    optimizer,
-    ema_model,
-    ema,
-    scaler,
-    condition_vec=None,
-    use_amp=False,
-):
-    # Set model to training mode and zero gradients
-    model.train()
-    optimizer.zero_grad(set_to_none=True)
+def update_lr(optimizer, batch_idx, batch_size, ref_lr, decay_batches, min_lr):
+    """Update the learning rate for all optimizer parameter groups and return the new lr."""
+    lr = max(learning_rate_schedule(batch_idx * batch_size, batch_size, ref_lr, decay_batches), min_lr)
+    for g in optimizer.param_groups:
+        g["lr"] = lr
+    return lr
 
-    # Tranfer conditioning vector and data to device
+
+def compute_grad_norm(model):
+    """Compute the global gradient norm across all model parameters."""
+    grads = [p.grad.detach().flatten().cpu() for p in model.parameters() if p.grad is not None]
+    norm = torch.concat(grads).norm().item() if grads else 0.0
+    if not np.isfinite(norm):
+        print(f"Non-finite grad norm: {norm}")
+    return norm
+
+
+def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False):
+    """Perform one step of the optimization procedure on a batch of data."""
+    state.model.train()
+    state.optimizer.zero_grad(set_to_none=True)
+
+    # Transfer conditioning vector and data to device
     y = y.float().to(DEVICE)
     if condition_vec is not None:
         condition_vec = condition_vec.to(DEVICE)
 
-    # Compute loss function and do backwards pass
+    # Compute loss and do backwards pass
     if use_amp:
         with torch.amp.autocast_mode.autocast(DEVICE.type):
-            loss, base_loss, *_ = loss_fn(y, model, condition_vec=condition_vec)
-
-        scaler.scale(loss).backward()
+            loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec)
+        state.scaler.scale(loss).backward()
     else:
-        loss, base_loss, *_ = loss_fn(y, model, condition_vec=condition_vec)
+        loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec)
         loss.backward()
 
     # Make sure gradients are finite
     # For some reason, this causes strange training dynamics (stair-stepping, grad norms approach zero)
-    # for param in model.parameters():
+    # for param in state.model.parameters():
     #     if param.grad is not None:
     #         torch.nan_to_num(param.grad, nan=0, posinf=0, neginf=0, out=param.grad)
 
-    # Step optimizer and EMA
     if use_amp:
-        scaler.step(optimizer)
-        scaler.update()
+        state.scaler.step(state.optimizer)
+        state.scaler.update()
     else:
-        optimizer.step()
+        state.optimizer.step()
 
-    ema.step_ema(ema_model, model)
+    state.ema.step_ema(state.ema_model, state.model)
 
     return loss.item(), base_loss
+
+def save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, old_checkpoint, log_file, out_dir, evaluation_iters):
+    """Save a training checkpoint and update the diagnostic plot."""
+    if batch_loss < state.best_loss:
+        state.best_params = state.model.state_dict()
+        state.best_loss = batch_loss
+
+    if os.path.exists(checkpoint_file):
+        shutil.move(checkpoint_file, old_checkpoint)
+
+    out_dict = dict(
+        model=state.model.state_dict(),
+        model_config=config["model"],
+        train_config=config["training"],
+        normalizer=train_dataset.norm,
+        optimizer=state.optimizer.state_dict(),
+        best=state.best_params,
+        ema=state.ema_model.state_dict(),
+    )
+    torch.save(utils.paths_to_strings(out_dict), checkpoint_file)
+    visualization.plot_training_progress(log_file, out_dir, evaluation_iters, state.outlier_inds, state.outlier_losses)
+
 
 def train(args):
     config_file = args.config
 
-    # Load config gile
+    # Load config file
     with open(config_file, "rb") as fp:
         config = tomllib.load(fp)
 
@@ -265,6 +304,7 @@ def train(args):
     assert train_dataset.norm == test_dataset.norm
 
     pin = DEVICE.type == "cuda"
+    print(f"{pin=}")
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -333,14 +373,14 @@ def train(args):
 
     # Load checkpoint if found
     if load_checkpoint and os.path.exists(checkpoint_file):
-        state = torch.load(checkpoint_file, weights_only=False)
+        ckpt = torch.load(checkpoint_file, weights_only=False)
 
-        model.load_state_dict(state["model"])
+        model.load_state_dict(ckpt["model"])
         print("Model loaded from checkpoint")
-        optimizer.load_state_dict(state["optimizer"])
+        optimizer.load_state_dict(ckpt["optimizer"])
 
-        if "ema" in state:
-            ema_model.load_state_dict(state["ema"])
+        if "ema" in ckpt:
+            ema_model.load_state_dict(ckpt["ema"])
             ema.step_start = 0
             print("EMA loaded from checkpoint")
 
@@ -350,61 +390,24 @@ def train(args):
     def description(epoch_idx, batch_idx, stage):
         return f"Epoch {epoch_idx + 1}, batch {batch_idx + 1} ({stage})"
 
-    # ---------------------------------------------
-    # Training setup
-    model.train()
-    best_training_params = None
-    best_training_loss = math.inf
-
-    # Read loss file if it exists, otherwise create it
-    header = ",".join(
-        [
-            "example_idx",
-            "batch_idx",
-            "epoch_idx",
-            "train_loss",
-            "val_loss",
-            "ema_loss",
-            "grad_norm",
-            "learning_rate",
-        ]
-    )
-
-    if (
-        log_file.exists()
-        and load_checkpoint
-        and os.path.getsize(log_file) > len(header) + 1
-    ):
-        log_file_contents = np.genfromtxt(log_file, skip_header=1, delimiter=",")
-        num_examples = list(log_file_contents[:, 0].astype(int))
-        example_idx = num_examples[-1]
-        batch_idx = int(log_file_contents[-1, 1])
-        epoch_idx = int(log_file_contents[-1, 2]) - 1
-        train_losses = list(log_file_contents[:, 3])
-        val_losses = list(log_file_contents[:, 4])
-        ema_losses = list(log_file_contents[:, 5])
-        grad_norms = list(log_file_contents[:, 6])
-        learning_rates = list(log_file_contents[:, 7])
+    # Read log file if it exists, otherwise start fresh
+    if log_file.exists() and load_checkpoint:
+        df = pd.read_csv(log_file)
     else:
-        num_examples = []
-        example_idx = -1
-        batch_idx = -1
-        epoch_idx = -1
-        val_losses = []
-        train_losses = []
-        ema_losses = []
-        grad_norms = []
-        learning_rates = []
+        df = pd.DataFrame()
 
-    # Info for saving outliers
-    outlier_inds = []
-    outlier_losses = []
-    outlier_batches = []
-    outlier_vecs = []
-    outliers = {}
-
-    val_loss = val_losses[-1] if len(val_losses) > 0 else np.inf
-    ema_loss = ema_losses[-1] if len(ema_losses) > 0 else np.inf
+    if not df.empty:
+        start_epoch = int(df['epoch_idx'].iloc[-1])
+        state = TrainingState(
+            model=model, ema_model=ema_model, optimizer=optimizer, ema=ema, scaler=scaler,
+            val_loss=float(df['val_loss'].iloc[-1]),
+            ema_loss=float(df['ema_loss'].iloc[-1]),
+            batch_idx=int(df['batch_idx'].iloc[-1]),
+            example_idx=int(df['example_idx'].iloc[-1]),
+        )
+    else:
+        start_epoch = 0
+        state = TrainingState(model=model, ema_model=ema_model, optimizer=optimizer, ema=ema, scaler=scaler)
 
     # ---------------------------------------------
     # Noise args
@@ -419,53 +422,20 @@ def train(args):
 
     # ---------------------------------------------
     # Main training loop
-    while True:
-        epoch_idx += 1
+    epoch_range = range(start_epoch, max_epochs + 1) if max_epochs > 0 else itertools.count(start_epoch)
+    for epoch_idx in epoch_range:
         progress = tqdm(train_loader)
         for filenames, vec, y in progress:
-            batch_idx += 1
-            example_idx += batch_size
+            state.batch_idx += 1
+            state.example_idx += batch_size
 
-            progress.set_description(description(epoch_idx, batch_idx, "Training"))
+            progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
 
-            # Compute batch loss and step optimizer
-            _, batch_loss = train_one_batch(
-                y,
-                model,
-                loss_fn,
-                optimizer,
-                ema_model,
-                ema,
-                scaler,
-                condition_vec=vec,
-                use_amp=use_amp,
-            )
-            num_examples.append(example_idx)
-            train_losses.append(batch_loss)
-
-            # Update learning rate
-            lr = learning_rate_schedule(
-                batch_idx * batch_size, batch_size, ref_lr, decay_batches
-            )
-            lr = max(lr, min_lr)
-            learning_rates.append(lr)
-            for g in optimizer.param_groups:
-                g["lr"] = lr
-
-            # Compute gradient norm
-            grads = [
-                param.grad.detach().flatten().cpu()
-                for param in model.parameters()
-                if param.grad is not None
-            ]
-            grad_norm = torch.concat(grads).norm().numpy()
-            if not np.isfinite(grad_norm):
-                # Without the grad checks, we still hit this occasionally.
-                # Despite that things seem to keep chugging along.
-                # Encountering these occasional non-finite gradients must have been the cause of the stair-steps
-                print(f"Non-finite grad norm: {grad_norm}")
-
-            grad_norms.append(grad_norm)
+            _, batch_loss = train_one_batch(y, state, loss_fn, condition_vec=vec, use_amp=use_amp)
+            lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, decay_batches, min_lr)
+            # Without the grad checks, we still hit non-finite grad norms occasionally.
+            # Despite that, things seem to keep chugging along -- these must have been the cause of the stair-steps.
+            grad_norm = compute_grad_norm(state.model)
 
             # Exit on encountering a non-finite batch loss
             if not np.isfinite(batch_loss):
@@ -474,127 +444,35 @@ def train(args):
 
             # Save outliers for later inspection and analysis
             # We check outliers by comparing the batch loss to recent validation losses
-            if val_losses and ((batch_loss - val_losses[-1]) > val_losses[-1]):
-                outlier_inds.append(batch_idx * batch_size)
-                outlier_losses.append(batch_loss)
-                outlier_batches.append(y)
-                outlier_vecs.append(vec)
-
+            if np.isfinite(state.val_loss) and (batch_loss - state.val_loss) > state.val_loss:
+                state.outlier_inds.append(state.batch_idx * batch_size)
+                state.outlier_losses.append(batch_loss)
                 for f in filenames:
-                    total = outliers.get(f, 0)
-                    outliers[f] = total + 1
-
-                sorted_outliers = dict(
-                    sorted(outliers.items(), key=lambda item: item[1], reverse=True)
-                )
-
+                    state.outliers[f] = state.outliers.get(f, 0) + 1
+                sorted_outliers = dict(sorted(state.outliers.items(), key=lambda item: item[1], reverse=True))
                 with open(out_dir / "outliers.json", "w") as fd:
                     json.dump(sorted_outliers, fd, indent=4)
 
             # Evaluate on test set, if it's time to do so
-            if batch_idx % evaluation_iters == 0:
-                progress.set_description(
-                    description(epoch_idx, batch_idx, "Validating")
-                )
-                ema_loss = validation_loss(
-                    ema_model,
-                    loss_fn,
-                    test_loader,
-                    visualize=True,
-                    epoch_idx=epoch_idx,
-                    out_folder=out_dir,
-                    data_dir=test_data_dir,
-                )
-                val_loss = validation_loss(
-                    model, loss_fn, test_loader, data_dir=test_data_dir
-                )
+            if state.batch_idx % evaluation_iters == 0:
+                progress.set_description(description(epoch_idx, state.batch_idx, "Validating"))
+                state.ema_loss = validation_loss(state.ema_model, loss_fn, test_loader, visualize=True, epoch_idx=epoch_idx, out_folder=out_dir, data_dir=test_data_dir)
+                state.val_loss = validation_loss(state.model, loss_fn, test_loader, data_dir=test_data_dir)
 
-            val_losses.append(val_loss)
-            ema_losses.append(ema_loss)
-
-            progress.set_postfix_str(
-                f"batch_loss={train_losses[-1]:.4f}, val_loss={val_losses[-1]:.4f}"
-            )
+            progress.set_postfix_str(f"batch_loss={batch_loss:.4f}, val_loss={state.val_loss:.4f}")
 
             # Update log file
-            with open(log_file, "a") as fd:
-                if len(num_examples) == 1:
-                    # Print the header
-                    print(header, file=fd)
+            row = dict(example_idx=state.example_idx, batch_idx=state.batch_idx, epoch_idx=epoch_idx,
+                       train_loss=batch_loss, val_loss=state.val_loss, ema_loss=state.ema_loss,
+                       grad_norm=grad_norm, learning_rate=lr)
+            write_header = not log_file.exists() or log_file.stat().st_size == 0
+            pd.DataFrame([row]).to_csv(log_file, mode='a', header=write_header, index=False)
 
-                row = f"{example_idx},{batch_idx},{epoch_idx},{batch_loss},{val_loss},{ema_loss},{grad_norm},{lr}"
-                print(row, file=fd)
-
-            # Exit if it's not time to checkpoint. Otherwise, continue to saving.
-            if batch_idx % checkpoint_iters != 0:
+            if state.batch_idx % checkpoint_iters != 0:
                 continue
 
-            progress.set_description(description(epoch_idx, batch_idx, "Saving"))
-
-            if batch_loss < best_training_loss:
-                best_training_params = model.state_dict()
-                best_training_loss = batch_loss
-
-            if os.path.exists(checkpoint_file):
-                shutil.move(checkpoint_file, old_checkpoint)
-
-            out_dict = dict(
-                model=model.state_dict(),
-                model_config=config["model"],
-                train_config=config["training"],
-                normalizer=train_dataset.norm,
-                optimizer=optimizer.state_dict(),
-                best=best_training_params,
-                ema=ema_model.state_dict(),
-            )
-
-            torch.save(utils.paths_to_strings(out_dict), checkpoint_file)
-            progress.set_description(description(epoch_idx, batch_idx, "Plotting"))
-
-            # Plot diagnostics
-            fig, ax_grad = plt.subplots(1, 1, constrained_layout=True)
-
-            ax_grad.autoscale(axis="x", tight=True)
-            ax_grad.plot(
-                num_examples,
-                grad_norms,
-                label="Gradient norm",
-                zorder=4,
-                color="tab:red",
-            )
-            ax_grad.plot(
-                num_examples,
-                learning_rates,
-                label="Learning rate",
-                color="tab:orange",
-                linestyle="--",
-            )
-            ax_grad.set_yscale("log")
-            ax_grad.tick_params(axis="y", labelcolor="tab:red")
-            ax_grad.set_ylabel("Gradient norm", color="tab:red")
-
-            ax_loss = ax_grad.twinx()
-            ax_loss.autoscale(axis="x", tight=True)
-            ax_loss.set(xlabel="Number of examples", yscale="log")
-            ax_loss.set_ylabel("Loss", color="tab:blue")
-            ax_loss.tick_params(axis="y", labelcolor="tab:blue")
-
-            ax_loss.scatter(
-                outlier_inds, outlier_losses, label="Outliers", color="black", zorder=8
-            )
-
-            ax_loss.plot(num_examples, train_losses, label="Train. loss", zorder=5)
-            ax_loss.plot(num_examples, val_losses, label="Val. loss", zorder=6)
-            ax_loss.plot(num_examples, ema_losses, label="Val. loss (EMA)", zorder=7)
-            ax_loss.grid(which="both")
-            ax_loss.legend(loc="upper left", ncols=2).set_zorder(10)
-            ax_grad.tick_params(axis="y", labelcolor="tab:red")
-
-            fig.savefig(out_dir / "loss_prog.png", dpi=200)
-            plt.close(fig)
-
-        if max_epochs > 0 and epoch_idx >= max_epochs:
-            break
+            progress.set_description(description(epoch_idx, state.batch_idx, "Saving"))
+            save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, old_checkpoint, log_file, out_dir, evaluation_iters)
 
 
 if __name__ == "__main__":
