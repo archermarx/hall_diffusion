@@ -6,7 +6,10 @@ import math
 import json
 import os
 import shutil
+import time
 import tomllib
+from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,6 +40,62 @@ torch.manual_seed(10)
 # Get directory in which script is being run as well as the root directory of the project.
 SCRIPT_DIR = utils.get_script_dir()
 ROOT_DIR = SCRIPT_DIR / ".."
+
+
+class StepTimer:
+    """Per-section wall-clock profiler with optional CUDA synchronization.
+
+    Usage:
+        timer = StepTimer(enabled=True, print_every=50)
+        with timer.section("forward"):
+            loss = model(x)
+        timer.step()   # call once per training step; prints a table every print_every steps
+
+    Each section time is measured with GPU sync so it reflects real compute time, not just
+    kernel-dispatch time.  Disable (enabled=False) for zero-overhead operation.
+    """
+
+    def __init__(self, enabled: bool = False, print_every: int = 50):
+        self.enabled = enabled
+        self.print_every = print_every
+        self._totals: dict[str, float] = defaultdict(float)
+        self._counts: dict[str, int] = defaultdict(int)
+        self._step = 0
+
+    @contextmanager
+    def section(self, name: str):
+        if not self.enabled:
+            yield
+            return
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        yield
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elapsed = time.perf_counter() - t0
+        self._totals[name] += elapsed
+        self._counts[name] += 1
+
+    def step(self):
+        if not self.enabled:
+            return
+        self._step += 1
+        if self._step % self.print_every == 0:
+            self._print_report()
+
+    def _print_report(self):
+        if not self._totals:
+            return
+        accounted = sum(self._totals.values())
+        print(f"\n--- StepTimer report  (step {self._step}) ---")
+        for name, total in sorted(self._totals.items(), key=lambda kv: -kv[1]):
+            avg_ms = 1000.0 * total / self._counts[name]
+            pct = 100.0 * total / accounted if accounted > 0 else 0.0
+            print(f"  {name:<30s}  {avg_ms:7.2f} ms/step  ({pct:5.1f}%)")
+        print(f"  {'total accounted':<30s}  {1000.0 * accounted / self._step:7.2f} ms/step")
+        print()
+
 
 @dataclass
 class TrainingState:
@@ -147,37 +206,49 @@ def compute_grad_norm(model):
     grads = [p.grad.detach().flatten().cpu() for p in model.parameters() if p.grad is not None]
     norm = torch.concat(grads).norm().item() if grads else 0.0
     if not np.isfinite(norm):
-        print("Warning: non-finite gradient norm encountered: {norm}")
+        print(f"Warning: non-finite gradient norm encountered: {norm}")
     return norm
 
 
-def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_fn=None):
+def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_fn=None, timer: StepTimer | None = None):
     """Perform one step of the optimization procedure on a batch of data."""
+    if timer is None:
+        timer = StepTimer(enabled=False)
+
     state.model.train()
     state.optimizer.zero_grad(set_to_none=True)
 
     # Transfer conditioning vector and data to device
-    y = y.float().to(DEVICE)
-    if condition_vec is not None:
-        condition_vec = condition_vec.to(DEVICE)
-    ctrl = ctrl_fn(y) if ctrl_fn is not None else None
+    with timer.section("data_to_device"):
+        y = y.float().to(DEVICE)
+        if condition_vec is not None:
+            condition_vec = condition_vec.to(DEVICE)
+
+    with timer.section("ctrl_fn"):
+        ctrl = ctrl_fn(y) if ctrl_fn is not None else None
 
     # Compute loss and do backwards pass
     if use_amp:
-        with torch.amp.autocast_mode.autocast(DEVICE.type, dtype=torch.bfloat16):
+        with timer.section("forward"):
+            with torch.amp.autocast_mode.autocast(DEVICE.type, dtype=torch.bfloat16):
+                loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
+        with timer.section("backward"):
+            state.scaler.scale(loss).backward()
+    else:
+        with timer.section("forward"):
             loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
-        state.scaler.scale(loss).backward()
-    else:
-        loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
-        loss.backward()
+        with timer.section("backward"):
+            loss.backward()
 
-    if use_amp:
-        state.scaler.step(state.optimizer)
-        state.scaler.update()
-    else:
-        state.optimizer.step()
+    with timer.section("optimizer"):
+        if use_amp:
+            state.scaler.step(state.optimizer)
+            state.scaler.update()
+        else:
+            state.optimizer.step()
 
-    state.ema.step_ema(state.ema_model, state.model)
+    with timer.section("ema"):
+        state.ema.step_ema(state.ema_model, state.model)
 
     return loss.item(), base_loss
 
@@ -387,6 +458,28 @@ def train(args):
     loss_fn = LossFunction.from_config(noise_sampler=noise_sampler, **train_args.get("loss", {}))
 
     # ---------------------------------------------
+    # Profiling setup
+    timer = StepTimer(enabled=args.profile, print_every=50)
+
+    if args.profile_trace:
+        profile_dir = Path(args.profile_trace)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        prof_ctx = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(wait=1, warmup=2, active=5, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir)),
+            record_shapes=True,
+            with_stack=False,
+        )
+        prof_ctx.__enter__()
+        print(f"torch.profiler: trace will be written to {profile_dir}/  (runs for 8 steps then stops)")
+    else:
+        prof_ctx = None
+
+    # ---------------------------------------------
     # Main training loop
     epoch_range = range(start_epoch, max_epochs + 1) if max_epochs > 0 else itertools.count(start_epoch)
     for epoch_idx in epoch_range:
@@ -397,7 +490,11 @@ def train(args):
 
             progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
 
-            _, batch_loss = train_one_batch(y, state, loss_fn, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn)
+            _, batch_loss = train_one_batch(y, state, loss_fn, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn, timer=timer)
+            timer.step()
+            if prof_ctx is not None:
+                prof_ctx.step()
+
             lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, decay_batches, min_lr)
             grad_norm = compute_grad_norm(state.model)
 
@@ -442,6 +539,17 @@ if __name__ == "__main__":
         "--restart",
         action="store_true",
         help="Whether to restart the training procedure, discarding the old checkpoint file. This can also be done by setting load_checkpoint=false in the config file",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable lightweight per-section wall-clock timing. Prints a table every 50 steps.",
+    )
+    parser.add_argument(
+        "--profile-trace",
+        metavar="DIR",
+        default=None,
+        help="Run torch.profiler for ~8 steps and write a TensorBoard/Chrome trace to DIR.",
     )
     args = parser.parse_args()
     train(args)
