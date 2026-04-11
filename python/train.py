@@ -240,17 +240,26 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_f
         with timer.section("backward"):
             loss.backward()
 
+    with timer.section("grad_norm"):
+        grad_norm = compute_grad_norm(state.model)
+
     with timer.section("optimizer"):
         if use_amp:
+            prev_scale = state.scaler.get_scale()
             state.scaler.step(state.optimizer)
             state.scaler.update()
+            step_skipped = state.scaler.get_scale() < prev_scale
         else:
             state.optimizer.step()
+            step_skipped = False
+
+    if step_skipped:
+        print(f"Warning: AMP optimizer step skipped due to inf/nan gradients (grad_norm={grad_norm})")
 
     with timer.section("ema"):
         state.ema.step_ema(state.ema_model, state.model)
 
-    return loss.item(), base_loss
+    return loss.item(), base_loss, grad_norm
 
 def save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, old_checkpoint, log_file, out_dir, evaluation_iters):
     """Save a training checkpoint and update the diagnostic plot."""
@@ -498,15 +507,12 @@ def train(args):
 
             progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
 
-            _, batch_loss = train_one_batch(y, state, loss_fn, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn, timer=timer)
+            _, batch_loss, grad_norm = train_one_batch(y, state, loss_fn, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn, timer=timer)
             timer.step()
             if prof_ctx is not None:
                 prof_ctx.step()
 
             lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, decay_batches, min_lr)
-
-            with timer.section("grad_norm"):
-                grad_norm = compute_grad_norm(state.model)
 
             # Save outliers for later inspection and analysis
             # We check outliers by comparing the batch loss to recent validation losses
