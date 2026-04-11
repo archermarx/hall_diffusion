@@ -308,6 +308,7 @@ def train(args):
     use_amp = train_args.get("use_amp", True)
     ema_factor = train_args.get("ema", None)
     load_workers = train_args.get("load_workers", 2)
+    prefetch_factor = train_args.get("prefetch_factor", 4)
 
     # ---------------------------------------------
     # Directory configuration
@@ -338,6 +339,7 @@ def train(args):
         shuffle=True,
         pin_memory=pin,
         num_workers=load_workers,
+        prefetch_factor=prefetch_factor,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -345,6 +347,7 @@ def train(args):
         shuffle=False,
         pin_memory=pin,
         num_workers=load_workers,
+        prefetch_factor=prefetch_factor,
     )
 
     # ---------------------------------------------
