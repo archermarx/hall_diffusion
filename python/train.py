@@ -162,7 +162,7 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_f
 
     # Compute loss and do backwards pass
     if use_amp:
-        with torch.amp.autocast_mode.autocast(DEVICE.type):
+        with torch.amp.autocast_mode.autocast(DEVICE.type, dtype=torch.bfloat16):
             loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
         state.scaler.scale(loss).backward()
     else:
