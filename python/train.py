@@ -484,7 +484,15 @@ def train(args):
     epoch_range = range(start_epoch, max_epochs + 1) if max_epochs > 0 else itertools.count(start_epoch)
     for epoch_idx in epoch_range:
         progress = tqdm(train_loader)
-        for filenames, vec, y in progress:
+        data_iter = iter(progress)
+        while True:
+
+            with timer.section("data_load"):
+                try:
+                    filenames, vec, y = next(data_iter)
+                except StopIteration:
+                    break
+
             state.batch_idx += 1
             state.example_idx += batch_size
 
