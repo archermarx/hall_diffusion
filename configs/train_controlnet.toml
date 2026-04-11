@@ -60,4 +60,4 @@ test_data_dir = "data/test_small"
 # Whether to load from a checkpoint
 load_checkpoint = true
 # Frequency in batches with which checkpoints are saved. Set to -1 to disable checkpointing
-checkpoint_save_freq = 100
+checkpoint_save_freq = 20

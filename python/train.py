@@ -289,7 +289,7 @@ def save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, o
         ema=ema_state,
     )
     torch.save(utils.paths_to_strings(out_dict), checkpoint_file)
-    visualization.plot_training_progress(log_file, out_dir, evaluation_iters, state.outlier_inds, state.outlier_losses)
+    visualization.plot_training_progress(log_file, out_dir, evaluation_iters, state.outlier_inds)
 
 
 def train(args):
