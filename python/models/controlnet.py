@@ -13,10 +13,13 @@ scalar starting at 0, matching the Block.emb_gain pattern), so the augmented
 model behaves identically to the unmodified UNet.
 """
 
+from pathlib import Path
+
 import numpy as np
 import torch
 
 from .edm2 import (
+    EDM2Denoiser,
     MPConv, mp_silu, mp_sum,
     _encoder_channel_dims, _build_embeddings, _encoder_blocks,
 )
@@ -159,3 +162,67 @@ class ControlNet(torch.nn.Module):
             controls[name] = self.ctrl_conv[name](x, gain=self.ctrl_gain[name])
 
         return controls
+
+
+class ControlNetDenoiser(torch.nn.Module):
+    """Pairs a frozen EDM2Denoiser with a trainable ControlNet adapter.
+
+    During the forward pass the ControlNet converts a spatial control signal
+    (e.g. the output of ThrusterDataset.generate_measurements) into a dict of
+    encoder-stage controls, which are then injected additively into the frozen
+    denoiser's skip connections.  When ``ctrl`` is None the denoiser runs
+    identically to the unmodified EDM2Denoiser.
+    """
+
+    def __init__(self, denoiser: EDM2Denoiser, controlnet: "ControlNet"):
+        super().__init__()
+        self.denoiser = denoiser    # frozen — requires_grad_(False) at construction
+        self.controlnet = controlnet  # trainable
+
+    def forward(self, x, noise_std, condition_vector=None, ctrl=None, return_logvar=False):
+        controls = None
+        if ctrl is not None:
+            # Compute c_noise the same way EDM2Denoiser does so the embeddings stay aligned.
+            noise_std_f = noise_std.to(torch.float32).reshape(-1, 1, 1)
+            c_noise = noise_std_f.flatten().log() / 4
+
+            # Mirror EDM2Denoiser's condition_vector handling.
+            if self.denoiser.label_dim == 0:
+                class_labels = None
+            elif condition_vector is None:
+                class_labels = torch.zeros([1, self.denoiser.label_dim], device=x.device)
+            else:
+                class_labels = condition_vector.to(torch.float32).reshape(-1, self.denoiser.label_dim)
+
+            controls = self.controlnet(ctrl.to(torch.float32), c_noise, class_labels)
+
+        return self.denoiser(
+            x, noise_std,
+            condition_vector=condition_vector,
+            return_logvar=return_logvar,
+            controls=controls,
+        )
+
+    @classmethod
+    def from_config(cls, config: dict, device: torch.device) -> "ControlNetDenoiser":
+        """Load base EDM2 checkpoint, freeze it, and attach a fresh ControlNet.
+
+        The base model checkpoint is expected at ``config['base_model'] / checkpoint.pth.tar``.
+        Architecture hyper-parameters (in_channels, label_dim, resolution) are
+        taken from the current config when present, falling back to the values
+        stored in the base checkpoint otherwise.
+        """
+        base_ckpt_path = Path(config["base_model"]) / "checkpoint.pth.tar"
+        base_ckpt = torch.load(base_ckpt_path, weights_only=False, map_location=device)
+
+        # Use the base checkpoint's stored config exactly — architecture must match
+        # the saved weights, so current-dataset values (in_channels, label_dim, etc.)
+        # must not override them here.
+        base_model_cfg = dict(base_ckpt["model_config"])
+
+        denoiser = EDM2Denoiser.from_config(base_model_cfg).to(device)
+        denoiser.load_state_dict(base_ckpt["model"])
+        denoiser.requires_grad_(False)
+
+        controlnet = ControlNet.from_unet(denoiser.unet, config["control_channels"]).to(device)
+        return cls(denoiser, controlnet)

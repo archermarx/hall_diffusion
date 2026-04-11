@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 
 # Our dependencies
 import models
+from models.controlnet import ControlNetDenoiser
 from models.ema import EMA
 from loss import LossFunction
 from noise import NoiseSampler
@@ -76,6 +77,7 @@ def validation_loss(
     epoch_idx=0,
     out_folder=Path("."),
     data_dir: Path | str = "data/training",
+    ctrl_fn=None,
 ) -> float:
     """Evaluate the loss on the validation set. Optionally visualize denoising progress, saving images to out_folder."""
     model.eval()
@@ -86,7 +88,8 @@ def validation_loss(
         with torch.no_grad():
             x = x.float().to(DEVICE)
             vec = vec.float().to(DEVICE)
-            _, loss, *_ = loss_fn(x, model, condition_vec=vec)
+            ctrl = ctrl_fn(x) if ctrl_fn is not None else None
+            _, loss, *_ = loss_fn(x, model, condition_vec=vec, ctrl=ctrl)
             losses.append(loss)
     loss = float(np.mean(losses))
 
@@ -136,12 +139,10 @@ def compute_grad_norm(model):
     """Compute the global gradient norm across all model parameters."""
     grads = [p.grad.detach().flatten().cpu() for p in model.parameters() if p.grad is not None]
     norm = torch.concat(grads).norm().item() if grads else 0.0
-    if not np.isfinite(norm):
-        print(f"Non-finite grad norm: {norm}")
     return norm
 
 
-def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False):
+def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_fn=None):
     """Perform one step of the optimization procedure on a batch of data."""
     state.model.train()
     state.optimizer.zero_grad(set_to_none=True)
@@ -150,14 +151,15 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False):
     y = y.float().to(DEVICE)
     if condition_vec is not None:
         condition_vec = condition_vec.to(DEVICE)
+    ctrl = ctrl_fn(y) if ctrl_fn is not None else None
 
     # Compute loss and do backwards pass
     if use_amp:
         with torch.amp.autocast_mode.autocast(DEVICE.type):
-            loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec)
+            loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
         state.scaler.scale(loss).backward()
     else:
-        loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec)
+        loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
         loss.backward()
 
     if use_amp:
@@ -179,14 +181,23 @@ def save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, o
     if os.path.exists(checkpoint_file):
         shutil.move(checkpoint_file, old_checkpoint)
 
+    # For ControlNet, save only the adapter weights — the frozen denoiser is
+    # re-loaded from base_model at startup, keeping checkpoint sizes small.
+    if isinstance(state.model, ControlNetDenoiser):
+        model_state = state.model.controlnet.state_dict()
+        ema_state = state.ema_model.controlnet.state_dict()
+    else:
+        model_state = state.model.state_dict()
+        ema_state = state.ema_model.state_dict()
+
     out_dict = dict(
-        model=state.model.state_dict(),
+        model=model_state,
         model_config=config["model"],
         train_config=config["training"],
         normalizer=train_dataset.norm,
         optimizer=state.optimizer.state_dict(),
         best=state.best_params,
-        ema=state.ema_model.state_dict(),
+        ema=ema_state,
     )
     torch.save(utils.paths_to_strings(out_dict), checkpoint_file)
     visualization.plot_training_progress(log_file, out_dir, evaluation_iters, state.outlier_inds, state.outlier_losses)
@@ -218,9 +229,13 @@ def train(args):
     os.makedirs(out_dir, exist_ok=True)
     log_file = out_dir / train_args["log_file"]
 
-    # Set up training and test data loaders
-    scalars_in_tensor = config["model"].get("scalars_in_tensor", False)
-    downsample_res = config["model"].get("downsample_res", None)
+    # Set up training and test data loaders.
+    # For controlnet, dataset settings (scalars_in_tensor, downsample_res) are
+    # inherited from the base model's stored config so they don't need to be
+    # re-specified in the controlnet toml.
+    data_cfg = models.dataset_config(config["model"])
+    scalars_in_tensor = data_cfg.get("scalars_in_tensor", False)
+    downsample_res = data_cfg.get("downsample_res", None)
     train_dataset = thruster_data.ThrusterDataset(train_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
     test_dataset = thruster_data.ThrusterDataset(test_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
 
@@ -282,7 +297,7 @@ def train(args):
     decay_batches = decay_epochs * len(train_dataset) // batch_size
 
     optimizer = optim.Adam(
-        model.parameters(),
+        [p for p in model.parameters() if p.requires_grad],
         lr=ref_lr,
         weight_decay=train_args["weight_decay"],
         betas=betas,
@@ -299,12 +314,18 @@ def train(args):
     if load_checkpoint and os.path.exists(checkpoint_file):
         ckpt = torch.load(checkpoint_file, weights_only=False)
 
-        model.load_state_dict(ckpt["model"])
+        if isinstance(model, ControlNetDenoiser):
+            model.controlnet.load_state_dict(ckpt["model"])
+        else:
+            model.load_state_dict(ckpt["model"])
         print("Model loaded from checkpoint")
         optimizer.load_state_dict(ckpt["optimizer"])
 
         if "ema" in ckpt:
-            ema_model.load_state_dict(ckpt["ema"])
+            if isinstance(ema_model, ControlNetDenoiser):
+                ema_model.controlnet.load_state_dict(ckpt["ema"])
+            else:
+                ema_model.load_state_dict(ckpt["ema"])
             ema.step_start = 0
             print("EMA loaded from checkpoint")
 
@@ -334,6 +355,10 @@ def train(args):
         state = TrainingState(model=model, ema_model=ema_model, optimizer=optimizer, ema=ema, scaler=scaler)
 
     # ---------------------------------------------
+    # ControlNet measurement generator (None for vanilla EDM2)
+    ctrl_fn = train_dataset.generate_measurements if isinstance(model, ControlNetDenoiser) else None
+
+    # ---------------------------------------------
     # Noise args
     channels = config["model"]["in_channels"]
     resolution = config["model"]["resolution"]
@@ -355,7 +380,7 @@ def train(args):
 
             progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
 
-            _, batch_loss = train_one_batch(y, state, loss_fn, condition_vec=vec, use_amp=use_amp)
+            _, batch_loss = train_one_batch(y, state, loss_fn, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn)
             lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, decay_batches, min_lr)
             grad_norm = compute_grad_norm(state.model)
 
@@ -373,8 +398,8 @@ def train(args):
             # Evaluate on test set, if it's time to do so
             if state.batch_idx % evaluation_iters == 0:
                 progress.set_description(description(epoch_idx, state.batch_idx, "Validating"))
-                state.ema_loss = validation_loss(state.ema_model, loss_fn, test_loader, visualize=True, epoch_idx=epoch_idx, out_folder=out_dir, data_dir=test_data_dir)
-                state.val_loss = validation_loss(state.model, loss_fn, test_loader, data_dir=test_data_dir)
+                state.ema_loss = validation_loss(state.ema_model, loss_fn, test_loader, visualize=True, epoch_idx=epoch_idx, out_folder=out_dir, data_dir=test_data_dir, ctrl_fn=ctrl_fn)
+                state.val_loss = validation_loss(state.model, loss_fn, test_loader, data_dir=test_data_dir, ctrl_fn=ctrl_fn)
 
             progress.set_postfix_str(f"batch_loss={batch_loss:.4f}, val_loss={state.val_loss:.4f}")
 

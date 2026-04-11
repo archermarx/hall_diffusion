@@ -83,6 +83,7 @@ class EDM2Loss:
         model,
         noise_std=None,
         condition_vec=None,
+        ctrl=None,
     ):
         batch_size, _, _ = x.shape
         rnd_normal = torch.randn([batch_size, 1, 1], device=x.device)
@@ -97,10 +98,11 @@ class EDM2Loss:
 
         noisy_im = x + noise
 
+        ctrl_kwargs = {"ctrl": ctrl} if ctrl is not None else {}
         if self.include_logvar:
-            denoised, logvar = model(noisy_im, sigma, condition_vec, return_logvar=True)
+            denoised, logvar = model(noisy_im, sigma, condition_vec, return_logvar=True, **ctrl_kwargs)
         else:
-            denoised = model(noisy_im, sigma, condition_vec)
+            denoised = model(noisy_im, sigma, condition_vec, **ctrl_kwargs)
             logvar = torch.tensor(0.0)
 
         # Base loss
