@@ -240,9 +240,6 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_f
         with timer.section("backward"):
             loss.backward()
 
-    with timer.section("grad_norm"):
-        grad_norm = compute_grad_norm(state.model)
-
     with timer.section("optimizer"):
         if use_amp:
             prev_scale = state.scaler.get_scale()
@@ -252,6 +249,9 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_f
         else:
             state.optimizer.step()
             step_skipped = False
+
+    with timer.section("grad_norm"):
+        grad_norm = compute_grad_norm(state.model)
 
     if step_skipped:
         print(f"Warning: AMP optimizer step skipped due to inf/nan gradients (grad_norm={grad_norm})")
