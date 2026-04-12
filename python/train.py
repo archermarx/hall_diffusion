@@ -242,11 +242,14 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_f
 
     with timer.section("optimizer"):
         if use_amp:
+            state.scaler.unscale_(state.optimizer)
+            torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=1.0)
             prev_scale = state.scaler.get_scale()
             state.scaler.step(state.optimizer)
             state.scaler.update()
             step_skipped = state.scaler.get_scale() < prev_scale
         else:
+            torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=1.0)
             state.optimizer.step()
             step_skipped = False
 
