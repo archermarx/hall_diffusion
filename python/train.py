@@ -232,11 +232,17 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_f
         with timer.section("forward"):
             with torch.amp.autocast_mode.autocast(DEVICE.type):
                 loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
+        if not torch.isfinite(loss):
+            print(f"Warning: non-finite loss ({loss.item():.4g}), skipping batch")
+            return float("nan"), float("nan"), 0.0
         with timer.section("backward"):
             state.scaler.scale(loss).backward()
     else:
         with timer.section("forward"):
             loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
+        if not torch.isfinite(loss):
+            print(f"Warning: non-finite loss ({loss.item():.4g}), skipping batch")
+            return float("nan"), float("nan"), 0.0
         with timer.section("backward"):
             loss.backward()
 
@@ -517,6 +523,9 @@ def train(args):
             timer.step()
             if prof_ctx is not None:
                 prof_ctx.step()
+
+            if not np.isfinite(batch_loss):
+                continue
 
             lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, decay_batches, min_lr)
 
