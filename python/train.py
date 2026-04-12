@@ -398,7 +398,7 @@ def train(args):
 
     checkpoint_file = out_dir / "checkpoint.pth.tar"
     old_checkpoint = out_dir / "checkpoint_prev.pth.tar"
-    betas = tuple(opt_args.get("adam_beta", [0.9, 0.995]))
+    betas = tuple(opt_args.get("adam_betas", [0.9, 0.995]))
 
     decay_batches = decay_epochs * len(train_dataset) // batch_size
 

@@ -147,7 +147,10 @@ class ThrusterDataset(Dataset):
         pixel_kept = torch.rand(B, num_spatial, res, device=dev) >= p_remove[:, :, None]  # (B, num_spatial, res)
 
         # Beta(1,5) biases toward smaller std (higher precision); max std = 0.25.
-        stds_s = beta_lo((B, num_spatial, res)) * 0.25
+        # Clamp to a minimum to prevent 1/stds**2 from overflowing to inf in float32.
+        # beta_lo = 1 - rand()**0.2; when rand() is close to 1 the result rounds to 0 in
+        # float32 (machine eps ~6e-8 > 1.2e-8), giving stds=0 and precision=inf.
+        stds_s = beta_lo((B, num_spatial, res)).clamp(min=1e-3) * 0.25
         noise_s = torch.randn(B, num_spatial, res, device=dev) * stds_s
 
         active_s = (~sf_mask[:, :, None]) & pixel_kept  # unmasked field + kept pixel
@@ -160,7 +163,7 @@ class ThrusterDataset(Dataset):
         if num_params > 0:
             pf_mask = field_masked[:, num_spatial:]  # (B, num_params)
 
-            stds_p = beta_lo((B, num_params)) * 0.25
+            stds_p = beta_lo((B, num_params)).clamp(min=1e-3) * 0.25
             noise_p = torch.randn(B, num_params, device=dev) * stds_p
 
             active_p = ~pf_mask  # (B, num_params)
@@ -173,7 +176,7 @@ class ThrusterDataset(Dataset):
                 active_p[:, :, None], (1.0 / stds_p**2)[:, :, None], torch.zeros_like(precision[:, num_spatial:])
             )
 
-        condition_tensor = torch.cat([torch.log(precision + 1), masked_sim], dim=1)
+        condition_tensor = torch.cat([torch.log10(precision + 1), masked_sim], dim=1)
         return condition_tensor
 
 class ThrusterPlotter1D:
