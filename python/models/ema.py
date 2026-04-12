@@ -10,7 +10,7 @@ class EMA:
             if not new_param.requires_grad:
                 continue  # frozen params never change; skip the unnecessary GPU op
             old_weight, new_weight = old_param.data, new_param.data
-            new_param.data = self.beta * old_weight + (1 - self.beta) * new_weight
+            old_param.data = self.beta * old_weight + (1 - self.beta) * new_weight
 
     def step_ema(self, ema_model, model):
         if self.step < self.step_start:
