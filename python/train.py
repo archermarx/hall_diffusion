@@ -165,13 +165,12 @@ def validation_loss(
             _, vec, y = next(iter(val_loader))
             vec = vec.float().to(DEVICE)
             y = y.float().to(DEVICE)
+            ctrl = ctrl_fn(y) if ctrl_fn is not None else None
             noise_std = torch.rand((y.shape[0], 1, 1), device=DEVICE)
             fixed_noise = torch.tensor(visualization.NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
             noise_std[: len(fixed_noise), 0, 0] = fixed_noise
 
-            _, _, noisy_im, denoise_pred = loss_fn(
-                y, model, noise_std, condition_vec=vec
-            )
+            _, _, noisy_im, denoise_pred = loss_fn(y, model, noise_std, condition_vec=vec, ctrl=ctrl)
 
             suptitle = f"Epoch: {epoch_idx + 1:04d}, Loss: {loss:.4f}"
             visualization.plot_denoising_2d(

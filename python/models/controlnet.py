@@ -217,19 +217,19 @@ class ControlNetDenoiser(torch.nn.Module):
                 class_labels = condition_vector.to(torch.float32).reshape(-1, self.denoiser.label_dim)
 
             # Force float32 regardless of any outer autocast context.
-        # Under AMP, autocast recasts conv/linear ops to float16 even when inputs
-        # are float32.  The ControlNet encoder runs over out-of-distribution ctrl
-        # inputs (vs the image noise it was pre-trained on), and larger models with
-        # more attention blocks are more likely to produce inf/nan in float16 for
-        # pathological batches.  float32 here costs ~1.5× memory on this sub-module
-        # but eliminates that risk; the resulting controls are float32 and safely
-        # upcast the skip additions in UNet.forward.
-        with torch.autocast(x.device.type, enabled=False):
-            controls = self.controlnet(
-                ctrl.to(torch.float32),
-                c_noise,
-                class_labels.to(torch.float32) if class_labels is not None else None,
-            )
+            # Under AMP, autocast recasts conv/linear ops to float16 even when inputs
+            # are float32.  The ControlNet encoder runs over out-of-distribution ctrl
+            # inputs (vs the image noise it was pre-trained on), and larger models with
+            # more attention blocks are more likely to produce inf/nan in float16 for
+            # pathological batches.  float32 here costs ~1.5× memory on this sub-module
+            # but eliminates that risk; the resulting controls are float32 and safely
+            # upcast the skip additions in UNet.forward.
+            with torch.autocast(x.device.type, enabled=False):
+                controls = self.controlnet(
+                    ctrl.to(torch.float32),
+                    c_noise,
+                    class_labels.to(torch.float32) if class_labels is not None else None,
+                )
 
         return self.denoiser(
             x, noise_std,
