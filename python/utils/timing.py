@@ -24,6 +24,10 @@ class StepTimer:
         self._counts: dict[str, int] = defaultdict(int)
         self._step = 0
         self._file = file
+        if self._file is not None:
+            # Clear the file at the start
+            with open(self._file, "w") as f:
+                f.write("")
 
     @contextmanager
     def section(self, name: str):
