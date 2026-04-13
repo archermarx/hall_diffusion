@@ -6,10 +6,7 @@ import math
 import json
 import os
 import shutil
-import time
 import tomllib
-from collections import defaultdict
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +28,7 @@ from models.ema import EMA
 from loss import LossFunction
 from noise import NoiseSampler
 from utils import utils, thruster_data, visualization
+from utils.timing import StepTimer
 
 DEVICE = utils.get_device()
 
@@ -40,62 +38,6 @@ torch.manual_seed(10)
 # Get directory in which script is being run as well as the root directory of the project.
 SCRIPT_DIR = utils.get_script_dir()
 ROOT_DIR = SCRIPT_DIR / ".."
-
-
-class StepTimer:
-    """Per-section wall-clock profiler with optional CUDA synchronization.
-
-    Usage:
-        timer = StepTimer(enabled=True, print_every=50)
-        with timer.section("forward"):
-            loss = model(x)
-        timer.step()   # call once per training step; prints a table every print_every steps
-
-    Each section time is measured with GPU sync so it reflects real compute time, not just
-    kernel-dispatch time.  Disable (enabled=False) for zero-overhead operation.
-    """
-
-    def __init__(self, enabled: bool = False, print_every: int = 50):
-        self.enabled = enabled
-        self.print_every = print_every
-        self._totals: dict[str, float] = defaultdict(float)
-        self._counts: dict[str, int] = defaultdict(int)
-        self._step = 0
-
-    @contextmanager
-    def section(self, name: str):
-        if not self.enabled:
-            yield
-            return
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        yield
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        elapsed = time.perf_counter() - t0
-        self._totals[name] += elapsed
-        self._counts[name] += 1
-
-    def step(self):
-        if not self.enabled:
-            return
-        self._step += 1
-        if self._step % self.print_every == 0:
-            self._print_report()
-
-    def _print_report(self):
-        if not self._totals:
-            return
-        accounted = sum(self._totals.values())
-        print(f"\n--- StepTimer report  (step {self._step}) ---")
-        for name, total in sorted(self._totals.items(), key=lambda kv: -kv[1]):
-            avg_ms = 1000.0 * total / self._counts[name]
-            pct = 100.0 * total / accounted if accounted > 0 else 0.0
-            print(f"  {name:<30s}  {avg_ms:7.2f} ms/step  ({pct:5.1f}%)")
-        print(f"  {'total accounted':<30s}  {1000.0 * accounted / self._step:7.2f} ms/step")
-        print()
-
 
 @dataclass
 class TrainingState:
@@ -479,7 +421,7 @@ def train(args):
 
     # ---------------------------------------------
     # Profiling setup
-    timer = StepTimer(enabled=args.profile, print_every=50)
+    timer = StepTimer(enabled=args.profile, print_every=args.profile_steps, file=args.profile_file)
 
     if args.profile_trace:
         profile_dir = Path(args.profile_trace)
@@ -506,7 +448,6 @@ def train(args):
         progress = tqdm(train_loader)
         data_iter = iter(progress)
         while True:
-
             with timer.section("data_load"):
                 try:
                     filenames, vec, y = next(data_iter)
@@ -539,27 +480,31 @@ def train(args):
                 with open(out_dir / "outliers.json", "w") as fd:
                     json.dump(sorted_outliers, fd, indent=4)
 
-            # Evaluate on test set, if it's time to do so
-            if state.batch_idx % evaluation_iters == 0:
-                progress.set_description(description(epoch_idx, state.batch_idx, "Validating"))
-                val_seed = torch.randint(2**31, (1,)).item()
-                state.ema_loss = validation_loss(state.ema_model, loss_fn, test_loader, visualize=True, epoch_idx=epoch_idx, out_folder=out_dir, data_dir=test_data_dir, ctrl_fn=ctrl_fn, seed=val_seed)
-                state.val_loss = validation_loss(state.model, loss_fn, test_loader, data_dir=test_data_dir, ctrl_fn=ctrl_fn, seed=val_seed)
+            with timer.section("validation"):
+                # Evaluate on test set, if it's time to do so
+                if state.batch_idx % evaluation_iters == 0:
+                    progress.set_description(description(epoch_idx, state.batch_idx, "Validating"))
+                    val_seed = torch.randint(2**31, (1,)).item()
+                    state.ema_loss = validation_loss(state.ema_model, loss_fn, test_loader, visualize=True, epoch_idx=epoch_idx, out_folder=out_dir, data_dir=test_data_dir, ctrl_fn=ctrl_fn, seed=val_seed)
+                    state.val_loss = validation_loss(state.model, loss_fn, test_loader, data_dir=test_data_dir, ctrl_fn=ctrl_fn, seed=val_seed)
 
             progress.set_postfix_str(f"batch_loss={batch_loss:.4f}, val_loss={state.val_loss:.4f}")
 
-            # Update log file
-            row = dict(example_idx=state.example_idx, batch_idx=state.batch_idx, epoch_idx=epoch_idx,
-                       train_loss=batch_loss, val_loss=state.val_loss, ema_loss=state.ema_loss,
-                       grad_norm=grad_norm, learning_rate=lr)
-            write_header = not log_file.exists() or log_file.stat().st_size == 0
-            pd.DataFrame([row]).to_csv(log_file, mode='a', header=write_header, index=False)
+            with timer.section("logging"):
+                # Update log file
+                row = dict(example_idx=state.example_idx, batch_idx=state.batch_idx, epoch_idx=epoch_idx,
+                        train_loss=batch_loss, val_loss=state.val_loss, ema_loss=state.ema_loss,
+                        grad_norm=grad_norm, learning_rate=lr)
+                write_header = not log_file.exists() or log_file.stat().st_size == 0
+                pd.DataFrame([row]).to_csv(log_file, mode='a', header=write_header, index=False)
 
             if state.batch_idx % checkpoint_iters != 0:
                 continue
 
             progress.set_description(description(epoch_idx, state.batch_idx, "Saving"))
-            save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, old_checkpoint, log_file, out_dir, evaluation_iters)
+
+            with timer.section("checkpoint"):
+                save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, old_checkpoint, log_file, out_dir, evaluation_iters)
 
 
 if __name__ == "__main__":
@@ -573,7 +518,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Enable lightweight per-section wall-clock timing. Prints a table every 50 steps.",
+        help="Enable lightweight per-section wall-clock timing. Prints a table every profile-steps steps.",
+    )
+    parser.add_argument(
+        "--profile-steps",
+        type=int,
+        help="Number of steps between printing the StepTimer report (default: 50)",
+        default=50,
+    )
+    parser.add_argument(
+        "--profile-file",
+        type=str,
+        help="If set, write StepTimer reports to this file instead of printing to stdout.",
     )
     parser.add_argument(
         "--profile-trace",
