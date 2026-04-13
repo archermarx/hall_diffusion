@@ -39,13 +39,14 @@ def plot_training_progress(log_file, out_dir, evaluation_iters, outlier_inds):
         ax_loss.axvline(x, color="black", alpha=0.3, linewidth=0.8)
     # Dummy handle so outliers appear in the legend
     if outlier_inds:
-        ax_loss.axvline(float("nan"), color="black", alpha=0.3, linewidth=0.8, label="Outliers")
+        ax_loss.axvline(float("nan"), color="orange", alpha=0.3, linewidth=0.8, label="Outliers")
 
     ax_loss.set_yscale("log")
     ax_loss.set_ylabel("Loss")
     ax_loss.set_xlim(plot_df['example_idx'].iloc[0], plot_df['example_idx'].iloc[-1])
     ax_loss.grid(which="both")
     ax_loss.legend(loc="upper right", ncols=2)
+    ax_loss.tick_params(axis='y', which='both', right=True, labelright=True)
 
     # --- Panel 2: Gradient norm + learning rate ---
     ax_grad.plot(plot_df['example_idx'], plot_df['grad_norm'], color="tab:red", linewidth=0.8, label="Gradient norm")
