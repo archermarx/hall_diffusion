@@ -31,6 +31,7 @@ from utils import utils, thruster_data, visualization
 from utils.timing import StepTimer
 
 DEVICE = utils.get_device()
+AMP_DTYPE = torch.bfloat16 if (DEVICE.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
 
 # Set RNG seed
 torch.manual_seed(10)
@@ -171,13 +172,16 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_f
     # Compute loss and do backwards pass
     if use_amp:
         with timer.section("forward"):
-            with torch.amp.autocast_mode.autocast(DEVICE.type):
+            with torch.amp.autocast_mode.autocast(DEVICE.type, dtype=AMP_DTYPE):
                 loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
         if not torch.isfinite(loss):
             print(f"Warning: non-finite loss ({loss.item():.4g}), skipping batch")
             return float("nan"), float("nan"), 0.0
         with timer.section("backward"):
-            state.scaler.scale(loss).backward()
+            if state.scaler is not None:
+                state.scaler.scale(loss).backward()
+            else:
+                loss.backward()
     else:
         with timer.section("forward"):
             loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
@@ -188,7 +192,7 @@ def train_one_batch(y, state, loss_fn, condition_vec=None, use_amp=False, ctrl_f
             loss.backward()
 
     with timer.section("optimizer"):
-        if use_amp:
+        if use_amp and state.scaler is not None:
             state.scaler.unscale_(state.optimizer)
             torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=10.0)
             prev_scale = state.scaler.get_scale()
@@ -350,7 +354,8 @@ def train(args):
         weight_decay=train_args["weight_decay"],
         betas=betas,
     )
-    scaler = torch.amp.grad_scaler.GradScaler()
+    scaler = torch.amp.grad_scaler.GradScaler() if AMP_DTYPE == torch.float16 else None
+    print(f"AMP dtype: {AMP_DTYPE}, grad scaler: {'enabled' if scaler is not None else 'disabled'}")
 
     # ---------------------------------------------
     # Checkpoint configuration
