@@ -410,12 +410,14 @@ class UNet(torch.nn.Module):
             x = block(x) if "conv" in name else block(x, emb)
             skips.append(x)
 
-        # Inject ControlNet signals additively into skip list.
+        # Inject ControlNet signals additively into skip list and bottleneck.
         # Plain addition (not mp_sum) preserves the zero-init invariant:
-        # when controls are zero at init, skips are unchanged.
+        # when controls are zero at init, skips and x are unchanged.
         if controls is not None:
             enc_keys = list(self.enc.keys())
             skips = [skip + controls[key] for skip, key in zip(skips, enc_keys)]
+            if "_bottleneck" in controls:
+                x = x + controls["_bottleneck"]
 
         # Decoder.
         for name, block in self.dec.items():

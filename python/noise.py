@@ -9,7 +9,7 @@ def get_fixed_coords(Ln1, Ln2):
 
 class NoiseSampler(object):
     @torch.no_grad()
-    def __init__(self, channels: int, resolution: int, device: torch.device):
+    def __init__(self, channels: int, resolution: int, device: torch.device, **kwargs):
         self.channels=channels
         self.resolution=resolution
         self.device=device

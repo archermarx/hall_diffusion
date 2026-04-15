@@ -62,6 +62,7 @@ class ControlNet(torch.nn.Module):
         self.ctrl_conv = torch.nn.ModuleDict()
         self.ctrl_gain = torch.nn.ParameterDict()
 
+        cout = cblock[-1]  # final encoder channel count; overwritten by the loop
         first = True
         for name, block, cout in _encoder_blocks(
             resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs
@@ -73,6 +74,12 @@ class ControlNet(torch.nn.Module):
             self.enc[name] = block
             self.ctrl_conv[name] = MPConv(cout, cout, kernel=[1])
             self.ctrl_gain[name] = torch.nn.Parameter(torch.zeros([]))
+
+        # Bottleneck zero-conv: applied to the final encoder output before it
+        # enters the UNet's bottleneck blocks (dec/*_in0 / *_in1).
+        # cout holds the channel count of the last encoder stage after the loop.
+        self.btl_conv = MPConv(cout, cout, kernel=[1])
+        self.btl_gain = torch.nn.Parameter(torch.zeros([]))
 
     @classmethod
     def from_unet(cls, unet, control_channels, **block_kwargs):
@@ -169,6 +176,9 @@ class ControlNet(torch.nn.Module):
         for name, block in self.enc.items():
             x = block(x) if "conv" in name else block(x, emb)
             controls[name] = self.ctrl_conv[name](x, gain=self.ctrl_gain[name])
+
+        # Bottleneck: inject into UNet's x before the dec/*_in0 / *_in1 blocks.
+        controls["_bottleneck"] = self.btl_conv(x, gain=self.btl_gain)
 
         return controls
 
