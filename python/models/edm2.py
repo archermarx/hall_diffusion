@@ -415,9 +415,9 @@ class UNet(torch.nn.Module):
         # when controls are zero at init, skips and x are unchanged.
         if controls is not None:
             enc_keys = list(self.enc.keys())
-            skips = [skip + controls[key] for skip, key in zip(skips, enc_keys)]
+            skips = [skip + controls[key].to(skip.dtype) for skip, key in zip(skips, enc_keys)]
             if "_bottleneck" in controls:
-                x = x + controls["_bottleneck"]
+                x = x + controls["_bottleneck"].to(x.dtype)
 
         # Decoder.
         for name, block in self.dec.items():
