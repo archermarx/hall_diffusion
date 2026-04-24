@@ -11,6 +11,7 @@
 # Model modified from above to use 1D convolutions.
 
 import torch
+import torch.nn as nn
 import numpy as np
 import tomllib
 import argparse
@@ -91,11 +92,11 @@ def resample1d(x, f=[1, 1], mode="keep"):
     f = const_like(x, f)
     c = x.shape[1]
     if mode == "down":
-        return torch.nn.functional.conv1d(
+        return nn.functional.conv1d(
             x, f.tile([c, 1, 1]), groups=c, stride=2, padding=(pad,)
         )
     assert mode == "up"
-    return torch.nn.functional.conv_transpose1d(
+    return nn.functional.conv_transpose1d(
         x, (f * 4).tile([c, 1, 1]), groups=c, stride=2, padding=(pad,)
     )
 
@@ -105,7 +106,7 @@ def resample1d(x, f=[1, 1], mode="keep"):
 
 
 def mp_silu(x):
-    return torch.nn.functional.silu(x) / 0.596
+    return nn.functional.silu(x) / 0.596
 
 
 # ----------------------------------------------------------------------------
@@ -133,7 +134,7 @@ def mp_cat(a, b, dim=1, t=0.5):
 # Magnitude-preserving Fourier features (Equation 75).
 
 
-class MPFourier(torch.nn.Module):
+class MPFourier(nn.Module):
     def __init__(self, num_channels, bandwidth=1):
         super().__init__()
         self.register_buffer("freqs", 2 * np.pi * torch.randn(num_channels) * bandwidth)
@@ -152,11 +153,11 @@ class MPFourier(torch.nn.Module):
 # with force weight normalization (Equation 66).
 
 
-class MPConv(torch.nn.Module):
+class MPConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel):
         super().__init__()
         self.out_channels = out_channels
-        self.weight = torch.nn.Parameter(
+        self.weight = nn.Parameter(
             torch.randn(out_channels, in_channels, *kernel)
         )
 
@@ -171,14 +172,14 @@ class MPConv(torch.nn.Module):
         if w.ndim == 2:
             return x @ w.t()
         assert w.ndim == 3
-        return torch.nn.functional.conv1d(x, w, padding=(w.shape[-1] // 2,))
+        return nn.functional.conv1d(x, w, padding=(w.shape[-1] // 2,))
 
 
 # ----------------------------------------------------------------------------
 # U-Net encoder/decoder block with optional self-attention (Figure 21).
 
 
-class Block(torch.nn.Module):
+class Block(nn.Module):
     def __init__(
         self,
         in_channels,  # Number of input channels.
@@ -203,7 +204,7 @@ class Block(torch.nn.Module):
         self.res_balance = res_balance
         self.attn_balance = attn_balance
         self.clip_act = clip_act
-        self.emb_gain = torch.nn.Parameter(torch.zeros([]))
+        self.emb_gain = nn.Parameter(torch.zeros([]))
         self.conv_res0 = MPConv(
             out_channels if flavor == "enc" else in_channels,
             out_channels,
@@ -256,7 +257,7 @@ class Block(torch.nn.Module):
             q, k, v = normalize(y, dim=2).unbind(3)  # (B, heads, C_per_head, L) each
             # scaled_dot_product_attention expects (B, heads, L, C_per_head)
             q, k, v = q.transpose(2, 3), k.transpose(2, 3), v.transpose(2, 3)
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+            y = nn.functional.scaled_dot_product_attention(q, k, v)
             y = self.attn_proj(y.transpose(2, 3).reshape(*x.shape))
             x = mp_sum(x, y, t=self.attn_balance)
 
@@ -287,51 +288,78 @@ def _build_embeddings(cnoise, cemb, condition_dim):
 
 
 def _encoder_blocks(resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs):
-    """Yield (name, block, cout) for every encoder stage in order.
+    """
+    Build the encoder stage of the EDM2 architecture.
+    Yields (name, block, cout) for every encoder level in order.
 
     The stem conv at level 0 receives ``in_channels + 1`` input channels
     (the +1 is the constant ones channel added in ``forward``).
+    ------------------------------------------------------------------------
+    Each level after the first (level 0) is structured as
+
+    (prev level) -> [EncD] -> [Enc(A)] -> ... -> [Enc(A)]
+       c1 x w      c1 x w/2   c2 x w/2           c2 x w/2
+
+    where [Enc(A)] is either [Enc] or [EncA] depending on whether this resolution has self attention,
+    [EncD] is variant of an encoder block that downsamples the image,
+    w and c1 are the resolution and number of channels of the previous level, and c2
+    is the number of channels after this level.
+    At level 0, [EncD] is replaced with [InConv], which increases the channel count
+    from in_channels + 1 to input_channels without resampling.
     """
+
+    enc = nn.ModuleDict()
     cout = in_channels + 1
+    res = resolution
     for level, channels in enumerate(cblock):
-        res = resolution >> level
         if level == 0:
+            # [InConv]
+            # Input (stem) convolutional layer
+            # Increases number of channels from in_channels + 1 to channels
             cin, cout = cout, channels
-            yield f"{res}x{res}_conv", MPConv(cin, cout, kernel=[3]), cout
+            enc[f"{res}x{res}_conv"] = MPConv(cin, cout, kernel=[3])
+            #yield f"{res}x{res}_conv", MPConv(cin, cout, kernel=[3]), cout
         else:
-            yield f"{res}x{res}_down", Block(cout, cout, cemb, flavor="enc", resample_mode="down", **block_kwargs), cout
+            # [EncD]
+            # Encoder block that downsamples
+            # Starts all levels except the first
+            enc[f"{res}x{res}_down"] = Block(cout, cout, cemb, flavor="enc", resample_mode="down", **block_kwargs)
         for idx in range(num_blocks):
+            # [Enc(A)]
+            # Encoder block (with or without attention)
             cin, cout = cout, channels
-            yield (
-                f"{res}x{res}_block{idx}",
-                Block(cin, cout, cemb, flavor="enc", attention=(res in attn_resolutions), **block_kwargs),
-                cout,
-            )
+            enc[f"{res}x{res}_block{idx}"] = Block(cin, cout, cemb, flavor="enc", attention=(res in attn_resolutions), **block_kwargs)
+            # yield (
+            #     f"{res}x{res}_block{idx}",
+            #     Block(cin, cout, cemb, flavor="enc", attention=(res in attn_resolutions), **block_kwargs),
+            #     cout,
+            # )
+
+        if res % 2 != 0:
+            raise ValueError("Resolution {res} is not divisible by 2 at UNet level {level}!")
+        res //= 2
+
+    return enc, cout
 
 
 # ----------------------------------------------------------------------------
 # EDM2 U-Net model (Figure 21).
 
-class UNet(torch.nn.Module):
+class UNet(nn.Module):
     def __init__(
         self,
         resolution,  # Image resolution.
         in_channels,  # Image channels.
         condition_dim,  # Class label dimensionality. 0 = unconditional.
         base_channels=192,  # Base multiplier for the number of channels.
-        channel_mult=[
-            1,
-            2,
-            3,
-            4,
-            5,
-        ],  # Per-resolution multipliers for the number of channels.
+        channel_mult=[1, 2, 3, 4, 5],  # Per-resolution multipliers for the number of channels.
         channel_mult_noise=None,  # Multiplier for noise embedding dimensionality. None = select based on channel_mult.
         channel_mult_emb=None,  # Multiplier for final embedding dimensionality. None = select based on channel_mult.
         num_blocks=3,  # Number of residual blocks per resolution.
         attn_resolutions=[16, 8],  # List of resolutions with self-attention.
         label_balance=0.5,  # Balance between noise embedding (0) and class embedding (1).
         concat_balance=0.5,  # Balance between skip connections (0) and main path (1).
+        include_decoder=True, # Whether to include the decoder block (useful for ControlNets)
         **block_kwargs,  # Arguments for Block.
     ):
         super().__init__()
@@ -348,97 +376,100 @@ class UNet(torch.nn.Module):
         self.attn_resolutions = list(attn_resolutions)
         self.label_balance = label_balance
         self.concat_balance = concat_balance
-        self.out_gain = torch.nn.Parameter(torch.zeros([]))
+        self.out_gain = nn.Parameter(torch.zeros([]))
+        self.include_decoder = include_decoder
 
-        # Embedding.
-        self.emb_fourier, self.emb_noise, self.emb_label = _build_embeddings(
-            cnoise, cemb, condition_dim
-        )
+        # Build noise and class embeddings
+        self.emb_fourier, self.emb_noise, self.emb_label = _build_embeddings(cnoise, cemb, condition_dim)
 
-        # Encoder.
-        self.enc = torch.nn.ModuleDict()
-        cout = in_channels + 1  # updated by the loop; needed by the decoder
-        for name, block, cout in _encoder_blocks(
-            resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs
-        ):
-            self.enc[name] = block
+        # Construct encoder stage
+        self.enc, cout = _encoder_blocks(resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs)
 
-        # Decoder.
-        self.dec = torch.nn.ModuleDict()
-        skips = [block.out_channels for block in self.enc.values()]
-        for level, channels in reversed(list(enumerate(cblock))):
-            res = resolution >> level
-            if level == len(cblock) - 1:
-                self.dec[f"{res}x{res}_in0"] = Block(
-                    cout, cout, cemb, flavor="dec", attention=True, **block_kwargs
-                )
-                self.dec[f"{res}x{res}_in1"] = Block(
-                    cout, cout, cemb, flavor="dec", **block_kwargs
-                )
-            else:
-                self.dec[f"{res}x{res}_up"] = Block(
-                    cout, cout, cemb, flavor="dec", resample_mode="up", **block_kwargs
-                )
-            for idx in range(num_blocks + 1):
-                cin = cout + skips.pop()
-                cout = channels
-                self.dec[f"{res}x{res}_block{idx}"] = Block(
-                    cin,
-                    cout,
-                    cemb,
-                    flavor="dec",
-                    attention=(res in attn_resolutions),
-                    **block_kwargs,
-                )
-        self.out_conv = MPConv(cout, in_channels, kernel=[3])
+        if include_decoder:
+            # Decoder.
+            self.dec = nn.ModuleDict()
+            skips = [block.out_channels for block in self.enc.values()]
+            for level, channels in reversed(list(enumerate(cblock))):
+                res = resolution >> level
+                if level == len(cblock) - 1:
+                    self.dec[f"{res}x{res}_in0"] = Block(cout, cout, cemb, flavor="dec", attention=True, **block_kwargs)
+                    self.dec[f"{res}x{res}_in1"] = Block(cout, cout, cemb, flavor="dec", **block_kwargs)
+                else:
+                    self.dec[f"{res}x{res}_up"] = Block(cout, cout, cemb, flavor="dec", resample_mode="up", **block_kwargs)
+                for idx in range(num_blocks + 1):
+                    cin = cout + skips.pop()
+                    cout = channels
+                    self.dec[f"{res}x{res}_block{idx}"] = Block(cin, cout, cemb, flavor="dec", attention=(res in attn_resolutions), **block_kwargs)
 
-    def forward(self, x, noise_labels, class_labels, controls=None):
+            # Output convolution
+            self.out_conv = MPConv(cout, in_channels, kernel=[3])
+
+    def embed(self, noise_labels, class_labels):
         # Embedding.
         emb = self.emb_noise(self.emb_fourier(noise_labels))
         if self.emb_label is not None:
-            emb = mp_sum(
-                emb,
-                self.emb_label(class_labels * np.sqrt(class_labels.shape[1])),
-                t=self.label_balance,
-            )
+            emb = mp_sum(emb, self.emb_label(class_labels * np.sqrt(class_labels.shape[1])), t=self.label_balance,)
         emb = mp_silu(emb)
+        return emb
 
-        # Encoder.
-        x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
+    def encode(self, x, emb, controls=None):
         skips = []
         for name, block in self.enc.items():
-            x = block(x) if "conv" in name else block(x, emb)
+            if "conv" in name:
+                x = block(x)
+                if controls is not None:
+                    x += controls
+            else:
+                x = block(x, emb)
+
             skips.append(x)
+        return x, skips
 
-        # Inject ControlNet signals additively into skip list and bottleneck.
-        # Plain addition (not mp_sum) preserves the zero-init invariant:
-        # when controls are zero at init, skips and x are unchanged.
-        if controls is not None:
-            enc_keys = list(self.enc.keys())
-            skips = [skip + controls[key].to(skip.dtype) for skip, key in zip(skips, enc_keys)]
-            if "_bottleneck" in controls:
-                x = x + controls["_bottleneck"].to(x.dtype)
+    def decode(self, x, skips, emb):
+        if self.include_decoder:
+            # Decoder.
+            for name, block in self.dec.items():
+                if "block" in name:
+                    x = mp_cat(x, skips.pop(), t=self.concat_balance)
+                x = block(x, emb)
+            x = self.out_conv(x, gain=self.out_gain)
+        return x
 
-        # Decoder.
-        for name, block in self.dec.items():
-            if "block" in name:
-                x = mp_cat(x, skips.pop(), t=self.concat_balance)
-            x = block(x, emb)
-        x = self.out_conv(x, gain=self.out_gain)
+    def forward(self, x, noise_labels, class_labels):
+
+        # Extra ones channel replaces biases removed in core blocks of model
+        x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
+
+        # Noise + class embedding
+        emb = self.embed(noise_labels, class_labels)
+
+        # Encoder
+        x, skips = self.encode(x, emb)
+
+        # Decoder
+        x = self.decode(x, skips, emb)
         return x
 
 
 # ----------------------------------------------------------------------------
 # Preconditioning and uncertainty estimation.
 
-class EDM2Denoiser(torch.nn.Module):
+def get_precondition_factors(noise_std, data_std):
+    c_skip = data_std**2 / (noise_std**2 + data_std**2)
+    c_out = noise_std * data_std / (noise_std**2 + data_std**2).sqrt()
+    c_in = 1 / (data_std**2 + noise_std**2).sqrt()
+    c_noise = noise_std.flatten().log() / 4
+
+    return c_in, c_out, c_skip, c_noise
+
+
+class EDM2Denoiser(nn.Module):
     def __init__(
         self,
         resolution,  # Image resolution.
         in_channels,  # Image channels.
         condition_dim,  # Class label dimensionality. 0 = unconditional.
         data_std=0.5,  # Expected standard deviation of the training data.
-        logvar_channels=128,
         **unet_kwargs,  # Keyword arguments for UNet.
     ):
         super().__init__()
@@ -452,11 +483,9 @@ class EDM2Denoiser(torch.nn.Module):
             condition_dim=condition_dim,
             **unet_kwargs,
         )
-        self.logvar_fourier = MPFourier(logvar_channels)
-        self.logvar_linear = MPConv(logvar_channels, 1, kernel=[])
 
     def forward(
-        self, x, noise_std, condition_vector=None, return_logvar=False, controls=None, **unet_kwargs
+        self, x, noise_std, condition_vector=None, **unet_kwargs
     ):
         x = x.to(torch.float32)
         noise_std = noise_std.to(torch.float32).reshape(-1, 1, 1)
@@ -469,20 +498,12 @@ class EDM2Denoiser(torch.nn.Module):
         )
 
         # Preconditioning weights.
-        c_skip = self.data_std**2 / (noise_std**2 + self.data_std**2)
-        c_out = noise_std * self.data_std / (noise_std**2 + self.data_std**2).sqrt()
-        c_in = 1 / (self.data_std**2 + noise_std**2).sqrt()
-        c_noise = noise_std.flatten().log() / 4
+        c_in, c_out, c_skip, c_noise = get_precondition_factors(noise_std, self.data_std)
 
         # Run the model.
         x_in = c_in * x
-        F_x = self.unet(x_in, c_noise, condition_vector, controls=controls, **unet_kwargs)
+        F_x = self.unet(x_in, c_noise, condition_vector, **unet_kwargs)
         D_x = c_skip * x + c_out * F_x.to(torch.float32)
-
-        # Estimate uncertainty if requested.
-        if return_logvar:
-            logvar = self.logvar_linear(self.logvar_fourier(c_noise)).reshape(-1, 1, 1)
-            return D_x, logvar  # u(sigma) in Equation 21
 
         return D_x
 
@@ -505,26 +526,6 @@ class EDM2Denoiser(torch.nn.Module):
             out = model(x, noise_std, condition_vector=cond_vec)
             print(f"{dim}D: input = {x.shape=}, output = {out.shape=}")
             assert x.shape == out.shape
-
-    @staticmethod
-    @torch.no_grad
-    def from_config(config):
-        return EDM2Denoiser(
-            in_channels=config["in_channels"],
-            resolution=config["resolution"],
-            base_channels=config["base_channels"],
-            channel_mult=config["channel_mult"],
-            num_blocks=config["num_blocks"],
-            condition_dim=config["label_dim"],
-        )
-
-    @staticmethod
-    @torch.no_grad
-    def from_config_file(config_file):
-        with open(config_file, "rb") as fp:
-            config = tomllib.load(fp)
-        return EDM2Denoiser.from_config(config["model"])
-
 
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":

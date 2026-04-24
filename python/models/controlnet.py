@@ -17,257 +17,139 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
+from typing import TypedDict
 
 from .edm2 import (
-    EDM2Denoiser,
-    MPConv, mp_silu, mp_sum,
-    _encoder_channel_dims, _build_embeddings, _encoder_blocks,
+    get_precondition_factors,
+    UNet, MPConv, mp_silu,
 )
 
+class UNetConfig(TypedDict):
+    resolution: int
+    in_channels: int
+    condition_dim: int
+    base_channels: int
+    channel_mult: list[int]
+    channel_mult_noise: int | None
+    channel_mult_emb: int | None
+    num_blocks: int
+    attn_resolutions: list[int]
+    label_balance: float
+    concat_balance: float
+
+class MPSiLU(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return mp_silu(x)
+
+def make_zero_module(module):
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
+
+class ZeroConv(nn.Module):
+    def __init__(self, num_channels):
+        super().__init__()
+        self.conv = nn.Conv1d(num_channels, num_channels, 1, padding=0)
+    
+    def forward(self, x):
+        return self.conv(x)
 
 class ControlNet(torch.nn.Module):
     def __init__(
         self,
-        resolution,             # Must match UNet resolution.
-        in_channels,            # Must match UNet in_channels.
-        control_channels,       # Number of channels in the (B, control_channels, resolution) control signal.
-        condition_dim,          # Must match UNet condition_dim. 0 = unconditional.
-        base_channels=192,
-        channel_mult=[1, 2, 3, 4, 5],
-        channel_mult_noise=None,
-        channel_mult_emb=None,
-        num_blocks=3,
-        attn_resolutions=[16, 8],
-        label_balance=0.5,
-        **block_kwargs,         # Forwarded to Block (same as UNet).
+        model_ckpt,                  # Checkpoint from which to load pretrained model
+        control_channels: int,       # Number of channels in the (B, control_channels, resolution) control signal.
+        resolution: int,             # Must match UNet resolution.
+        in_channels: int,            # Must match UNet in_channels.
+        condition_dim: int,          # Must match UNet condition_dim. 0 = unconditional.
+        data_std=0.5,
+        **unet_kwargs,
     ):
         super().__init__()
-        cblock, cnoise, cemb = _encoder_channel_dims(
-            base_channels, channel_mult, channel_mult_noise, channel_mult_emb
-        )
-        self.resolution = resolution
-        self.in_channels = in_channels
-        self.label_balance = label_balance
+        self.condition_dim = condition_dim
+        self.data_std = data_std
 
-        # Embedding layers — own copies, same architecture as UNet.
-        self.emb_fourier, self.emb_noise, self.emb_label = _build_embeddings(
-            cnoise, cemb, condition_dim
-        )
+        # Baseline trained unet
+        self.trained_unet = UNet(resolution=resolution, in_channels=in_channels, condition_dim=condition_dim, **unet_kwargs)
 
-        # Mirror UNet encoder.  The stem conv is rebuilt with control_channels
-        # as its input (replacing in_channels + 1) so it expands directly into
-        # feature space without a separate projection layer.  All other blocks
-        # are kept identical to the UNet encoder.
-        self.enc = torch.nn.ModuleDict()
-        self.ctrl_conv = torch.nn.ModuleDict()
-        self.ctrl_gain = torch.nn.ParameterDict()
+        # Load ControlNet copy of encoder layers
+        self.controlnet = UNet(include_decoder=False, resolution=resolution, in_channels=in_channels, condition_dim=condition_dim, **unet_kwargs)
 
-        cout = cblock[-1]  # final encoder channel count; overwritten by the loop
-        first = True
-        for name, block, cout in _encoder_blocks(
-            resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs
-        ):
-            if first:
-                # Replace stem conv input channels: control_channels → cblock[0].
-                block = MPConv(control_channels, cout, kernel=[3])
-                first = False
-            self.enc[name] = block
-            self.ctrl_conv[name] = MPConv(cout, cout, kernel=[1])
-            self.ctrl_gain[name] = torch.nn.Parameter(torch.zeros([]))
+        # Load weights from checkpoints
+        if model_ckpt is not None:
+            ckpt = torch.load(model_ckpt)
+            self.trained_unet.load_state_dict(ckpt, strict=True)
+            self.controlnet.load_state_dict(ckpt, strict=False)
 
-        # Bottleneck zero-conv: applied to the final encoder output before it
-        # enters the UNet's bottleneck blocks (dec/*_in0 / *_in1).
-        # cout holds the channel count of the last encoder stage after the loop.
-        self.btl_conv = MPConv(cout, cout, kernel=[1])
-        self.btl_gain = torch.nn.Parameter(torch.zeros([]))
-
-    @classmethod
-    def from_unet(cls, unet, control_channels, **block_kwargs):
-        """Build a ControlNet by copying weights from a trained UNet encoder.
-
-        The ControlNet's embedding layers and encoder blocks are initialised
-        with deep copies of the UNet's corresponding weights, so the mirrored
-        encoder starts with the same learned representations.  The
-        zero-initialized output projections (ctrl_conv / ctrl_gain) are always
-        freshly initialised — they must be trained from scratch.
-
-        Args:
-            unet:             A UNet instance whose embedding and encoder weights
-                              will be copied into the new ControlNet.
-            control_channels: Number of channels in the (B, control_channels,
-                              resolution) control signal.
-            **block_kwargs: Extra keyword arguments forwarded to ControlNet.__init__
-                         (e.g. dropout).  Architecture hyperparameters are
-                         inferred automatically from the UNet.
-
-        Returns:
-            A new ControlNet with encoder weights copied from ``unet``.
-        """
-        import copy
-
-        condition_dim = unet.emb_label.weight.shape[1] if unet.emb_label is not None else 0
-
-        net = cls(
-            resolution=unet.resolution,
-            in_channels=unet.in_channels,
-            control_channels=control_channels,
-            condition_dim=condition_dim,
-            base_channels=unet.base_channels,
-            channel_mult=unet.channel_mult,
-            channel_mult_noise=unet.channel_mult_noise,
-            channel_mult_emb=unet.channel_mult_emb,
-            num_blocks=unet.num_blocks,
-            attn_resolutions=unet.attn_resolutions,
-            label_balance=unet.label_balance,
-            **block_kwargs,
+        # Control embedding block: stack of convolutions with a zero-conv at the end
+        base_channels = self.trained_unet.base_channels
+        self.controlnet_ctrl_emb = nn.Sequential(
+            MPConv(control_channels, 64, [3]),
+            MPSiLU(),
+            MPConv(128, base_channels, [3]),
+            MPSiLU(),
+            ZeroConv(base_channels),
         )
 
-        # --- Copy encoder and embedding weights ----------------------------
-        net.emb_fourier.load_state_dict(copy.deepcopy(unet.emb_fourier.state_dict()))
-        net.emb_noise.load_state_dict(copy.deepcopy(unet.emb_noise.state_dict()))
-        if net.emb_label is not None and unet.emb_label is not None:
-            net.emb_label.load_state_dict(copy.deepcopy(unet.emb_label.state_dict()))
+        # Zero convolution modules for encoder levels
+        self.controlnet_down_zero_convs = nn.ModuleList([])
+        for _, block in self.controlnet.enc.items():
+            self.controlnet_down_zero_convs.append(ZeroConv(block.out_channels))
 
-        # Freeze embeddings — they are copied so the ControlNet encoder
-        # processes noise-level and class conditioning in the same
-        # representation space as the UNet.  Allowing them to drift would
-        # misalign the injected controls with the UNet decoder's expectations.
-        net.emb_fourier.requires_grad_(False)
-        net.emb_noise.requires_grad_(False)
-        if net.emb_label is not None:
-            net.emb_label.requires_grad_(False)
+    def get_trainable_params(self):
+        # Get all trainable controlnet parameters
+        # Copy of unet encoder
+        params = list(self.controlnet.parameters())
 
-        for key in net.enc:
-            if "conv" in key:
-                continue  # stem conv has different input channels — cannot copy
-            net.enc[key].load_state_dict(copy.deepcopy(unet.enc[key].state_dict()))
+        # Control embedding block and zero convs
+        params += list(self.controlnet_ctrl_emb.parameters())
+        params += list(self.controlnet_down_zero_convs.parameters())
+        return params
 
-        return net
-
-    def forward(self, ctrl, noise_labels, class_labels):
-        """Compute control signals from a spatial control input.
-
-        Args:
-            ctrl:         (B, control_channels, resolution) spatial control signal.
-            noise_labels: (B,) pre-computed noise labels (log(sigma)/4),
-                          same values used by the paired EDM2Denoiser call.
-            class_labels: (B, condition_dim) class/parameter conditioning,
-                          or None if unconditional.
-
-        Returns:
-            dict mapping encoder stage names to control tensors. All values
-            are zero at initialisation. Pass directly to UNet.forward as the
-            `controls` keyword argument.
-        """
-        # Embedding (same formula as UNet.forward).
-        emb = self.emb_noise(self.emb_fourier(noise_labels))
-        if self.emb_label is not None:
-            emb = mp_sum(
-                emb,
-                self.emb_label(class_labels * np.sqrt(class_labels.shape[1])),
-                t=self.label_balance,
-            )
-        emb = mp_silu(emb)
-
-        # Run mirrored encoder.  The stem conv (first block) accepts ctrl
-        # directly; remaining blocks are standard Block(x, emb) calls.
-        x = ctrl
-        controls = {}
-        for name, block in self.enc.items():
-            x = block(x) if "conv" in name else block(x, emb)
-            controls[name] = self.ctrl_conv[name](x, gain=self.ctrl_gain[name])
-
-        # Bottleneck: inject into UNet's x before the dec/*_in0 / *_in1 blocks.
-        controls["_bottleneck"] = self.btl_conv(x, gain=self.btl_gain)
-
-        return controls
-
-
-class ControlNetDenoiser(torch.nn.Module):
-    """Pairs a frozen EDM2Denoiser with a trainable ControlNet adapter.
-
-    During the forward pass the ControlNet converts a spatial control signal
-    (e.g. the output of ThrusterDataset.generate_measurements) into a dict of
-    encoder-stage controls, which are then injected additively into the frozen
-    denoiser's skip connections.  When ``ctrl`` is None the denoiser runs
-    identically to the unmodified EDM2Denoiser.
-    """
-
-    def __init__(self, denoiser: EDM2Denoiser, controlnet: "ControlNet"):
-        super().__init__()
-        self.denoiser = denoiser    # frozen — requires_grad_(False) at construction
-        self.controlnet = controlnet  # trainable
-
-    def train(self, mode: bool = True):
-        """Keep the frozen denoiser in eval mode regardless of the training flag.
-
-        nn.Module.train() propagates to all submodules, which would put the
-        denoiser's MPConv layers into training mode and trigger forced weight
-        normalization (self.weight.copy_(...)) on every forward pass.  That
-        in-place write accumulates floating-point rounding error into the
-        frozen weights over thousands of steps.
-        """
-        super().train(mode)
-        self.denoiser.eval()   # always eval — never touch frozen weights
-        return self
-
-    def forward(self, x, noise_std, condition_vector=None, ctrl=None, return_logvar=False):
-        controls = None
-        if ctrl is not None:
-            # Compute c_noise the same way EDM2Denoiser does so the embeddings stay aligned.
-            noise_std_f = noise_std.to(torch.float32).reshape(-1, 1, 1)
-            c_noise = noise_std_f.flatten().log() / 4
-
-            # Mirror EDM2Denoiser's condition_vector handling.
-            if self.denoiser.label_dim == 0:
-                class_labels = None
-            elif condition_vector is None:
-                class_labels = torch.zeros([1, self.denoiser.label_dim], device=x.device)
-            else:
-                class_labels = condition_vector.to(torch.float32).reshape(-1, self.denoiser.label_dim)
-
-            # Force float32 regardless of any outer autocast context.
-            # Under AMP, autocast recasts conv/linear ops to float16 even when inputs
-            # are float32.  The ControlNet encoder runs over out-of-distribution ctrl
-            # inputs (vs the image noise it was pre-trained on), and larger models with
-            # more attention blocks are more likely to produce inf/nan in float16 for
-            # pathological batches.  float32 here costs ~1.5× memory on this sub-module
-            # but eliminates that risk; the resulting controls are float32 and safely
-            # upcast the skip additions in UNet.forward.
-            with torch.autocast(x.device.type, enabled=False):
-                controls = self.controlnet(
-                    ctrl.to(torch.float32),
-                    c_noise,
-                    class_labels.to(torch.float32) if class_labels is not None else None,
-                )
-
-        return self.denoiser(
-            x, noise_std,
-            condition_vector=condition_vector,
-            return_logvar=return_logvar,
-            controls=controls,
+    def forward(self, x, control, noise_std, condition_vector=None):
+        x = x.to(torch.float32)
+        noise_std = noise_std.to(torch.float32).reshape(-1, 1, 1)
+        condition_vector = (
+            None
+            if self.condition_dim == 0
+            else torch.zeros((1, self.condition_dim), device=x.device)
+            if condition_vector is None
+            else condition_vector.to(torch.float32).reshape(-1, self.label_dim)
         )
 
-    @classmethod
-    def from_config(cls, config: dict, device: torch.device) -> "ControlNetDenoiser":
-        """Load base EDM2 checkpoint, freeze it, and attach a fresh ControlNet.
+        c_in, c_out, c_skip, c_noise = get_precondition_factors(noise_std, 0.5)
 
-        The base model checkpoint is expected at ``config['base_model'] / checkpoint.pth.tar``.
-        Architecture hyper-parameters (in_channels, label_dim, resolution) are
-        taken from the current config when present, falling back to the values
-        stored in the base checkpoint otherwise.
-        """
-        base_ckpt_path = Path(config["base_model"]) / "checkpoint.pth.tar"
-        base_ckpt = torch.load(base_ckpt_path, weights_only=False, map_location=device)
+        # Preconditioning
+        x = c_in * x
 
-        # Use the base checkpoint's stored config exactly — architecture must match
-        # the saved weights, so current-dataset values (in_channels, label_dim, etc.)
-        # must not override them here.
-        base_model_cfg = dict(base_ckpt["model_config"])
+        # Add extra ones channel
+        x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
 
-        denoiser = EDM2Denoiser.from_config(base_model_cfg).to(device)
-        denoiser.load_state_dict(base_ckpt["model"])
-        denoiser.requires_grad_(False)
+        # Noise and class embedding of trained unet, along with encoder outputs
+        with torch.no_grad():
+            trained_unet_emb = self.trained_unet.embed(c_noise, condition_vector)
+            trained_unet_out, trained_unet_skips = self.trained_unet.encode(x, trained_unet_emb)
 
-        controlnet = ControlNet.from_unet(denoiser.unet, config["control_channels"]).to(device)
-        return cls(denoiser, controlnet)
+        # Noise and class embedding of controlnet
+        controlnet_emb = self.controlnet.embed(c_noise, condition_vector)
+
+        # Control embedding block
+        controlnet_ctrl = self.controlnet_ctrl_emb(control)
+
+        # Our copy of the unet encoder
+        _, controlnet_skips = self.controlnet.encode(x, controlnet_emb, controls = controlnet_ctrl)
+
+        # Add zero-convolutions to controlnet outputs and add to trained unet skip connectoins
+        skips = [
+            zero_conv(controlnet_out) + unet_out \
+                for (controlnet_out, unet_out, zero_conv) \
+                in zip(controlnet_skips, trained_unet_skips, self.controlnet_down_zero_convs)
+        ]
+
+        trained_unet_out = self.trained_unet.decode(trained_unet_out, skips, trained_unet_emb)
+
+        return c_skip * x + c_out * trained_unet_out

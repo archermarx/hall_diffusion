@@ -27,9 +27,9 @@ def from_config(config, device: torch.device):
     print(config)
     match arch:
         case "edm2":
-            model = edm2.EDM2Denoiser.from_config(config).to(device)
+            model = edm2.EDM2Denoiser(**config).to(device)
         case "controlnet":
-            model = controlnet_mod.ControlNetDenoiser.from_config(config, device)
+            model = controlnet_mod.ControlNet(**config).to(device)
         case _:
             raise NotImplementedError()
 
