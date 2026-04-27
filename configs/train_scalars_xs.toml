@@ -23,7 +23,7 @@ downsample_res = 64
 
 [training]
 # Number of complete passes through the training data to complete
-epochs = 1024
+epochs = 2048
 # Training mini-batch size
 batch_size = 2048
 # Frequency in batches with which the model is tested on the validation set
@@ -34,6 +34,8 @@ ema_epochs = 128
 use_amp = true
 # Log file name
 log_file = "training.dat"
+# Noise sampler
+#noise_sampler = {type = "rbf", scale = 0.05}
 
 # Loss function configuration
 [training.loss]
@@ -52,13 +54,13 @@ lr = 3e-4
 min_lr = 3e-4
 # Epochs after which learning rate decay begins. Set to -1 to disable.
 lr_decay_start_epochs = -1
-# Weight decay rate in epochs
+# Weight decay rate
 weight_decay_epochs = 128
 
 # Directory configuration
 [training.directories]
 # Folder to save results in
-out_dir = "saved_models/train_scalars_lowres"
+out_dir = "saved_models/train_scalars_xs"
 # Training data folder
 train_data_dir = "data/train_21"
 # test data folder

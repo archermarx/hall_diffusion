@@ -21,10 +21,11 @@ def dataset_config(config: dict) -> dict:
     return config
 
 
-def from_config(config, device: torch.device):
-    arch = config.get("architecture", "edm2")
+def from_config(config: dict, device: torch.device):
+    arch = config.pop("architecture")
     assert arch in {"edm2", "controlnet"}
-    print(config)
+    print(f"{config=}")
+
     match arch:
         case "edm2":
             model = edm2.EDM2Denoiser(**config).to(device)

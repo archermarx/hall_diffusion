@@ -475,7 +475,7 @@ class EDM2Denoiser(nn.Module):
         super().__init__()
         self.img_resolution = resolution
         self.img_channels = in_channels
-        self.label_dim = condition_dim
+        self.condition_dim = condition_dim
         self.data_std = data_std
         self.unet = UNet(
             resolution=resolution,
@@ -484,6 +484,9 @@ class EDM2Denoiser(nn.Module):
             **unet_kwargs,
         )
 
+    def get_trainable_params(self):
+        return self.parameters()
+
     def forward(
         self, x, noise_std, condition_vector=None, **unet_kwargs
     ):
@@ -491,10 +494,10 @@ class EDM2Denoiser(nn.Module):
         noise_std = noise_std.to(torch.float32).reshape(-1, 1, 1)
         condition_vector = (
             None
-            if self.label_dim == 0
-            else torch.zeros([1, self.label_dim], device=x.device)
+            if self.condition_dim == 0
+            else torch.zeros([1, self.condition_dim], device=x.device)
             if condition_vector is None
-            else condition_vector.to(torch.float32).reshape(-1, self.label_dim)
+            else condition_vector.to(torch.float32).reshape(-1, self.condition_dim)
         )
 
         # Preconditioning weights.
@@ -511,16 +514,16 @@ class EDM2Denoiser(nn.Module):
     @torch.no_grad
     def check_shape(resolution, channels, base_channels, num_blocks):
         batch_size = 1024
-        label_dim = 8
+        condition_dim = 8
         for dim in (1,):
             model = EDM2Denoiser(
                 resolution=resolution,
                 in_channels=channels,
                 base_channels=base_channels,
                 num_blocks=num_blocks,
-                condition_dim=label_dim,
+                condition_dim=condition_dim,
             )
-            cond_vec = torch.randn((batch_size, label_dim))
+            cond_vec = torch.randn((batch_size, condition_dim))
             x = torch.rand((batch_size, channels) + (resolution,) * dim)
             noise_std = torch.rand((batch_size, 1) + (1,) * dim)
             out = model(x, noise_std, condition_vector=cond_vec)

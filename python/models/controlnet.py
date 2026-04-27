@@ -118,7 +118,7 @@ class ControlNet(torch.nn.Module):
             if self.condition_dim == 0
             else torch.zeros((1, self.condition_dim), device=x.device)
             if condition_vector is None
-            else condition_vector.to(torch.float32).reshape(-1, self.label_dim)
+            else condition_vector.to(torch.float32).reshape(-1, self.condition_dim)
         )
 
         c_in, c_out, c_skip, c_noise = get_precondition_factors(noise_std, 0.5)

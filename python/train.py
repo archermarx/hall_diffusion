@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 
 # Our dependencies
 import models
-from models.controlnet import ControlNetDenoiser
+from models.controlnet import ControlNet
 from models.ema import EMA
 from loss import LossFunction
 from noise import NoiseSampler
@@ -31,7 +31,7 @@ from utils import utils, thruster_data, visualization
 from utils.timing import StepTimer
 
 DEVICE = utils.get_device()
-AMP_DTYPE = torch.bfloat16 if (DEVICE.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+AMP_DTYPE = torch.float16 #torch.bfloat16 if (DEVICE.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
 
 # Set RNG seed
 torch.manual_seed(10)
@@ -226,7 +226,7 @@ def save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, o
 
     # For ControlNet, save only the adapter weights — the frozen denoiser is
     # re-loaded from base_model at startup, keeping checkpoint sizes small.
-    if isinstance(state.model, ControlNetDenoiser):
+    if isinstance(state.model, ControlNet):
         model_state = state.model.controlnet.state_dict()
         ema_state = state.ema_model.controlnet.state_dict()
     else:
@@ -260,7 +260,6 @@ def train(args):
     batch_size = train_args["batch_size"]
     evaluation_iters = train_args["eval_freq"]
     use_amp = train_args.get("use_amp", True)
-    ema_factor = train_args.get("ema", None)
     load_workers = train_args.get("load_workers", 2)
     prefetch_factor = train_args.get("prefetch_factor", 4)
 
@@ -278,8 +277,8 @@ def train(args):
     # inherited from the base model's stored config so they don't need to be
     # re-specified in the controlnet toml.
     data_cfg = models.dataset_config(config["model"])
-    scalars_in_tensor = data_cfg.get("scalars_in_tensor", False)
-    downsample_res = data_cfg.get("downsample_res", None)
+    scalars_in_tensor = data_cfg.pop("scalars_in_tensor", False)
+    downsample_res = data_cfg.pop("downsample_res", None)
     train_dataset = thruster_data.ThrusterDataset(train_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
     test_dataset = thruster_data.ThrusterDataset(test_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
 
@@ -311,9 +310,9 @@ def train(args):
 
     config["model"]["in_channels"] = train_dataset.num_fields
     if scalars_in_tensor:
-        config["model"]["label_dim"] = 0
+        config["model"]["condition_dim"] = 0
     else:
-        config["model"]["label_dim"] = train_dataset.num_params
+        config["model"]["condition_dim"] = train_dataset.num_params
 
     config["model"]["resolution"] = len(train_dataset.grid)
 
@@ -324,36 +323,27 @@ def train(args):
         sum(p.numel() for p in model.parameters() if p.requires_grad),
     )
 
-    # Set up the exponential moving average
-    if ema_factor is None:
-        if max_epochs <= 0:
-            raise ValueError("Cannot auto-compute EMA beta for infinite training (epochs=0); set ema explicitly in config.")
-        total_images = max_epochs * len(train_dataset)
-        t_half = 0.05 * total_images  # EDM2 heuristic: half-life = 5% of total training images
-        ema_factor = 0.5 ** (batch_size / t_half)
-        print(f"Auto-computed EMA beta: {ema_factor:.8f} (t_half={t_half:.3e} images over {max_epochs} epochs)")
+    # ---------------------------------------------
+    # Set up the exponential moving average model
+    ema_epochs = train_args.get("ema_epochs", None)
+    ema_factor = EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, ema_epochs)
+    print(f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}.")
     ema = EMA(ema_factor, step_start=2000)
     ema_model = copy.deepcopy(model).eval().requires_grad_(False)
 
     # ---------------------------------------------
     # Optimizer configuration
     opt_args = train_args["optimizer"]
+    betas = tuple(opt_args.get("adam_betas", [0.9, 0.999]))
     ref_lr = opt_args["lr"]
     min_lr = opt_args["min_lr"]
-    decay_epochs = opt_args["lr_decay_start_epochs"]
+    lr_decay_epochs = opt_args["lr_decay_start_epochs"]
+    lr_decay_batches = lr_decay_epochs * len(train_dataset) // batch_size
 
-    checkpoint_file = out_dir / "checkpoint.pth.tar"
-    old_checkpoint = out_dir / "checkpoint_prev.pth.tar"
-    betas = tuple(opt_args.get("adam_betas", [0.9, 0.995]))
+    weight_decay_epochs = opt_args.get("weight_decay_epochs", None)
+    weight_decay = 1 - EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, weight_decay_epochs)
 
-    decay_batches = decay_epochs * len(train_dataset) // batch_size
-
-    optimizer = optim.Adam(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=ref_lr,
-        weight_decay=train_args["weight_decay"],
-        betas=betas,
-    )
+    optimizer = optim.AdamW([p for p in model.get_trainable_params()], lr=ref_lr, weight_decay=weight_decay, betas=betas)
     scaler = torch.amp.grad_scaler.GradScaler() if AMP_DTYPE == torch.float16 else None
     print(f"AMP dtype: {AMP_DTYPE}, grad scaler: {'enabled' if scaler is not None else 'disabled'}")
 
@@ -362,23 +352,31 @@ def train(args):
     checkpoint_args = train_args["checkpoints"]
     checkpoint_iters = checkpoint_args["checkpoint_save_freq"]
     load_checkpoint = checkpoint_args["load_checkpoint"] and not args.restart
+    checkpoint_file = out_dir / "checkpoint.pth.tar"
+    old_checkpoint = out_dir / "checkpoint_prev.pth.tar"
 
     # Load checkpoint if found
     if load_checkpoint and os.path.exists(checkpoint_file):
         ckpt = torch.load(checkpoint_file, weights_only=False)
 
-        if isinstance(model, ControlNetDenoiser):
-            model.controlnet.load_state_dict(ckpt["model"])
+        if isinstance(model, ControlNet):
+            model.controlnet.load_state_dict(ckpt["model"], strict=False)
         else:
-            model.load_state_dict(ckpt["model"])
+            model.load_state_dict(ckpt["model"], strict=False)
+
         print("Model loaded from checkpoint")
-        optimizer.load_state_dict(ckpt["optimizer"])
+
+        try:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        except:
+            print(f"Unable to load optimizer from file. This means the underlying model specification may have changed. The optimizer will be created from scratch.")
+            
 
         if "ema" in ckpt:
-            if isinstance(ema_model, ControlNetDenoiser):
-                ema_model.controlnet.load_state_dict(ckpt["ema"])
+            if isinstance(ema_model, ControlNet):
+                ema_model.controlnet.load_state_dict(ckpt["ema"], strict=False)
             else:
-                ema_model.load_state_dict(ckpt["ema"])
+                ema_model.load_state_dict(ckpt["ema"], strict=False)
             ema.step_start = 0
             print("EMA loaded from checkpoint")
 
@@ -411,7 +409,7 @@ def train(args):
 
     # ---------------------------------------------
     # ControlNet measurement generator (None for vanilla EDM2)
-    ctrl_fn = train_dataset.generate_measurements if isinstance(model, ControlNetDenoiser) else None
+    ctrl_fn = train_dataset.generate_measurements if isinstance(model, ControlNet) else None
 
     # ---------------------------------------------
     # Noise args
@@ -472,7 +470,7 @@ def train(args):
             if not np.isfinite(batch_loss):
                 continue
 
-            lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, decay_batches, min_lr)
+            lr = update_lr(state.optimizer, state.batch_idx, batch_size, ref_lr, lr_decay_batches, min_lr)
 
             # Save outliers for later inspection and analysis
             # We check outliers by comparing the batch loss to recent validation losses
