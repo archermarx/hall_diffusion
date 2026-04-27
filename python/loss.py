@@ -67,7 +67,6 @@ class EDM2Loss:
         P_mean=-0.4,
         P_std=1.0,
         sigma_data=0.5,
-        include_logvar=False,
         deriv_h=1.0,
     ):
         self.P_mean = P_mean
@@ -75,7 +74,6 @@ class EDM2Loss:
         self.sigma_data = sigma_data
         self.noise_sampler = noise_sampler
         self.deriv_h = deriv_h
-        self.include_logvar = include_logvar
 
     def __call__(
         self,
@@ -99,11 +97,7 @@ class EDM2Loss:
         noisy_im = x + noise
 
         ctrl_kwargs = {"ctrl": ctrl} if ctrl is not None else {}
-        if self.include_logvar:
-            denoised, logvar = model(noisy_im, sigma, condition_vec, return_logvar=True, **ctrl_kwargs)
-        else:
-            denoised = model(noisy_im, sigma, condition_vec, **ctrl_kwargs)
-            logvar = torch.tensor(0.0)
+        denoised = model(noisy_im, sigma, condition_vec, **ctrl_kwargs)
 
         # Base loss
         base_loss = (denoised - x) ** 2
@@ -129,9 +123,5 @@ class EDM2Loss:
             weight * (base_loss + diff_loss_1 * h + diff_loss_2 * h**2) / total_weight
         )
         base_loss = loss.mean().item()
-
-        # Weight by homoscedastic uncertainty
-        if self.include_logvar:
-            loss = loss / logvar.exp() + logvar
 
         return loss.mean(), base_loss, noisy_im, denoised

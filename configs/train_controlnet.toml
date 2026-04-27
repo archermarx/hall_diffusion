@@ -29,9 +29,6 @@ load_workers = 4
 P_mean = -1.2
 # log(std) of noise levels to sample
 P_std = 1.2
-# Whether to include the heterosceladic uncertainty component (`logvar`) in the training loss.
-# NOTE: This means the loss can go negative. When plotting loss, we omit this component for ease of visualization.
-include_logvar = false
 
 # Optimizer configuration
 [training.optimizer]
