@@ -3,6 +3,14 @@ from collections import defaultdict
 from contextlib import contextmanager
 import time
 import torch
+from datetime import timedelta
+
+def format_timedelta(seconds):
+    td = timedelta(seconds=seconds)
+    days = td.days
+    hours, remainder = divmod(td.seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{days:02}:{hours:02}:{minutes:02}:{secs:02}"
 
 class StepTimer:
     """Per-section wall-clock profiler with optional CUDA synchronization.

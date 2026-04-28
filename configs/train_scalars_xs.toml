@@ -40,7 +40,7 @@ log_file = "training.dat"
 # Loss function configuration
 [training.loss]
 # log(mean) of noise levels to sample
-P_mean = -1.2
+P_mean = -0.5
 # log(std) of noise levels to sample
 P_std = 1.2
 

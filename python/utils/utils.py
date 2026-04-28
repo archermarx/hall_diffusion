@@ -1,14 +1,15 @@
 import os
 from pathlib import Path
 import sys
+import logging
 import torch
 import numpy as np
 import bisect
 import pandas as pd
 import tomllib
-import traceback
 from contextlib import contextmanager
 import pathlib
+from datetime import timedelta
 
 def paths_to_strings(d: dict):
     out = {}
@@ -96,3 +97,22 @@ def read_observation(obs):
         obs_dict.update(read_observation(obs_dict["extra"]))
                         
     return obs_dict
+
+def get_logger(name: str, filename: str | None = None, level: int = logging.DEBUG) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+    # Always add stdout handler
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+    logger.addHandler(stdout_handler)
+
+    # Optionally add file handler
+    if filename:
+        file_handler = logging.FileHandler(filename)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    return logger
