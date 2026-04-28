@@ -147,7 +147,7 @@ def update_lr(optimizer, batch_idx, batch_size, ref_lr, decay_batches, min_lr):
 
 def compute_grad_norm(model, logger: logging.Logger):
     """Compute the global gradient norm across all model parameters."""
-    grads = [p.grad.detach().flatten() for p in model.parameters() if p.grad is not None]
+    grads = [p.grad.detach().flatten() for p in model.get_trainable_params() if p.grad is not None]
     norm = torch.concat(grads).norm().item() if grads else 0.0
     if not np.isfinite(norm):
         logger.debug(f"Non-finite gradient norm encountered: {norm}")
@@ -196,13 +196,13 @@ def train_one_batch(y, state, loss_fn, logger: logging.Logger, condition_vec=Non
     with timer.section("optimizer"):
         if use_amp and state.scaler is not None:
             state.scaler.unscale_(state.optimizer)
-            torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=10.0)
+            torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=100.0)
             prev_scale = state.scaler.get_scale()
             state.scaler.step(state.optimizer)
             state.scaler.update()
             step_skipped = state.scaler.get_scale() < prev_scale
         else:
-            torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=10.0)
+            torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=100.0)
             state.optimizer.step()
             step_skipped = False
 

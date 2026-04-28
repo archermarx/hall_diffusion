@@ -71,6 +71,7 @@ class ControlNet(torch.nn.Module):
 
         # Baseline trained unet
         self.trained_unet = EDM2Denoiser(resolution=resolution, in_channels=in_channels, condition_dim=condition_dim, **unet_kwargs)
+        self.trained_unet.requires_grad_(False)
 
         # Load ControlNet copy of encoder layers
         self.controlnet = EDM2Denoiser(include_decoder=False, resolution=resolution, in_channels=in_channels, condition_dim=condition_dim, **unet_kwargs)

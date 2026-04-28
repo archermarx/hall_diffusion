@@ -6,7 +6,7 @@ import pandas as pd
 from . import thruster_data
 
 # Noise levels at which we plot progress during training
-NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 0.75]
+NOISE_LEVELS_FOR_PLOTTING = [0.05, 0.1, 0.5, 1.0]
 
 def plot_training_progress(log_file, out_dir, evaluation_iters, outlier_inds):
     plot_df = pd.read_csv(log_file)
