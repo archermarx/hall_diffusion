@@ -3,7 +3,6 @@ from matplotlib import colors
 import numpy as np
 from pathlib import Path
 import argparse
-import matplotlib
 import tomllib
 import math
 import pandas as pd
@@ -14,7 +13,6 @@ from utils import utils
 from utils.thruster_data import ThrusterDataset
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--anom", action="store_true", help="Generate plots of anomalous transport profiles + eigenfuncions")
 parser.add_argument("--samples", type=Path)
 parser.add_argument("--mcmc", type=Path)
 parser.add_argument("--ref", type=Path)
@@ -27,7 +25,7 @@ parser.add_argument(
 parser.add_argument("-f", "--fields", nargs="+", required=False)
 parser.add_argument("--observation", type=Path)
 parser.add_argument(
-    "--type", choices=["sidebyside", "comparison"], default="comparison"
+    "--type", choices=["sidebyside", "comparison", "tensors", "anom"], default="comparison"
 )
 parser.add_argument("--obs-style", choices=["line", "marker"], default="marker")
 
@@ -198,7 +196,7 @@ def savefig(fig, output_file: Path, dpi=200, filetypes: list[str] | None=None):
     for filetype in filetypes:
         fig.savefig(base+filetype, dpi=dpi)
 
-def load_samples(sample_dir, num_samples=None, burn_frac=0.0):
+def load_samples(sample_dir, num_samples=None, burn_frac=0.0, denormalize=True):
     dataset = ThrusterDataset(sample_dir)
     start_ind = round(burn_frac * len(dataset))
     indices = np.arange(start_ind, len(dataset))
@@ -206,8 +204,10 @@ def load_samples(sample_dir, num_samples=None, burn_frac=0.0):
         indices = np.random.choice(indices, size=num_samples)
 
     samples_norm = np.array([dataset[i][2] for i in indices])
-    samples = dataset.norm.denormalize_tensor(samples_norm)
-    return dataset, samples
+    if denormalize:
+        return dataset, dataset.norm.denormalize_tensor(samples_norm)
+    else:
+        return dataset, samples_norm
 
 
 def plot_quantiles(ax, x, qs, color=None, zorder=0):
@@ -244,8 +244,8 @@ def plot_traces(ax, x, data, color, zorder=0):
 
     if color is None:
         cmap = plt.get_cmap("tab10")
-        N = 10
-        colors = [cmap(i) for i in np.linspace(0, 1, N)]
+        N = min(10, len(data))
+        colors = [cmap(i) for i in np.linspace(0, 1, 10)]
         for i in range(N):
             ax.plot(x, data[i].T, zorder=zorder, color=colors[i])
     else:
@@ -607,12 +607,43 @@ def plot_anom(args):
 
     savefig(fig, args.output)
 
+
+def plot_tensors(args):
+    dataset, samples = load_samples(args.samples, denormalize=False)
+    
+    N = len(samples)
+    rows = math.ceil(N / 4)
+    cols = N // rows
+
+    ax_height = 3
+    ax_width = 3
+
+    fig, axs = plt.subplots(
+        rows, cols, 
+        constrained_layout=True,
+        figsize = (cols*ax_width, rows*ax_height),
+        squeeze=False,
+    )
+
+    for (i, ax) in enumerate(axs.ravel()):
+        ax.imshow(samples[i], aspect="auto", vmin=-1.5, vmax=1.5, interpolation=None, cmap="gray")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    savefig(fig, args.output)
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
 
-    if args.anom:
+    if args.type == "anom":
         plot_anom(args)
         quit()
+    elif args.type == "tensors":
+        plot_tensors(args)
+        quit()
+    
+    
 
     if args.observation is None:
         observation = None

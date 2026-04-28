@@ -15,6 +15,7 @@ import numpy as np
 
 # Local deps
 import models
+from models.controlnet import ControlNet
 from utils import utils
 from utils.thruster_data import ThrusterDataset
 from noise import NoiseSampler
@@ -153,6 +154,12 @@ def guidance_score(x_t, x_0, observation, proc_var, retain_graph=False):
 
     return score
 
+# classifier-free guidance
+def cfg(denoiser, guidance, x, t, ctrl=None, **kwargs):
+    uncond = denoiser.trained_unet(x, t, **kwargs)
+    cond = denoiser(x, ctrl, t, **kwargs)
+    return (1 + guidance) * cond - guidance * uncond
+
 def reverse_step(
     denoiser,
     x_t,
@@ -185,8 +192,10 @@ def reverse_step(
     x_t.requires_grad = True
     denoiser.zero_grad()
 
+    guidance = 0
+
     # Compute initial step to get predicted sample location
-    x_denoised = denoiser(x_t, t_prev * ones, **model_args)
+    x_denoised = cfg(denoiser, guidance, x_t, t_prev * ones, **model_args)
     deriv_1 = -step_scale * (x_denoised - x_t) / t_prev
 
     if not use_const_guidance and (observation["var"] is not None) and t_prev < t_max_guidance:
@@ -208,7 +217,7 @@ def reverse_step(
             denoiser.zero_grad()
 
         t2 = t_mid if method == "midpoint" else t
-        x_denoised = denoiser(x_pred, t2 * ones, **model_args)
+        x_denoised = cfg(denoiser, guidance, x_pred, t2 * ones, **model_args)
         deriv_2 = -step_scale * (x_denoised - x_t) / t2
 
         # Guidance loss
@@ -282,6 +291,7 @@ def reverse(
 
         pbar.set_description(f"Noise level: {t_new:.4f}, Gamma: {gamma:.4f}")
 
+
         x = reverse_step(
             denoiser,
             x + noise,
@@ -303,11 +313,11 @@ def reverse(
     return output
 
 
-def sample(model, noise_sampler, num_samples, args):
+def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, args):
     # Load sampling arguments
     num_steps = args.get("num_steps", 256)
     noise_min = args.get("noise_min", 0.002)
-    noise_max = args.get("noise_max", 20)
+    noise_max = args.get("noise_max", 80)
     exponent = args.get("step_exponent", 7)
     step_scale = args.get("step_scale", 1.0)
     method = args.get("method", "midpoint")
@@ -320,11 +330,41 @@ def sample(model, noise_sampler, num_samples, args):
     # If we sample unconditonally, we need to get some scalar parameters to condition on
     # These are drawn from the same distributions as the training set
     if (uncond_dir := args.get("unconditional_data_dir", None)) is not None:
-        unconditional_dataset = ThrusterDataset(uncond_dir)
+        unconditional_dataset = ThrusterDataset(uncond_dir, downsample_res=resolution, scalars_in_tensor=scalars_in_tensor)
         param_vec = unconditional_dataset.sample_params(num_samples=num_samples, device=DEVICE)
     else:
         unconditional_dataset = None
         param_vec = None
+
+    assert unconditional_dataset is not None
+
+    # try conditioning on scalar params alone
+    data = unconditional_dataset[0][2]
+    #data = data.unsqueeze(0)
+
+    # condition_tensor = unconditional_dataset.generate_measurements(data)
+    # condition_tensor = condition_tensor.tile(num_samples, 1, 1).to(DEVICE)
+
+    scalar_ind = 17
+
+    inv_std = torch.zeros_like(data)
+    inv_std[scalar_ind:] = 1e4
+    precision = torch.log(1 + inv_std**2)
+
+    mask = data.clone()
+    mask[:scalar_ind] = 0
+
+    import matplotlib.pyplot as plt
+    # fig, axs = plt.subplots(1, 2, layout='constrained', figsize=(7,3), squeeze=False)
+    # axs = axs.ravel()
+    # im_args = dict(interpolation="none", aspect="auto", cmap="gray")
+    # axs[0].imshow(precision, **im_args)
+    # axs[1].imshow(mask, **im_args)
+    # plt.show()
+
+    condition_tensor_base = torch.cat([precision, precision > 0, mask], dim=0)
+    condition_tensor = condition_tensor_base.unsqueeze(0).to(DEVICE).tile((num_samples, 1, 1))
+    print(f"{condition_tensor.shape=}")
 
     print(args)
     if "observation" in args:
@@ -332,7 +372,7 @@ def sample(model, noise_sampler, num_samples, args):
         obs_file = Path(obs_args["base_sim"])
 
         # Load data for conditioning
-        dataset = ThrusterDataset(obs_file)
+        dataset = ThrusterDataset(obs_file, scalars_in_tensor=scalars_in_tensor)
 
         if (obs_params:= obs_args.get("params", None)) is not None:
             if set(obs_params) != set(dataset.params()) and param_vec is None:
@@ -370,11 +410,23 @@ def sample(model, noise_sampler, num_samples, args):
         step_scale=step_scale,
         method=method,
         S_churn=S_churn,
-        model_args=dict(condition_vector=param_vec),
+        model_args=dict(condition_vector=None, ctrl=condition_tensor),
         pde_args=args.get("pde_guidance", None),
     )
 
     final = output[-1, ...]
+
+    fig, axs = plt.subplots(2, 3, layout="constrained", figsize=(10,6), squeeze=False)
+    axs = axs.ravel()
+    names = [k for k in unconditional_dataset.params().keys()]
+
+    for (i, ind) in enumerate(range(scalar_ind, 23)):
+        samples = final[:, ind, 0]
+        axs[i].hist(samples)
+        axs[i].axvline(data[ind, 0], linestyle='--', color='red')
+        axs[i].set(xlim=(-1.5, 1.5), title = names[i])
+
+    plt.show()
 
     # Save generated samples
     out_dir = Path(args["out_dir"])
@@ -385,6 +437,8 @@ def sample(model, noise_sampler, num_samples, args):
 
     # Make folder and write metadata
     os.makedirs(out_dir, exist_ok=True)
+
+    print(f"{len(dataset.grid)=}")
     dataset.write_metadata(out_dir)
 
     # Write final sample data to independent output dirs
@@ -430,7 +484,12 @@ if __name__ == "__main__":
     model_type = sampling_config.get("model_type", "ema")
     assert model_type in ["ema", "best", "last"]
     model_type = "model" if model_type == "last" else model_type
+
     model.load_state_dict(model_dict[model_type])
+    if isinstance(model, ControlNet):
+        base_model = model.trained_unet
+    else:
+        base_model = model
 
     # Switch model to evalution mode and sample
     model.eval()
@@ -450,14 +509,15 @@ if __name__ == "__main__":
     else:
         noise_sampler_args = dict(type="gaussian", scale=1.0)
 
-    channels = model.img_channels
-    resolution = model.img_resolution
+    channels = base_model.img_channels
+    resolution = base_model.img_resolution
+    scalars_in_tensor = True #base_model.scalars_in_tensor
 
-    noise_sampler = NoiseSampler.from_config(model.img_channels, model.img_resolution, DEVICE, **noise_sampler_args)
+    noise_sampler = NoiseSampler.from_config(channels, resolution, DEVICE, **noise_sampler_args)
 
     # Sample in batches
     for i, batch_num_samples in enumerate(batches):
-        sample(model, noise_sampler, batch_num_samples, sampling_config)
+        sample(model, noise_sampler, batch_num_samples, resolution, scalars_in_tensor, sampling_config)
 
         # Make sure we don't remove old samples
         sampling_config["replace_samples"] = False

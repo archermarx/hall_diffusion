@@ -28,13 +28,11 @@ def from_config(config: dict, device: torch.device):
 
     match arch:
         case "edm2":
-            config.pop("architecture")
             model = edm2.EDM2Denoiser(**config).to(device)
         case "controlnet":
             base_path = Path(config["base_model"]) / "checkpoint.pth.tar"
             base_ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
             base_cfg = dataset_config(config)
-            config.pop("base_model")
             model = controlnet_mod.ControlNet(model_ckpt = base_ckpt["model"], control_channels = config["control_channels"], **base_cfg).to(device)
         case _:
             raise NotImplementedError()

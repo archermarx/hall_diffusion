@@ -1,10 +1,8 @@
 [model]
 # Architecture
 architecture = "controlnet"
-# base_model = "saved_models/train_scalars_xs"
-model_ckpt = "saved_models/train_scalars_xs/checkpoint.pth.tar"
-condition_dim = 46
-
+base_model = "saved_models/train_scalars_xs"
+control_channels = 69
 #=======================================================================================================================
 
 [training]
@@ -25,7 +23,7 @@ load_workers = 4
 # Loss function configuration
 [training.loss]
 # log(mean) of noise levels to sample
-P_mean = -1.2
+P_mean = 0.0
 # log(std) of noise levels to sample
 P_std = 1.2
 

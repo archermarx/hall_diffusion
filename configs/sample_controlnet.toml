@@ -8,13 +8,12 @@ num_steps = 64
 # Which model to load (ema, best, last) 
 model_type = "last"
 # Output directory for generations.
-out_dir = "samples/uncond"
+out_dir = "samples/controlnet"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
 # Step scale
 step_scale = 1.00
 # ODE method
 method = "midpoint"
-
 
 unconditional_data_dir ="data/test_large"
