@@ -226,20 +226,13 @@ def save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, o
     if os.path.exists(checkpoint_file):
         shutil.move(checkpoint_file, old_checkpoint)
 
-    # For ControlNet, save only the adapter weights — the frozen denoiser is
-    # re-loaded from base_model at startup, keeping checkpoint sizes small.
-    if isinstance(state.model, ControlNet):
-        model_state = state.model.controlnet.state_dict()
-        ema_state = state.ema_model.controlnet.state_dict()
-    else:
-        model_state = state.model.state_dict()
-        ema_state = state.ema_model.state_dict()
+    model_state = state.model.state_dict()
+    ema_state = state.ema_model.state_dict()
 
     out_dict = dict(
         model=model_state,
         model_config=config["model"],
         train_config=config["training"],
-        normalizer=train_dataset.norm,
         optimizer=state.optimizer.state_dict(),
         best=state.best_params,
         ema=ema_state,
@@ -280,8 +273,8 @@ def train(args):
     # inherited from the base model's stored config so they don't need to be
     # re-specified in the controlnet toml.
     data_cfg = models.dataset_config(config["model"])
-    scalars_in_tensor = data_cfg.pop("scalars_in_tensor", False)
-    downsample_res = data_cfg.pop("downsample_res", None)
+    scalars_in_tensor = data_cfg["condition_dim"] == 0
+    downsample_res = data_cfg["resolution"]
     train_dataset = thruster_data.ThrusterDataset(train_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
     test_dataset = thruster_data.ThrusterDataset(test_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
 
@@ -355,21 +348,19 @@ def train(args):
 
     # Load checkpoint if found
     if load_checkpoint and os.path.exists(checkpoint_file):
+        # Load checkpoint
         ckpt = torch.load(checkpoint_file, weights_only=False)
-
-        if isinstance(model, ControlNet):
-            model.controlnet.load_state_dict(ckpt["model"], strict=False)
-        else:
-            model.load_state_dict(ckpt["model"], strict=False)
+        model.load_state_dict(ckpt["model"], strict=False)
 
         logger.info("Model loaded from checkpoint")
 
+        # Load optimizer
         try:
             optimizer.load_state_dict(ckpt["optimizer"])
         except:
             logger.warning(f"Unable to load optimizer from file. This means the underlying model specification may have changed. The optimizer will be created from scratch.")
             
-
+        # Load EMA model
         if "ema" in ckpt:
             if isinstance(ema_model, ControlNet):
                 ema_model.controlnet.load_state_dict(ckpt["ema"], strict=False)

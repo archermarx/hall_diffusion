@@ -1,5 +1,6 @@
 import torch
 from abc import ABC, abstractmethod
+from models.controlnet import ControlNet
 
 # ----------------------------------------------------------------------------
 class LossFunction(ABC):
@@ -96,13 +97,13 @@ class EDM2Loss:
 
         noisy_im = x + noise
 
-        ctrl_kwargs = {"ctrl": ctrl} if ctrl is not None else {}
-        denoised = model(noisy_im, sigma, condition_vec, **ctrl_kwargs)
+        if isinstance(model, ControlNet):
+            denoised = model(noisy_im, ctrl, sigma, condition_vec)
+        else:
+            denoised = model(noisy_im, sigma, condition_vec)
 
         # Base loss
         base_loss = (denoised - x) ** 2
-
-        # "Step size": scale for diff loss
 
         # Derivative loss
         diff_denoised = torch.diff(denoised)
@@ -119,9 +120,7 @@ class EDM2Loss:
         h = self.deriv_h
 
         total_weight = 1 + h + h**2
-        loss = (
-            weight * (base_loss + diff_loss_1 * h + diff_loss_2 * h**2) / total_weight
-        )
+        loss =  weight * (base_loss + diff_loss_1 * h + diff_loss_2 * h**2) / total_weight
         base_loss = loss.mean().item()
 
         return loss.mean(), base_loss, noisy_im, denoised

@@ -12,17 +12,13 @@ At initialisation all control signals are exactly zero (via a learnable gain
 scalar starting at 0, matching the Block.emb_gain pattern), so the augmented
 model behaves identically to the unmodified UNet.
 """
-
-from pathlib import Path
-
-import numpy as np
 import torch
 import torch.nn as nn
 from typing import TypedDict
 
 from .edm2 import (
     get_precondition_factors,
-    UNet, MPConv, mp_silu,
+    UNet, MPConv, EDM2Denoiser, mp_silu,
 )
 
 class UNetConfig(TypedDict):
@@ -53,7 +49,7 @@ def make_zero_module(module):
 class ZeroConv(nn.Module):
     def __init__(self, num_channels):
         super().__init__()
-        self.conv = nn.Conv1d(num_channels, num_channels, 1, padding=0)
+        self.conv = make_zero_module(nn.Conv1d(num_channels, num_channels, kernel_size=1, padding=0))
     
     def forward(self, x):
         return self.conv(x)
@@ -74,21 +70,22 @@ class ControlNet(torch.nn.Module):
         self.data_std = data_std
 
         # Baseline trained unet
-        self.trained_unet = UNet(resolution=resolution, in_channels=in_channels, condition_dim=condition_dim, **unet_kwargs)
+        self.trained_unet = EDM2Denoiser(resolution=resolution, in_channels=in_channels, condition_dim=condition_dim, **unet_kwargs)
 
         # Load ControlNet copy of encoder layers
-        self.controlnet = UNet(include_decoder=False, resolution=resolution, in_channels=in_channels, condition_dim=condition_dim, **unet_kwargs)
+        self.controlnet = EDM2Denoiser(include_decoder=False, resolution=resolution, in_channels=in_channels, condition_dim=condition_dim, **unet_kwargs)
 
         # Load weights from checkpoints
         if model_ckpt is not None:
-            ckpt = torch.load(model_ckpt)
-            self.trained_unet.load_state_dict(ckpt, strict=True)
-            self.controlnet.load_state_dict(ckpt, strict=False)
+            self.trained_unet.load_state_dict(model_ckpt, strict=True)
+            self.controlnet.load_state_dict(model_ckpt, strict=False)
 
         # Control embedding block: stack of convolutions with a zero-conv at the end
-        base_channels = self.trained_unet.base_channels
+        base_channels = self.trained_unet.unet.base_channels
         self.controlnet_ctrl_emb = nn.Sequential(
             MPConv(control_channels, 64, [3]),
+            MPSiLU(),
+            MPConv(64, 128, [3]),
             MPSiLU(),
             MPConv(128, base_channels, [3]),
             MPSiLU(),
@@ -97,7 +94,7 @@ class ControlNet(torch.nn.Module):
 
         # Zero convolution modules for encoder levels
         self.controlnet_down_zero_convs = nn.ModuleList([])
-        for _, block in self.controlnet.enc.items():
+        for _, block in self.controlnet.unet.enc.items():
             self.controlnet_down_zero_convs.append(ZeroConv(block.out_channels))
 
     def get_trainable_params(self):
@@ -121,35 +118,34 @@ class ControlNet(torch.nn.Module):
             else condition_vector.to(torch.float32).reshape(-1, self.condition_dim)
         )
 
-        c_in, c_out, c_skip, c_noise = get_precondition_factors(noise_std, 0.5)
+        c_in, c_out, c_skip, c_noise = get_precondition_factors(noise_std, self.data_std)
 
         # Preconditioning
-        x = c_in * x
+        x_in = c_in * x
 
         # Add extra ones channel
-        x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
+        x_in = torch.cat([x_in, torch.ones_like(x_in[:, :1])], dim=1)
 
         # Noise and class embedding of trained unet, along with encoder outputs
         with torch.no_grad():
-            trained_unet_emb = self.trained_unet.embed(c_noise, condition_vector)
-            trained_unet_out, trained_unet_skips = self.trained_unet.encode(x, trained_unet_emb)
+            trained_unet_emb = self.trained_unet.unet.embed(c_noise, condition_vector)
+            trained_unet_out, trained_unet_skips = self.trained_unet.unet.encode(x_in, trained_unet_emb)
 
         # Noise and class embedding of controlnet
-        controlnet_emb = self.controlnet.embed(c_noise, condition_vector)
+        controlnet_emb = self.controlnet.unet.embed(c_noise, condition_vector)
 
         # Control embedding block
         controlnet_ctrl = self.controlnet_ctrl_emb(control)
 
         # Our copy of the unet encoder
-        _, controlnet_skips = self.controlnet.encode(x, controlnet_emb, controls = controlnet_ctrl)
+        _, controlnet_skips = self.controlnet.unet.encode(x_in, controlnet_emb, controls = controlnet_ctrl)
 
-        # Add zero-convolutions to controlnet outputs and add to trained unet skip connectoins
-        skips = [
-            zero_conv(controlnet_out) + unet_out \
-                for (controlnet_out, unet_out, zero_conv) \
-                in zip(controlnet_skips, trained_unet_skips, self.controlnet_down_zero_convs)
-        ]
+        # Apply zero-convs to controlnet outputs
+        controlnet_skips = [zero_conv(controlnet_out) for zero_conv, controlnet_out in zip(self.controlnet_down_zero_convs, controlnet_skips)]
 
-        trained_unet_out = self.trained_unet.decode(trained_unet_out, skips, trained_unet_emb)
+        # Add controlnet skips to trained unet skips
+        skips = [trained_unet_skip + controlnet_skip for trained_unet_skip, controlnet_skip in zip(trained_unet_skips, controlnet_skips)]
 
-        return c_skip * x + c_out * trained_unet_out
+        trained_unet_out = self.trained_unet.unet.decode(trained_unet_out, skips, trained_unet_emb)
+        ctrlnet_out = c_skip * x + c_out * trained_unet_out
+        return ctrlnet_out

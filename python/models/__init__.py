@@ -6,7 +6,8 @@ from . import controlnet as controlnet_mod
 
 
 def dataset_config(config: dict) -> dict:
-    """Return the model config that governs dataset construction.
+    """Return the model config that governs dataset construction
+    as well as the parameters of that base model.
 
     For a plain edm2 model this is just ``config`` itself.  For a controlnet
     the dataset must be built to match the *base* model's format (e.g.
@@ -17,20 +18,24 @@ def dataset_config(config: dict) -> dict:
     if config.get("architecture") == "controlnet":
         base_path = Path(config["base_model"]) / "checkpoint.pth.tar"
         ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
-        return ckpt["model_config"]
+        config = ckpt["model_config"]
+
     return config
 
-
 def from_config(config: dict, device: torch.device):
-    arch = config.pop("architecture")
+    arch = config["architecture"]
     assert arch in {"edm2", "controlnet"}
-    print(f"{config=}")
 
     match arch:
         case "edm2":
+            config.pop("architecture")
             model = edm2.EDM2Denoiser(**config).to(device)
         case "controlnet":
-            model = controlnet_mod.ControlNet(**config).to(device)
+            base_path = Path(config["base_model"]) / "checkpoint.pth.tar"
+            base_ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
+            base_cfg = dataset_config(config)
+            config.pop("base_model")
+            model = controlnet_mod.ControlNet(model_ckpt = base_ckpt["model"], control_channels = config["control_channels"], **base_cfg).to(device)
         case _:
             raise NotImplementedError()
 

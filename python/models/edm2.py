@@ -436,16 +436,12 @@ class UNet(nn.Module):
         return x
 
     def forward(self, x, noise_labels, class_labels):
-
         # Extra ones channel replaces biases removed in core blocks of model
         x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
-
         # Noise + class embedding
         emb = self.embed(noise_labels, class_labels)
-
         # Encoder
         x, skips = self.encode(x, emb)
-
         # Decoder
         x = self.decode(x, skips, emb)
         return x
@@ -502,6 +498,7 @@ class EDM2Denoiser(nn.Module):
 
         # Preconditioning weights.
         c_in, c_out, c_skip, c_noise = get_precondition_factors(noise_std, self.data_std)
+
 
         # Run the model.
         x_in = c_in * x
