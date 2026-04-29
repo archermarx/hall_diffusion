@@ -156,9 +156,13 @@ def guidance_score(x_t, x_0, observation, proc_var, retain_graph=False):
 
 # classifier-free guidance
 def cfg(denoiser, guidance, x, t, ctrl=None, **kwargs):
-    uncond = denoiser.trained_unet(x, t, **kwargs)
     cond = denoiser(x, ctrl, t, **kwargs)
-    return (1 + guidance) * cond - guidance * uncond
+
+    if guidance > 0:
+        uncond = denoiser.trained_unet(x, t, **kwargs)
+        return (1 + guidance) * cond - guidance * uncond
+    else:
+        return cond
 
 def reverse_step(
     denoiser,
@@ -291,7 +295,6 @@ def reverse(
 
         pbar.set_description(f"Noise level: {t_new:.4f}, Gamma: {gamma:.4f}")
 
-
         x = reverse_step(
             denoiser,
             x + noise,
@@ -348,7 +351,7 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
     scalar_ind = 17
 
     inv_std = torch.zeros_like(data)
-    std = 1e-2
+    std = 1e0
     inv_std[scalar_ind:] = 1 / std
     precision = torch.log(1 + inv_std**2)
 
@@ -483,6 +486,7 @@ if __name__ == "__main__":
     # Load model and config from checkpoint
     model_dict = torch.load(args.model, weights_only=False)
     model_config = model_dict["model_config"]
+    
     model = models.from_config(model_config, device=DEVICE)
 
     # Determine which weights to load
