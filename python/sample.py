@@ -19,6 +19,7 @@ from models.controlnet import ControlNet
 from utils import utils
 from utils.thruster_data import ThrusterDataset
 from noise import NoiseSampler
+from samplers.edmsampler import EDMSampler, RK2Integrator
 
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str, nargs="?")
@@ -30,8 +31,6 @@ parser.add_argument("-s", "--num-steps", type=int)
 parser.add_argument("--test-dir", type=Path)
 
 DEVICE = torch.device("cpu")
-
-ODEMethod = Literal["euler", "heun", "midpoint"]
 
 def build_observation(dataset, observations, param_vec=None, default_stddev=1.0):
     _, data_params, data_tensor = dataset[0]
@@ -118,29 +117,17 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0)
 
     return obs_A, obs_y, obs_var, param_vec
 
-
-def edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent, num_refinement_steps=0):
-    inv_rho = 1 / exponent
-    i = torch.arange(0, num_steps)
-    f1 = noise_max**inv_rho
-    f2 = (noise_min**inv_rho - noise_max**inv_rho) / (num_steps - 2)
-    timesteps = (f1 + i * f2) ** exponent
-    timesteps[-1] = 0
-
-    if num_refinement_steps > 0:
-        timesteps = torch.concat((timesteps, torch.zeros(num_refinement_steps)))
-
-    return timesteps
-
 # =====================================================
 # Conditioning on observations and PDEs
 # =====================================================
-def guidance_score(x_t, x_0, observation, proc_var, retain_graph=False):
+def guidance_score(x_t, x_0, t, observation, retain_graph=False):
     (batch_size, _, _) = x_0.shape
 
     obs_vec = observation["data"]
     var = observation["var"]
     H = observation["operator"]
+
+    proc_var = t**2 / (t**2 + 1)
 
     # =====================================================
     # Diffusion posterior sampling (get observation loss)
@@ -163,168 +150,7 @@ def cfg(denoiser, guidance, x, t, ctrl=None, **kwargs):
     else:
         return cond
 
-def reverse_step(
-    denoiser,
-    x_t,
-    t_prev,
-    t,
-    observation,
-    step_scale=1.0,
-    method: ODEMethod="midpoint",
-    model_args=dict(),
-):
-    (b, _, _) = x_t.shape
-
-    ones = torch.ones((b, 1, 1), device=x_t.device)
-
-    dt = t - t_prev
-    t_mid = 0.5 * (t + t_prev)
-
-    use_const_guidance=True
-
-    if use_const_guidance:
-        proc_var = lambda t: t**2 / (t**2 + 1)
-        t_max_guidance = 100
-    else:
-        min_var = torch.min(observation["var"])
-        proc_var_scale = torch.sqrt(min_var) * 15
-        proc_var = lambda t: proc_var_scale * t**2 / (t**2 + 1)
-        t_max_guidance = 10
-
-    x_t = x_t.detach()
-    x_t.requires_grad = True
-    denoiser.zero_grad()
-
-    guidance = 0
-
-    # Compute initial step to get predicted sample location
-    x_denoised = denoiser(x_t, t_prev * ones, **model_args) #cfg(denoiser, guidance, x_t, t_prev * ones, **model_args)
-    deriv_1 = -step_scale * (x_denoised - x_t) / t_prev
-
-    if not use_const_guidance and (observation["var"] is not None) and t_prev < t_max_guidance:
-        obs_score = guidance_score(x_t, x_denoised, observation, proc_var(t_prev))
-        deriv_1 += -t_prev * obs_score
-
-    if method == "midpoint":
-        step_1 = 0.5 * dt * deriv_1
-    else:
-        step_1 = dt * deriv_1
-
-    x_pred = x_t + step_1
-
-    if method == "midpoint" or (method == "heun" and t > 0):
-        # Compute corrector step
-        if not use_const_guidance:
-            x_pred = x_pred.detach()
-            x_pred.requires_grad = True
-            denoiser.zero_grad()
-
-        t2 = t_mid if method == "midpoint" else t
-        x_denoised = denoiser(x_pred, t2 * ones, **model_args) #cfg(denoiser, guidance, x_pred, t2 * ones, **model_args)
-        deriv_2 = -step_scale * (x_denoised - x_t) / t2
-
-        # Guidance loss
-        if not use_const_guidance and (observation["var"] is not None) and t2 < t_max_guidance:
-            obs_score = guidance_score(x_pred, x_denoised, observation, proc_var(t2))
-            deriv_2 += -t2 * obs_score
-        
-        if method == "midpoint":
-            step_2 = dt * deriv_2
-        else:
-            step_2 = dt * 0.5 * (deriv_1 + deriv_2)
-
-        x_pred = x_t + step_2
-
-    # Guidance loss
-    if use_const_guidance and observation["var"] is not None and t_mid < t_max_guidance:
-        obs_score = guidance_score(x_t, x_denoised, observation, proc_var(t_mid))
-        x_pred += obs_score
-
-    return x_pred.detach()
-
-def reverse(
-    denoiser,
-    x,
-    timesteps,
-    dataset,
-    observation,
-    showprogress=False,
-    pde_args=dict(),
-    model_args=dict(),
-    S_churn=0.0,
-    **kwargs,
-):
-    """
-    Perform iterative denoising to generate a 1D image from Gaussian noise using a provided denoising model
-
-    Args:
-        denoiser: a Denoiser model
-        x: a tensor containing standard Gaussian noise. The dimension of this tensor should be (b, c, w)
-            where b is the batch size, c is the number of channels, and w is the width
-        im_masks: An optimal tuple of (data, mask) to apply during generation. These should have the same shape as x.
-            When provided, the model will infill areas where the mask is set to 0.
-        showprogress: whether we should print a tqdm progress bar.
-    Returns:
-    """
-    (b, c, w) = x.shape
-    num_steps = len(timesteps)
-
-    output = torch.zeros((num_steps, b, c, w))
-    output[0, ...] = x
-
-    for step_idx, t in enumerate(pbar := tqdm(timesteps, disable=(not showprogress))):
-        if step_idx == 0:
-            continue
-
-        # increase noise level somewhat
-        t_prev = timesteps[step_idx - 1]
-        gamma = np.minimum(S_churn / len(timesteps), np.sqrt(2) - 1)
-
-        if t_prev == 0:
-            t_new = 0.002
-            noise_std = 0.002
-        elif t_prev < 0.05:
-            t_new = t_prev
-            noise_std = 0.0
-        else:
-            t_new = (1 + gamma) * t_prev
-            noise_std = (t_new**2 - t_prev**2).sqrt()
-
-        noise = 1.003 * torch.randn_like(x) * noise_std
-
-        pbar.set_description(f"Noise level: {t_new:.4f}, Gamma: {gamma:.4f}")
-
-        x = reverse_step(
-            denoiser,
-            x + noise,
-            t_new, 
-            t,
-            observation,
-            model_args=model_args,
-            **kwargs,
-        )
-
-        # Check for NaN or Inf
-        if not torch.all(torch.isfinite(x)):
-            print("NaN/Inf detected during sampling. Exiting")
-            exit(1)
-
-        output[step_idx, ...] = x
-
-    output[-1, ...] = x
-    return output
-
-
 def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, args):
-    # Load sampling arguments
-    num_steps = args.get("num_steps", 256)
-    noise_min = args.get("noise_min", 0.002)
-    noise_max = args.get("noise_max", 80)
-    exponent = args.get("step_exponent", 7)
-    step_scale = args.get("step_scale", 1.0)
-    method = args.get("method", "midpoint")
-    S_churn = args.get("S_churn", 40)
-    refinement_steps = args.get("refinement_steps", 0)
 
     # Determine if we're doing condional or unconditional sampling
     # If there is an `observation` field, then we're conditioning on a partial observation of that simulation
@@ -395,28 +221,29 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
         dataset = unconditional_dataset
         obs = dict(operator=None, var=None, data=None)
 
-    # Sample initial noise
+
+    # Timestep args
+    noise_max = args.get("noise_max", 80.0)
+    noise_min = args.get("noise_min", 0.002)
+    exponent = args.get("step_exponent", 7.0)
+    num_steps = args.get("num_steps", 256)
+
+    guidance_score_func = lambda x, x_denoised, t: guidance_score(x, x_denoised, t, obs)
+    integrator = RK2Integrator(
+        model,
+        guidance_score_func = guidance_score_func,
+        method = args.get("method", None),
+        rk_alpha = args.get("rk_alpha", 0.5),
+        S_churn = args.get("S_churn", 0.0) / num_steps,
+        S_tmin = args.get("S_tmin", 0.0),
+        S_tmax = args.get("S_tmax", float('inf')),
+        S_noise = args.get("S_noise", 1.003),
+    )
+    sampler = EDMSampler(noise_min, noise_max, exponent, num_steps)
+
     xt = noise_sampler.sample(num_samples) * noise_max
 
-    # Load timesteps
-    steps = edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent, num_refinement_steps=refinement_steps)
-
-    print(f"{param_vec.shape=}")
-
-    output = reverse(
-        model,
-        xt,
-        steps,
-        dataset,
-        showprogress=True,
-        observation=obs,
-        step_scale=step_scale,
-        method=method,
-        S_churn=S_churn,
-        model_args=dict(condition_vector=param_vec),
-        pde_args=args.get("pde_guidance", None),
-    )
-
+    output = sampler.sample(xt, integrator, showprogress=True, model_args=dict(condition_vector=param_vec))
     final = output[-1, ...]
 
     # fig, axs = plt.subplots(2, 3, layout="constrained", figsize=(10,6), squeeze=False)
@@ -457,7 +284,7 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
         np.savez(file, data=tens, params=params_cpu)
         
     # Write samples at all iterations to a single tensor
-    np.savez(out_dir / "data_allsteps.npz", steps=steps, data=output.cpu().numpy(), params=params_cpu)
+    np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
 
 
 if __name__ == "__main__":
