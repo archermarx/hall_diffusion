@@ -2,6 +2,7 @@ import math
 import torch
 from typing import Literal
 from tqdm import tqdm
+from abc import ABC, abstractmethod
 
 ODEMethod = Literal["midpoint", "ralston", "heun"]
 
@@ -11,11 +12,23 @@ RK_METHODS = {
     "heun": 1.0,
 }
 
+class ObservationGuidance(ABC):
+    @abstractmethod
+    def __call__(self, x, x_denoised, t):
+        pass
+
+class ConstantGuidance(ObservationGuidance):
+    def __init__(self, obs_score, observation):
+        self.observation = observation
+        self.obs_score = obs_score
+
+    def __call__(self, x, x_denoised, t):
+        return self.obs_score(x, x_denoised, t, self.observation)
+
 class RK2Integrator():
     def __init__(
             self,
             model,
-            guidance_score_func = None,
             method: ODEMethod | None = None,
             rk_alpha: float = 0.5,
             S_churn: float = 0.0,
@@ -27,7 +40,6 @@ class RK2Integrator():
             rk_alpha = RK_METHODS[method]
 
         self.model = model
-        self.guidance_score_func = guidance_score_func
         self.rk_alpha = rk_alpha
 
         # Stochasticity parameters
@@ -64,7 +76,7 @@ class RK2Integrator():
 
         return x2, x0
 
-    def step_with_guidance(self, x, t1, t2, model_args = {}):
+    def step_with_guidance(self, x, t1, t2, guidance=None, model_args={}):
         x = x.detach()
         x.requires_grad = True
         self.model.zero_grad()
@@ -78,8 +90,8 @@ class RK2Integrator():
 
         x_pred, x_denoised = self.step(x, t1, t2, model_args=model_args)
 
-        if self.guidance_score_func is not None:
-            obs_score = self.guidance_score_func(x, x_denoised, 0.5 * (t1 + t2))
+        if isinstance(guidance, ConstantGuidance):
+            obs_score = guidance(x, x_denoised, 0.5 * (t1 + t2))
             x_pred += obs_score
 
         return x_pred.detach()
@@ -102,7 +114,7 @@ class EDMSampler():
         timesteps[-1] = 0
         return timesteps
 
-    def sample(self, integrator, showprogress=True, device=None, model_args={}):
+    def sample(self, integrator, guidance=None, showprogress=True, device=None, model_args={}):
         # Generate initial noise and timesteps
         x = self.noise_max * torch.randn(self.shape, device=device)
         timesteps = self.get_noise_steps()
@@ -120,7 +132,7 @@ class EDMSampler():
             t_prev = timesteps[step_idx - 1]
             pbar.set_description(f"Noise level: {t_prev:.4f}->{t:.4f}")
 
-            x = integrator.step_with_guidance(x, t_prev, t, model_args=model_args)
+            x = integrator.step_with_guidance(x, t_prev, t, guidance=guidance, model_args=model_args)
 
             # Check for NaN or Inf
             if not torch.all(torch.isfinite(x)):

@@ -18,7 +18,7 @@ import models
 from models.controlnet import ControlNet
 from utils import utils
 from utils.thruster_data import ThrusterDataset
-from samplers.edmsampler import EDMSampler, RK2Integrator
+from samplers.edmsampler import EDMSampler, RK2Integrator, ConstantGuidance
 
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str, nargs="?")
@@ -218,10 +218,10 @@ def sample(model, shape, scalars_in_tensor, args):
     exponent = args.get("step_exponent", 7.0)
 
     # Set up sampler
-    guidance_score_func = lambda x, x_denoised, t: guidance_score(x, x_denoised, t, obs)
+    guidance = ConstantGuidance(guidance_score, obs)
+
     integrator = RK2Integrator(
         model,
-        guidance_score_func = guidance_score_func,
         method = args.get("method", None),
         rk_alpha = args.get("rk_alpha", 0.5),
         S_churn = args.get("S_churn", 0.0) / num_steps,
@@ -234,6 +234,7 @@ def sample(model, shape, scalars_in_tensor, args):
     # Sample, saving intermediate steps for visualization and debugging
     output = sampler.sample(
         integrator,
+        guidance,
         showprogress=True,
         device=DEVICE,
         model_args=dict(condition_vector=param_vec)
