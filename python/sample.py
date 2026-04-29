@@ -36,7 +36,6 @@ ODEMethod = Literal["euler", "heun", "midpoint"]
 def build_observation(dataset, observations, param_vec=None, default_stddev=1.0):
     _, data_params, data_tensor = dataset[0]
 
-    data_tensor = torch.tensor(data_tensor, device=DEVICE)
     (num_channels, resolution) = data_tensor.shape
 
     obs_matrix_loc = torch.zeros(num_channels, resolution, device=DEVICE)
@@ -109,7 +108,7 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0)
 
     # If no param vec specified here, we use the one from the reference dataset
     if param_vec is None:
-        param_vec = torch.tensor(data_params, device=DEVICE)
+        param_vec = data_params.detach().clone().to(DEVICE)
 
     # Read scalar parameters if present
     if (params := observations.get("params", None)) is not None:
@@ -199,7 +198,7 @@ def reverse_step(
     guidance = 0
 
     # Compute initial step to get predicted sample location
-    x_denoised = cfg(denoiser, guidance, x_t, t_prev * ones, **model_args)
+    x_denoised = denoiser(x_t, t_prev * ones, **model_args) #cfg(denoiser, guidance, x_t, t_prev * ones, **model_args)
     deriv_1 = -step_scale * (x_denoised - x_t) / t_prev
 
     if not use_const_guidance and (observation["var"] is not None) and t_prev < t_max_guidance:
@@ -221,7 +220,7 @@ def reverse_step(
             denoiser.zero_grad()
 
         t2 = t_mid if method == "midpoint" else t
-        x_denoised = cfg(denoiser, guidance, x_pred, t2 * ones, **model_args)
+        x_denoised = denoiser(x_pred, t2 * ones, **model_args) #cfg(denoiser, guidance, x_pred, t2 * ones, **model_args)
         deriv_2 = -step_scale * (x_denoised - x_t) / t2
 
         # Guidance loss
@@ -279,7 +278,8 @@ def reverse(
 
         # increase noise level somewhat
         t_prev = timesteps[step_idx - 1]
-        gamma = np.minimum(S_churn / len(timesteps), np.sqrt(2) - 1)
+        # gamma = np.minimum(S_churn / len(timesteps), np.sqrt(2) - 1)
+        gamma = 0.0
 
         if t_prev == 0:
             t_new = 0.002
@@ -339,36 +339,36 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
         unconditional_dataset = None
         param_vec = None
 
-    assert unconditional_dataset is not None
+    # assert unconditional_dataset is not None
 
-    # try conditioning on scalar params alone
-    data = unconditional_dataset[0][2]
-    #data = data.unsqueeze(0)
+    # # try conditioning on scalar params alone
+    # data = unconditional_dataset[0][2]
+    # #data = data.unsqueeze(0)
 
-    # condition_tensor = unconditional_dataset.generate_measurements(data)
-    # condition_tensor = condition_tensor.tile(num_samples, 1, 1).to(DEVICE)
+    # # condition_tensor = unconditional_dataset.generate_measurements(data)
+    # # condition_tensor = condition_tensor.tile(num_samples, 1, 1).to(DEVICE)
 
-    scalar_ind = 17
+    # scalar_ind = 17
 
-    inv_std = torch.zeros_like(data)
-    std = 1e0
-    inv_std[scalar_ind:] = 1 / std
-    precision = torch.log(1 + inv_std**2)
+    # inv_std = torch.zeros_like(data)
+    # std = 1e0
+    # inv_std[scalar_ind:] = 1 / std
+    # precision = torch.log(1 + inv_std**2)
 
-    mask = data.clone()
-    mask[:scalar_ind] = 0
+    # mask = data.clone()
+    # mask[:scalar_ind] = 0
 
-    import matplotlib.pyplot as plt
-    # fig, axs = plt.subplots(1, 2, layout='constrained', figsize=(7,3), squeeze=False)
-    # axs = axs.ravel()
-    # im_args = dict(interpolation="none", aspect="auto", cmap="gray")
-    # axs[0].imshow(precision, **im_args)
-    # axs[1].imshow(mask, **im_args)
-    # plt.show()
+    # import matplotlib.pyplot as plt
+    # # fig, axs = plt.subplots(1, 2, layout='constrained', figsize=(7,3), squeeze=False)
+    # # axs = axs.ravel()
+    # # im_args = dict(interpolation="none", aspect="auto", cmap="gray")
+    # # axs[0].imshow(precision, **im_args)
+    # # axs[1].imshow(mask, **im_args)
+    # # plt.show()
 
-    condition_tensor_base = torch.cat([precision, precision > 0, mask], dim=0)
-    condition_tensor = condition_tensor_base.unsqueeze(0).to(DEVICE).tile((num_samples, 1, 1))
-    print(f"{condition_tensor.shape=}")
+    # condition_tensor_base = torch.cat([precision, precision > 0, mask], dim=0)
+    # condition_tensor = condition_tensor_base.unsqueeze(0).to(DEVICE).tile((num_samples, 1, 1))
+    # print(f"{condition_tensor.shape=}")
 
     print(args)
     if "observation" in args:
@@ -414,27 +414,27 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
         step_scale=step_scale,
         method=method,
         S_churn=S_churn,
-        model_args=dict(condition_vector=None, ctrl=condition_tensor),
+        model_args=dict(condition_vector=None),
         pde_args=args.get("pde_guidance", None),
     )
 
     final = output[-1, ...]
 
-    fig, axs = plt.subplots(2, 3, layout="constrained", figsize=(10,6), squeeze=False)
-    axs = axs.ravel()
-    names = [k for k in unconditional_dataset.params().keys()]
+    # fig, axs = plt.subplots(2, 3, layout="constrained", figsize=(10,6), squeeze=False)
+    # axs = axs.ravel()
+    # names = [k for k in unconditional_dataset.params().keys()]
 
-    stds = []
-    for (i, ind) in enumerate(range(scalar_ind, 23)):
-        samples = final[:, ind, 0]
-        stds.append(torch.std(samples).item())
-        axs[i].hist(samples)
-        axs[i].axvline(data[ind, 0], linestyle='--', color='red')
-        axs[i].set(xlim=(-1.5, 1.5), title = names[i])
+    # stds = []
+    # for (i, ind) in enumerate(range(scalar_ind, 23)):
+    #     samples = final[:, ind, 0]
+    #     stds.append(torch.std(samples).item())
+    #     axs[i].hist(samples)
+    #     axs[i].axvline(data[ind, 0], linestyle='--', color='red')
+    #     axs[i].set(xlim=(-1.5, 1.5), title = names[i])
 
-    print(",".join([f"{std:.4e}" for std in stds]))
+    # print(",".join([f"{std:.4e}" for std in stds]))
 
-    plt.show()
+    # plt.show()
 
     # Save generated samples
     out_dir = Path(args["out_dir"])
@@ -486,7 +486,9 @@ if __name__ == "__main__":
     # Load model and config from checkpoint
     model_dict = torch.load(args.model, weights_only=False)
     model_config = model_dict["model_config"]
-    
+    if "label_dim" in model_config:
+        model_config["condition_dim"] = model_config.pop("label_dim")
+
     model = models.from_config(model_config, device=DEVICE)
 
     # Determine which weights to load
@@ -494,7 +496,7 @@ if __name__ == "__main__":
     assert model_type in ["ema", "best", "last"]
     model_type = "model" if model_type == "last" else model_type
 
-    model.load_state_dict(model_dict[model_type])
+    model.load_state_dict(model_dict[model_type], strict=False)
     if isinstance(model, ControlNet):
         base_model = model.trained_unet
     else:
@@ -520,7 +522,8 @@ if __name__ == "__main__":
 
     channels = base_model.img_channels
     resolution = base_model.img_resolution
-    scalars_in_tensor = True #base_model.scalars_in_tensor
+    # scalars_in_tensor = True #base_model.scalars_in_tensor
+    scalars_in_tensor = False
 
     noise_sampler = NoiseSampler.from_config(channels, resolution, DEVICE, **noise_sampler_args)
 
