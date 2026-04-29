@@ -1,62 +1,5 @@
 import torch
-from abc import ABC, abstractmethod
 from models.controlnet import ControlNet
-
-# ----------------------------------------------------------------------------
-class LossFunction(ABC):
-    def __init__(self, *args, **kwargs):
-        pass
-
-    @abstractmethod
-    def __call__(self, x, model, noise_std, condition_vec) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor]:
-        pass
-
-    @staticmethod
-    def from_config(noise_sampler=None, **kwargs):
-        match (kwargs.get("type", "edm2")):
-            case "edm2":
-                return EDM2Loss(noise_sampler, **kwargs)
-            case "flow matching":
-                return FlowMatchingLoss(**kwargs)
-            case _:
-                raise NotImplementedError()
-
-# ----------------------------------------------------------------------------
-# Loss function for Flow matching
-class FlowMatchingLoss:
-    def __init__(self, t_loc=0.0, t_scale=1.0, noise_sampler="logit", **kwargs):
-        self.t_loc = t_loc
-        self.t_scale = t_scale
-        self.noise_sampler = noise_sampler
-
-    def __call__(self, x, model, t=None, condition_vec=None):
-        batch_size, _, _ = x.shape
-
-        # Sample t from a logit-normal distribution if not provided
-        if t is None:
-            match self.noise_sampler:
-                case "logit":
-                    t = torch.sigmoid(self.t_loc + self.t_scale * torch.randn([batch_size, 1, 1], device=x.device))
-                case "uniform":
-                    t = 0.999 * torch.rand([batch_size, 1, 1], device=x.device)
-                case _:
-                    raise NotImplementedError()
-
-        # Convert t to a sigma to work with EDM2 preconditioning
-        sigma = t / (1 - t + 1e-8)
-
-        # Blend image with noise and then denoise
-        xi = torch.randn_like(x, device=x.device)
-        noisy_im = (1 - t) * x + t * xi
-        denoised = model(noisy_im, sigma, condition_vec)
-
-        # Calculate loss
-        # Note: this is the reconstruction loss, which is identical to the flow-matching loss
-        # if we have a model that predicts x, i.e.
-        # (v - (xi - x))**2 == (D(x; sigma) - x)**2 if v = xi - D(x; sigma)
-        loss = ((denoised - x)**2).mean()
-
-        return loss, loss.item(), noisy_im, denoised
 
 # ----------------------------------------------------------------------------
 # Loss function for EDM2 model
@@ -64,7 +7,6 @@ class FlowMatchingLoss:
 class EDM2Loss:
     def __init__(
         self,
-        noise_sampler,
         P_mean=-0.4,
         P_std=1.0,
         sigma_data=0.5,
@@ -73,7 +15,6 @@ class EDM2Loss:
         self.P_mean = P_mean
         self.P_std = P_std
         self.sigma_data = sigma_data
-        self.noise_sampler = noise_sampler
         self.deriv_h = deriv_h
 
     def __call__(
@@ -93,7 +34,7 @@ class EDM2Loss:
             sigma = noise_std
 
         weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
-        noise = self.noise_sampler.sample(batch_size) * sigma
+        noise = torch.randn_like(x) * sigma
 
         noisy_im = x + noise
 

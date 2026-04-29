@@ -27,8 +27,7 @@ from torch.utils.data import DataLoader
 import models
 from models.controlnet import ControlNet
 from models.ema import EMA
-from loss import LossFunction
-from noise import NoiseSampler
+from loss import EDM2Loss
 from utils import utils, thruster_data, visualization
 from utils.timing import StepTimer, format_timedelta
 
@@ -450,10 +449,9 @@ def train(args):
     resolution = config["model"]["resolution"]
     logger.info(f"{channels=}, {resolution=}")
 
-    noise_sampler = NoiseSampler.from_config(channels, resolution, device=DEVICE, **train_args.get("noise_sampler", {}))
     # ---------------------------------------------
     # Loss function
-    loss_fn = LossFunction.from_config(noise_sampler=noise_sampler, **train_args.get("loss", {}))
+    loss_fn = EDM2Loss(**train_args.get("loss", {}))
 
     # ---------------------------------------------
     # Profiling setup

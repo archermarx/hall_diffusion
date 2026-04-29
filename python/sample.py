@@ -18,7 +18,6 @@ import models
 from models.controlnet import ControlNet
 from utils import utils
 from utils.thruster_data import ThrusterDataset
-from noise import NoiseSampler
 from samplers.edmsampler import EDMSampler, RK2Integrator
 
 parser = argparse.ArgumentParser()
@@ -140,17 +139,8 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
 
     return score
 
-# classifier-free guidance
-def cfg(denoiser, guidance, x, t, ctrl=None, **kwargs):
-    cond = denoiser(x, ctrl, t, **kwargs)
-
-    if guidance > 0:
-        uncond = denoiser.trained_unet(x, t, **kwargs)
-        return (1 + guidance) * cond - guidance * uncond
-    else:
-        return cond
-
-def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, args):
+def sample(model, shape, scalars_in_tensor, args):
+    num_samples, channels, resolution = shape
 
     # Determine if we're doing condional or unconditional sampling
     # If there is an `observation` field, then we're conditioning on a partial observation of that simulation
@@ -221,13 +211,13 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
         dataset = unconditional_dataset
         obs = dict(operator=None, var=None, data=None)
 
-
     # Timestep args
+    num_steps = args.get("num_steps", 256)
     noise_max = args.get("noise_max", 80.0)
     noise_min = args.get("noise_min", 0.002)
     exponent = args.get("step_exponent", 7.0)
-    num_steps = args.get("num_steps", 256)
 
+    # Set up sampler
     guidance_score_func = lambda x, x_denoised, t: guidance_score(x, x_denoised, t, obs)
     integrator = RK2Integrator(
         model,
@@ -239,11 +229,16 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
         S_tmax = args.get("S_tmax", float('inf')),
         S_noise = args.get("S_noise", 1.003),
     )
-    sampler = EDMSampler(noise_min, noise_max, exponent, num_steps)
+    sampler = EDMSampler(shape, num_steps, noise_min, noise_max, exponent)
 
-    xt = noise_sampler.sample(num_samples) * noise_max
+    # Sample, saving intermediate steps for visualization and debugging
+    output = sampler.sample(
+        integrator,
+        showprogress=True,
+        device=DEVICE,
+        model_args=dict(condition_vector=param_vec)
+    )
 
-    output = sampler.sample(xt, integrator, showprogress=True, model_args=dict(condition_vector=param_vec))
     final = output[-1, ...]
 
     # fig, axs = plt.subplots(2, 3, layout="constrained", figsize=(10,6), squeeze=False)
@@ -351,11 +346,10 @@ if __name__ == "__main__":
     # scalars_in_tensor = True #base_model.scalars_in_tensor
     scalars_in_tensor = False
 
-    noise_sampler = NoiseSampler.from_config(channels, resolution, DEVICE, **noise_sampler_args)
-
     # Sample in batches
     for i, batch_num_samples in enumerate(batches):
-        sample(model, noise_sampler, batch_num_samples, resolution, scalars_in_tensor, sampling_config)
+        size = (batch_num_samples, channels, resolution)
+        sample(model, size, scalars_in_tensor, sampling_config)
 
         # Make sure we don't remove old samples
         sampling_config["replace_samples"] = False

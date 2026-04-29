@@ -3,13 +3,12 @@ import torch
 from typing import Literal
 from tqdm import tqdm
 
-ODEMethod = Literal["midpoint", "heun", "ralston", "edm2_extra"]
+ODEMethod = Literal["midpoint", "ralston", "heun"]
 
 RK_METHODS = {
     "midpoint": 0.5,
-    "heun": 1.0,
     "ralston": 2.0 / 3.0,
-    "edm2_extra": 1.1,
+    "heun": 1.0,
 }
 
 class RK2Integrator():
@@ -86,11 +85,12 @@ class RK2Integrator():
         return x_pred.detach()
 
 class EDMSampler():
-    def __init__(self, noise_min, noise_max, exponent, num_steps):
+    def __init__(self, shape, num_steps, noise_min, noise_max, exponent):
+        self.shape = shape
+        self.num_steps = num_steps
         self.noise_min = noise_min
         self.noise_max = noise_max
         self.exponent = exponent
-        self.num_steps = num_steps
         self.noise_steps = self.get_noise_steps()
 
     def get_noise_steps(self):
@@ -102,7 +102,9 @@ class EDMSampler():
         timesteps[-1] = 0
         return timesteps
 
-    def sample(self, x, integrator, showprogress=True, model_args={}):
+    def sample(self, integrator, showprogress=True, device=None, model_args={}):
+        # Generate initial noise and timesteps
+        x = self.noise_max * torch.randn(self.shape, device=device)
         timesteps = self.get_noise_steps()
 
         (b, c, w) = x.shape
@@ -116,7 +118,7 @@ class EDMSampler():
                 continue
 
             t_prev = timesteps[step_idx - 1]
-            pbar.set_description(f"Noise level: {t_prev:.4f}")
+            pbar.set_description(f"Noise level: {t_prev:.4f}->{t:.4f}")
 
             x = integrator.step_with_guidance(x, t_prev, t, model_args=model_args)
 
