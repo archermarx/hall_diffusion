@@ -98,12 +98,18 @@ class EDM2Loss:
         noisy_im = x + noise
 
         if isinstance(model, ControlNet):
-            denoised = model(noisy_im, ctrl, sigma, condition_vec)
+            assert isinstance(ctrl, tuple)
+            denoised = model(noisy_im, ctrl[0], sigma, condition_vec)
+            ctrl_loss_weight = ctrl[1]
         else:
             denoised = model(noisy_im, sigma, condition_vec)
+            ctrl_loss_weight = 1.0
 
         # Base loss
         base_loss = (denoised - x) ** 2
+
+        # Add control loss weight if using ControlNet
+        base_loss = base_loss * ctrl_loss_weight
 
         # Derivative loss
         diff_denoised = torch.diff(denoised)

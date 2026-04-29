@@ -148,7 +148,7 @@ class ThrusterDataset(Dataset):
         pixel_kept = torch.rand(B, num_spatial, res, device=dev) >= p_remove[:, :, None]  # (B, num_spatial, res)
 
         std_min = 1e-4
-        std_max = 0.25
+        std_max = 1e0
         # Sample std deviations uniformly in log space
         log_stds_s = torch.rand(B, num_spatial, res, device=dev) * (np.log(std_max) - np.log(std_min)) + np.log(std_min)
 
@@ -179,8 +179,16 @@ class ThrusterDataset(Dataset):
                 active_p[:, :, None], ((1.0 / stds_p)**2)[:, :, None], torch.zeros_like(precision[:, num_spatial:])
             )
 
-        condition_tensor = torch.cat([torch.log(precision + 1), precision > 0, masked_sim], dim=1)
-        return condition_tensor
+        observed = precision > 0
+        frac_observed = observed.float().mean(dim=[1,2])  # (B,)
+        log_precision = torch.log(precision + 1)
+
+        loss_weight_observed = torch.sqrt(1 + log_precision) / frac_observed[:, None, None]
+        loss_weight_unobserved = 1 / (1 - frac_observed[:, None, None] + 1e-8)
+        loss_weight = torch.where(observed, loss_weight_observed, loss_weight_unobserved)
+
+        condition_tensor = torch.cat([log_precision, observed, masked_sim], dim=1)
+        return condition_tensor, loss_weight
 
 class ThrusterPlotter1D:
     def __init__(
@@ -312,7 +320,7 @@ if __name__ == "__main__":
     param_names = dataset.params().keys()
     print(param_names)
 
-    condition_tensor = dataset.generate_measurements(sims)
+    condition_tensor, _ = dataset.generate_measurements(sims)
     precision = condition_tensor[:, :dataset.num_fields, :]
     measurements = condition_tensor[:, dataset.num_fields:, :]
 
