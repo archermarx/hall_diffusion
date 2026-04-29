@@ -33,7 +33,9 @@ from utils import utils, thruster_data, visualization
 from utils.timing import StepTimer, format_timedelta
 
 DEVICE = utils.get_device()
-AMP_DTYPE = torch.float16 #torch.bfloat16 if (DEVICE.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+AMP_DTYPE = (
+    torch.float16
+)  # torch.bfloat16 if (DEVICE.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
 
 # Set RNG seed
 torch.manual_seed(10)
@@ -42,9 +44,11 @@ torch.manual_seed(10)
 SCRIPT_DIR = utils.get_script_dir()
 ROOT_DIR = SCRIPT_DIR / ".."
 
+
 @dataclass
 class TrainingState:
     """Bundles all mutable training state: model components and running metrics."""
+
     model: Any
     ema_model: Any
     optimizer: Any
@@ -61,9 +65,7 @@ class TrainingState:
     example_idx: int = -1
 
 
-def learning_rate_schedule(
-    cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3, rampup_batches=0
-):
+def learning_rate_schedule(cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3, rampup_batches=0):
     """Learning rate decay schedule from "Analyzing and Improving the Training Dynamics of Diffusion Models" (EDM2)."""
     lr = ref_lr
     if ref_batches > 0:
@@ -71,6 +73,7 @@ def learning_rate_schedule(
     if rampup_batches > 0:
         lr *= min(cur_nimg / (rampup_batches * batch_size), 1)
     return lr
+
 
 def validation_loss(
     model,
@@ -137,6 +140,7 @@ def validation_loss(
 
     return loss
 
+
 def update_lr(optimizer, batch_idx, batch_size, ref_lr, decay_batches, min_lr):
     """Update the learning rate for all optimizer parameter groups and return the new lr."""
     lr = max(learning_rate_schedule(batch_idx * batch_size, batch_size, ref_lr, decay_batches), min_lr)
@@ -154,7 +158,16 @@ def compute_grad_norm(model, logger: logging.Logger):
     return norm
 
 
-def train_one_batch(y, state, loss_fn, logger: logging.Logger, condition_vec=None, use_amp=False, ctrl_fn=None, timer: StepTimer | None = None):
+def train_one_batch(
+    y,
+    state,
+    loss_fn,
+    logger: logging.Logger,
+    condition_vec=None,
+    use_amp=False,
+    ctrl_fn=None,
+    timer: StepTimer | None = None,
+):
     """Perform one step of the optimization procedure on a batch of data."""
     if timer is None:
         timer = StepTimer(enabled=False)
@@ -217,7 +230,10 @@ def train_one_batch(y, state, loss_fn, logger: logging.Logger, condition_vec=Non
 
     return loss.item(), base_loss, grad_norm
 
-def save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, old_checkpoint, log_file, out_dir, evaluation_iters):
+
+def save_checkpoint(
+    state, batch_loss, config, train_dataset, checkpoint_file, old_checkpoint, log_file, out_dir, evaluation_iters
+):
     """Save a training checkpoint and update the diagnostic plot."""
     if batch_loss < state.best_loss:
         state.best_params = state.model.state_dict()
@@ -273,10 +289,29 @@ def train(args):
     # inherited from the base model's stored config so they don't need to be
     # re-specified in the controlnet toml.
     data_cfg = models.dataset_config(config["model"])
-    scalars_in_tensor = data_cfg["condition_dim"] == 0
-    downsample_res = data_cfg["resolution"]
-    train_dataset = thruster_data.ThrusterDataset(train_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
-    test_dataset = thruster_data.ThrusterDataset(test_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res)
+    print(data_cfg)
+
+    if "scalars_in_tensor" in data_cfg:
+        scalars_in_tensor = data_cfg["scalars_in_tensor"]
+    else:
+        if "condition_dim" in data_cfg and data_cfg["condition_dim"] == 0:
+            scalars_in_tensor = True
+        else:
+            scalars_in_tensor = False
+
+    if "downsample_res" in data_cfg:
+        downsample_res = data_cfg["downsample_res"]
+    elif "resolution" in data_cfg:
+        downsample_res = data_cfg["resolution"]
+    else:
+        downsample_res = None
+
+    train_dataset = thruster_data.ThrusterDataset(
+        train_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res
+    )
+    test_dataset = thruster_data.ThrusterDataset(
+        test_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res
+    )
 
     # Check that normalization is the same between training and test datasets
     assert train_dataset.norm == test_dataset.norm
@@ -318,7 +353,9 @@ def train(args):
     # Set up the exponential moving average model
     ema_epochs = train_args.get("ema_epochs", None)
     ema_factor = EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, ema_epochs)
-    logger.info(f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}.")
+    logger.info(
+        f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}."
+    )
     ema = EMA(ema_factor, step_start=2000)
     ema_model = copy.deepcopy(model).eval().requires_grad_(False)
 
@@ -334,7 +371,9 @@ def train(args):
     weight_decay_epochs = opt_args.get("weight_decay_epochs", None)
     weight_decay = 1 - EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, weight_decay_epochs)
 
-    optimizer = optim.AdamW([p for p in model.get_trainable_params()], lr=ref_lr, weight_decay=weight_decay, betas=betas)
+    optimizer = optim.AdamW(
+        [p for p in model.get_trainable_params()], lr=ref_lr, weight_decay=weight_decay, betas=betas
+    )
     scaler = torch.amp.grad_scaler.GradScaler() if AMP_DTYPE == torch.float16 else None
     logger.info(f"AMP dtype: {AMP_DTYPE}, grad scaler: {'enabled' if scaler is not None else 'disabled'}")
 
@@ -358,8 +397,10 @@ def train(args):
         try:
             optimizer.load_state_dict(ckpt["optimizer"])
         except:
-            logger.warning(f"Unable to load optimizer from file. This means the underlying model specification may have changed. The optimizer will be created from scratch.")
-            
+            logger.warning(
+                "Unable to load optimizer from file. This means the underlying model specification may have changed. The optimizer will be created from scratch."
+            )
+
         # Load EMA model
         if "ema" in ckpt:
             if isinstance(ema_model, ControlNet):
@@ -368,7 +409,6 @@ def train(args):
                 ema_model.load_state_dict(ckpt["ema"], strict=False)
             ema.step_start = 0
             logger.info("EMA loaded from checkpoint")
-
 
     # ---------------------------------------------
     # Print a string of the current epoch, batch, and stage
@@ -382,13 +422,17 @@ def train(args):
         df = pd.DataFrame()
 
     if not df.empty:
-        start_epoch = int(df['epoch_idx'].iloc[-1])
+        start_epoch = int(df["epoch_idx"].iloc[-1])
         state = TrainingState(
-            model=model, ema_model=ema_model, optimizer=optimizer, ema=ema, scaler=scaler,
-            val_loss=float(df['val_loss'].iloc[-1]),
-            ema_loss=float(df['ema_loss'].iloc[-1]),
-            batch_idx=int(df['batch_idx'].iloc[-1]),
-            example_idx=int(df['example_idx'].iloc[-1]),
+            model=model,
+            ema_model=ema_model,
+            optimizer=optimizer,
+            ema=ema,
+            scaler=scaler,
+            val_loss=float(df["val_loss"].iloc[-1]),
+            ema_loss=float(df["ema_loss"].iloc[-1]),
+            batch_idx=int(df["batch_idx"].iloc[-1]),
+            example_idx=int(df["example_idx"].iloc[-1]),
         )
     else:
         start_epoch = 0
@@ -456,7 +500,9 @@ def train(args):
 
             progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
 
-            _, batch_loss, grad_norm = train_one_batch(y, state, loss_fn, logger=logger, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn, timer=timer)
+            _, batch_loss, grad_norm = train_one_batch(
+                y, state, loss_fn, logger=logger, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn, timer=timer
+            )
             batch_losses.append(batch_loss)
             timer.step()
             if prof_ctx is not None:
@@ -481,30 +527,62 @@ def train(args):
                 if state.batch_idx % evaluation_iters == 0:
                     progress.set_description(description(epoch_idx, state.batch_idx, "Validating"))
                     val_seed = torch.randint(2**31, (1,)).item()
-                    state.ema_loss = validation_loss(state.ema_model, loss_fn, test_loader, visualize=True, epoch_idx=epoch_idx, out_folder=out_dir, data_dir=test_data_dir, ctrl_fn=ctrl_fn, seed=val_seed)
-                    state.val_loss = validation_loss(state.model, loss_fn, test_loader, data_dir=test_data_dir, ctrl_fn=ctrl_fn, seed=val_seed)
+                    state.ema_loss = validation_loss(
+                        state.ema_model,
+                        loss_fn,
+                        test_loader,
+                        visualize=True,
+                        epoch_idx=epoch_idx,
+                        out_folder=out_dir,
+                        data_dir=test_data_dir,
+                        ctrl_fn=ctrl_fn,
+                        seed=val_seed,
+                    )
+                    state.val_loss = validation_loss(
+                        state.model, loss_fn, test_loader, data_dir=test_data_dir, ctrl_fn=ctrl_fn, seed=val_seed
+                    )
                     ema_losses.append(state.ema_loss)
                     val_losses.append(state.val_loss)
 
             with timer.section("logging"):
                 # Update log file
-                row = dict(example_idx=state.example_idx, batch_idx=state.batch_idx, epoch_idx=epoch_idx,
-                        train_loss=batch_loss, val_loss=state.val_loss, ema_loss=state.ema_loss,
-                        grad_norm=grad_norm, learning_rate=lr)
+                row = dict(
+                    example_idx=state.example_idx,
+                    batch_idx=state.batch_idx,
+                    epoch_idx=epoch_idx,
+                    train_loss=batch_loss,
+                    val_loss=state.val_loss,
+                    ema_loss=state.ema_loss,
+                    grad_norm=grad_norm,
+                    learning_rate=lr,
+                )
                 write_header = not log_file.exists() or log_file.stat().st_size == 0
-                pd.DataFrame([row]).to_csv(log_file, mode='a', header=write_header, index=False)
+                pd.DataFrame([row]).to_csv(log_file, mode="a", header=write_header, index=False)
                 progress.set_postfix_str(f"batch_loss={batch_loss:.4f}, val_loss={state.val_loss:.4f}")
 
             with timer.section("Saving"):
                 if state.batch_idx % checkpoint_iters == 0:
                     progress.set_description(description(epoch_idx, state.batch_idx, "Saving"))
                     with timer.section("checkpoint"):
-                        save_checkpoint(state, batch_loss, config, train_dataset, checkpoint_file, old_checkpoint, log_file, out_dir, evaluation_iters)
+                        save_checkpoint(
+                            state,
+                            batch_loss,
+                            config,
+                            train_dataset,
+                            checkpoint_file,
+                            old_checkpoint,
+                            log_file,
+                            out_dir,
+                            evaluation_iters,
+                        )
 
         epoch_stop_time = datetime.now()
         time_delta = format_timedelta((epoch_stop_time - epoch_start_time).total_seconds())
         avg_batch_loss, avg_val_loss, avg_ema_loss = np.mean(batch_losses), np.mean(val_losses), np.mean(ema_losses)
-        logger.info(f"Epoch {epoch_idx} finished in {time_delta}.\n\tAvg train loss: {avg_batch_loss:.3e}\n\tAvg val loss: {avg_val_loss:.3e}\n\tAvg ema loss: {avg_ema_loss:.3e}")
+        logger.info(
+            f"Epoch {epoch_idx} finished in {time_delta}.\n\tAvg train loss: {avg_batch_loss:.3e}\n\tAvg val loss: {avg_val_loss:.3e}\n\tAvg ema loss: {avg_ema_loss:.3e}"
+        )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -536,12 +614,7 @@ if __name__ == "__main__":
         help="Run torch.profiler for ~8 steps and write a TensorBoard/Chrome trace to DIR.",
         default=None,
     )
-    parser.add_argument("" \
-        "--log-file",
-        type=str,
-        help="File to which logging info should be written",
-        default = None
-    )
+    parser.add_argument("--log-file", type=str, help="File to which logging info should be written", default=None)
     args = parser.parse_args()
 
     train(args)
