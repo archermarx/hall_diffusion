@@ -1,5 +1,7 @@
 #MODEL := "saved_models/edm2_small_old/checkpoint.pth.tar"
-MODEL := "saved_models/train_scalars_xs_controlnet/checkpoint.pth.tar"
+# MODEL := "saved_models/train_scalars_xs_controlnet/checkpoint.pth.tar"
+#MODEL := "saved_models/train_scalars_controlnet/checkpoint.pth.tar"
+MODEL := "saved_models/train_21/checkpoint.pth.tar"
 #MODEL := "saved_models/train_scalars/checkpoint.pth.tar"
 NUM_MCMC := "1024"
 DEFAULT_FIELDS := "ui_1 ne Tev nu_an"

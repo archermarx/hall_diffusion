@@ -7,7 +7,7 @@ control_channels = 69
 
 [training]
 # Number of complete passes through the training data to complete
-epochs = 128
+epochs = 1024
 # Training mini-batch size
 batch_size = 2048
 # Frequency in batches with which the model is tested on the validation set
