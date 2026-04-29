@@ -348,7 +348,8 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
     scalar_ind = 17
 
     inv_std = torch.zeros_like(data)
-    inv_std[scalar_ind:] = 1e4
+    std = 1e-2
+    inv_std[scalar_ind:] = 1 / std
     precision = torch.log(1 + inv_std**2)
 
     mask = data.clone()
@@ -420,11 +421,15 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
     axs = axs.ravel()
     names = [k for k in unconditional_dataset.params().keys()]
 
+    stds = []
     for (i, ind) in enumerate(range(scalar_ind, 23)):
         samples = final[:, ind, 0]
+        stds.append(torch.std(samples).item())
         axs[i].hist(samples)
         axs[i].axvline(data[ind, 0], linestyle='--', color='red')
         axs[i].set(xlim=(-1.5, 1.5), title = names[i])
+
+    print(",".join([f"{std:.4e}" for std in stds]))
 
     plt.show()
 
