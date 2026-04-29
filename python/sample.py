@@ -278,8 +278,7 @@ def reverse(
 
         # increase noise level somewhat
         t_prev = timesteps[step_idx - 1]
-        # gamma = np.minimum(S_churn / len(timesteps), np.sqrt(2) - 1)
-        gamma = 0.0
+        gamma = np.minimum(S_churn / len(timesteps), np.sqrt(2) - 1)
 
         if t_prev == 0:
             t_new = 0.002
@@ -414,7 +413,7 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
         step_scale=step_scale,
         method=method,
         S_churn=S_churn,
-        model_args=dict(condition_vector=None),
+        model_args=dict(condition_vector=param_vec),
         pde_args=args.get("pde_guidance", None),
     )
 
