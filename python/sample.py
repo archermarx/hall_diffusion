@@ -18,7 +18,7 @@ import models
 from models.controlnet import ControlNet
 from utils import utils
 from utils.thruster_data import ThrusterDataset
-from samplers.edmsampler import EDMSampler, RK2Integrator, ConstantGuidance
+from samplers.edmsampler import EDMSampler, RK2Integrator, ObservationGuidance
 
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str, nargs="?")
@@ -126,7 +126,12 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
     var = observation["var"]
     H = observation["operator"]
 
-    proc_var = t**2 / (t**2 + 1)
+    #proc_var = 0.1 * t**2 / (t**2 + 1)
+    #proc_var = 0.0
+    f = lambda t: t**2 / (t**2 + 1)
+    t_end = 0.1
+    # proc_var = f(t-t_end) if t > t_end else 0.0
+    proc_var = 0.25 * f(t)
 
     # =====================================================
     # Diffusion posterior sampling (get observation loss)
@@ -140,7 +145,7 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
     return score
 
 def sample(model, shape, scalars_in_tensor, args):
-    num_samples, channels, resolution = shape
+    num_samples, _, resolution = shape
 
     # Determine if we're doing condional or unconditional sampling
     # If there is an `observation` field, then we're conditioning on a partial observation of that simulation
@@ -218,10 +223,14 @@ def sample(model, shape, scalars_in_tensor, args):
     exponent = args.get("step_exponent", 7.0)
 
     # Set up sampler
-    guidance = ConstantGuidance(guidance_score, obs)
-
     integrator = RK2Integrator(
         model,
+        guidance_score_fn = ObservationGuidance(
+            type="constant",
+            obs_score=guidance_score,
+            observation=obs,
+            guidance_start_time=args.get("guidance_start_time", float('inf'))
+        ),
         method = args.get("method", None),
         rk_alpha = args.get("rk_alpha", 0.5),
         S_churn = args.get("S_churn", 0.0) / num_steps,
@@ -234,7 +243,6 @@ def sample(model, shape, scalars_in_tensor, args):
     # Sample, saving intermediate steps for visualization and debugging
     output = sampler.sample(
         integrator,
-        guidance,
         showprogress=True,
         device=DEVICE,
         model_args=dict(condition_vector=param_vec)

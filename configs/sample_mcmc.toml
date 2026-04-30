@@ -11,10 +11,17 @@ model_type = "ema"
 out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
-# Step scale
-step_scale = 1.00
 # ODE method
-method = "midpoint"
+method = "heun"
+
+# Stochastic args
+S_churn = 0.0       # Set the level of stochasticity (0 for none, >0 for more)
+S_tmin = 0.05        # Minimum noise level for stochasticity to apply
+S_tmax = 50        # Maximum noise level for stochasticity to apply
+S_noise = 1.003     # Noise multiplier for stochasticity
+noise_min = 0.002
+noise_max = 80.0
+step_exponent = 7.0
 
 [observation]
 base_sim = "mcmc_reference/ref_3charge/normalized"
