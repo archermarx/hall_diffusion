@@ -1,7 +1,6 @@
 #MODEL := "saved_models/edm2_small_old/checkpoint.pth.tar"
 # MODEL := "saved_models/train_scalars_xs_controlnet/checkpoint.pth.tar"
-#MODEL := "saved_models/train_scalars_controlnet/checkpoint.pth.tar"
-MODEL := "saved_models/train_scalars_controlnet/checkpoint.pth.tar"
+MODEL := "saved_models/train_scalars_controlnet_highweight/checkpoint.pth.tar"
 #MODEL := "saved_models/train_21/checkpoint.pth.tar"
 #MODEL := "saved_models/train_scalars/checkpoint.pth.tar"
 NUM_MCMC := "1024"
@@ -78,10 +77,11 @@ plot_unconditional target:
     uv run python/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"{{target}}.png" \
-        -f ui_1 ne nn E Tev inv_hall \
+        -f ui_1 ne nn E Tev nu_an \
         --type=sidebyside \
         --rows=2 \
-        --mode="curves"
+        --mode="traces" \
+        --ref="tmp_ref"
 
 plot_tensors target:
     uv run python/plot.py \

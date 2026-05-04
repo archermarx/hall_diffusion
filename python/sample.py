@@ -345,8 +345,17 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, sam
     assert unconditional_dataset is not None
 
     # try conditioning on scalar params alone
-    data = unconditional_dataset[0][2]
+    ind = 1
+    file = unconditional_dataset[ind][0]
+
+    import shutil
+    shutil.copy(os.path.join(unconditional_dataset.data_dir, file), "tmp_ref/data/data.npz")
+
+    data = unconditional_dataset[ind][2]
+    print(f"{file=}")
     #data = data.unsqueeze(0)
+
+    print(unconditional_dataset.fields())
 
     # condition_tensor, _ = unconditional_dataset.generate_measurements(data)
     # condition_tensor = condition_tensor.tile(num_samples, 1, 1).to(DEVICE)
@@ -354,12 +363,21 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, sam
     scalar_ind = 17
 
     inv_std = torch.zeros_like(data)
-    std = sample_std
+    mask = data.clone()
+    mask[:scalar_ind] = 0
+    std = 1e-1
+
+    fields_to_obesrve = ["B", "ui_1"]
+    field_dict = unconditional_dataset.fields()
+
+    for field in fields_to_obesrve:
+        ind = field_dict[field]
+        inv_std[ind, ...] = 1 / std
+        mask[ind, ...] = data[ind, ...]
+
     inv_std[scalar_ind:] = 1 / std
     precision = torch.log(1 + inv_std**2)
 
-    mask = data.clone()
-    mask[:scalar_ind] = 0
 
     condition_tensor_base = torch.cat([precision, precision > 0, mask], dim=0)
     condition_tensor = condition_tensor_base.unsqueeze(0).to(DEVICE).tile((num_samples, 1, 1))
@@ -519,7 +537,8 @@ if __name__ == "__main__":
 
     if os.path.exists("stds.csv"):
         os.remove("stds.csv")
-    sample_stds = [1e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1e0]
+    #sample_stds = [1e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1e0]
+    sample_stds = [1e-2]
 
     for std in sample_stds:
         print(f"std={std:.2e}")
@@ -546,4 +565,4 @@ if __name__ == "__main__":
 
     plt.savefig("stds.png", dpi=200)
 
-    plt.show()
+    # plt.show()
