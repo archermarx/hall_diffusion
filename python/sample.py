@@ -20,6 +20,9 @@ from utils import utils
 from utils.thruster_data import ThrusterDataset
 from noise import NoiseSampler
 
+import matplotlib.pyplot as plt
+import pandas as pd
+
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str, nargs="?")
 parser.add_argument("config", type=str, nargs="?")
@@ -316,7 +319,7 @@ def reverse(
     return output
 
 
-def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, args):
+def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, sample_std, args):
     # Load sampling arguments
     num_steps = args.get("num_steps", 256)
     noise_min = args.get("noise_min", 0.002)
@@ -345,26 +348,18 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
     data = unconditional_dataset[0][2]
     #data = data.unsqueeze(0)
 
-    # condition_tensor = unconditional_dataset.generate_measurements(data)
+    # condition_tensor, _ = unconditional_dataset.generate_measurements(data)
     # condition_tensor = condition_tensor.tile(num_samples, 1, 1).to(DEVICE)
 
     scalar_ind = 17
 
     inv_std = torch.zeros_like(data)
-    std = 1e0
+    std = sample_std
     inv_std[scalar_ind:] = 1 / std
     precision = torch.log(1 + inv_std**2)
 
     mask = data.clone()
     mask[:scalar_ind] = 0
-
-    import matplotlib.pyplot as plt
-    # fig, axs = plt.subplots(1, 2, layout='constrained', figsize=(7,3), squeeze=False)
-    # axs = axs.ravel()
-    # im_args = dict(interpolation="none", aspect="auto", cmap="gray")
-    # axs[0].imshow(precision, **im_args)
-    # axs[1].imshow(mask, **im_args)
-    # plt.show()
 
     condition_tensor_base = torch.cat([precision, precision > 0, mask], dim=0)
     condition_tensor = condition_tensor_base.unsqueeze(0).to(DEVICE).tile((num_samples, 1, 1))
@@ -402,8 +397,6 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
     # Load timesteps
     steps = edm_sampling_timesteps(num_steps, noise_min, noise_max, exponent, num_refinement_steps=refinement_steps)
 
-    print(f"{param_vec.shape=}")
-
     output = reverse(
         model,
         xt,
@@ -420,21 +413,22 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
 
     final = output[-1, ...]
 
-    fig, axs = plt.subplots(2, 3, layout="constrained", figsize=(10,6), squeeze=False)
-    axs = axs.ravel()
-    names = [k for k in unconditional_dataset.params().keys()]
+    # fig, axs = plt.subplots(2, 3, layout="constrained", figsize=(10,6), squeeze=False)
+    # axs = axs.ravel()
+    # names = [k for k in unconditional_dataset.params().keys()]
 
     stds = []
     for (i, ind) in enumerate(range(scalar_ind, 23)):
         samples = final[:, ind, 0]
         stds.append(torch.std(samples).item())
-        axs[i].hist(samples)
-        axs[i].axvline(data[ind, 0], linestyle='--', color='red')
-        axs[i].set(xlim=(-1.5, 1.5), title = names[i])
+        # axs[i].hist(samples)
+        # axs[i].axvline(data[ind, 0], linestyle='--', color='red')
+        # axs[i].set(xlim=(-1.5, 1.5), title = names[i])
 
-    print(",".join([f"{std:.4e}" for std in stds]))
+    with open("stds.csv", "a+") as f:
+        print(f"{std}", ",".join([f"{std:.4e}" for std in stds]), file = f)
 
-    plt.show()
+    # plt.show()
 
     # Save generated samples
     out_dir = Path(args["out_dir"])
@@ -446,7 +440,6 @@ def sample(model, noise_sampler, num_samples, resolution, scalars_in_tensor, arg
     # Make folder and write metadata
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"{len(dataset.grid)=}")
     dataset.write_metadata(out_dir)
 
     # Write final sample data to independent output dirs
@@ -524,9 +517,33 @@ if __name__ == "__main__":
 
     noise_sampler = NoiseSampler.from_config(channels, resolution, DEVICE, **noise_sampler_args)
 
-    # Sample in batches
-    for i, batch_num_samples in enumerate(batches):
-        sample(model, noise_sampler, batch_num_samples, resolution, scalars_in_tensor, sampling_config)
+    if os.path.exists("stds.csv"):
+        os.remove("stds.csv")
+    sample_stds = [1e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1e0]
 
-        # Make sure we don't remove old samples
-        sampling_config["replace_samples"] = False
+    for std in sample_stds:
+        print(f"std={std:.2e}")
+        # Sample in batches
+        for i, batch_num_samples in enumerate(batches):
+            sample(
+                model,
+                noise_sampler, batch_num_samples, resolution, scalars_in_tensor, sample_std=std, args=sampling_config
+            )
+
+            # Make sure we don't remove old samples
+            sampling_config["replace_samples"] = False
+
+    import pandas as pd
+    df = pd.read_csv("stds.csv", header=None)
+    fig, ax = plt.subplots(figsize=(5,5), layout="constrained")
+    lims = (sample_stds[0]*0.9, sample_stds[-1]*1.1)
+    ax.set(xscale='log', yscale='log', xlim=lims, ylim=lims, xlabel="Expected stddev", ylabel="Stddev of generated samples")
+    for i, col in enumerate(df.columns):
+        if i == 0:
+            ax.plot(sample_stds, sample_stds, linestyle ="--", color="black")
+        else:
+            ax.scatter(sample_stds, df[col])
+
+    plt.savefig("stds.png", dpi=200)
+
+    plt.show()
