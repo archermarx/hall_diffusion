@@ -11,14 +11,17 @@ using UUIDs: uuid4
 using ProgressMeter
 using Distributions: Normal, LogNormal, Uniform, LogUniform, Truncated, MvNormal, sample
 using JSON3
+using OptParse: OptParse as opt
+
 
 """
-param_distributions()
+param_distributions(param_config = nothing)
 
 Specify the distributions of the paramters of interest, so we can sample from them later.
+Optionally provide a configuration dictionary to override the default distributions.
 """
-function param_distributions()
-    return Dict(
+function param_distributions(param_config = nothing)
+	distributions = Dict(
         # Main anom parameters
         :anom_minimum => Truncated(LogNormal(log(0.05), log(10)), 0.0, 1.0),
         :anom_width => Truncated(Normal(0.3, 0.5), 0, Inf),
@@ -26,9 +29,6 @@ function param_distributions()
         :anom_step => Uniform(0.0, 1.0),
         :anom_scale => LogNormal(log(0.1), log(5)),
         :anom_center => Truncated(Normal(1.1, 1/3), 0, 2),
-        # Pressure-dependent parameters
-        #:anom_shift_scale => Truncated(Normal(0.25, 0.1), 0.0, Inf),
-        #:neutral_ingestion_scale => Truncated(Normal(4, 2), 1, 6),
         # Other parameters
         :neutral_velocity_m_s => Truncated(Normal(300, 100), 0.0, Inf),
         :wall_loss_scale => Truncated(Normal(1, 0.5), 0, Inf),
@@ -36,23 +36,21 @@ function param_distributions()
         :magnetic_field_scale => Uniform(0.5, 1.5),
         :discharge_voltage_v => Uniform(200.0, 600.0),
         :anode_mass_flow_rate_kg_s => Uniform(3e-6, 7e-6),
-        #:background_pressure_torr => LogNormal(log(1e-5), log(10)),
         :cathode_coupling_voltage_v => Uniform(0.0, 50.0),
     )
-end
 
-function get_params(sim)
-    B_ref = maximum(het.load_magnetic_field("julia/bfield_spt100.csv").B)
-    config = sim.config
-    return Dict(
-        :neutral_velocity_m_s => config.propellants[1].velocity_m_s,
-        :wall_loss_scale => config.wall_loss_model.loss_scale,
-        :discharge_voltage_v => config.discharge_voltage,
-        :anode_mass_flow_rate_kg_s => config.propellants[1].flow_rate_kg_s,
-        :cathode_coupling_voltage_v => config.cathode_coupling_voltage,
-        :magnetic_field_scale => maximum(config.thruster.magnetic_field.B) / B_ref,
-        #:background_pressure_torr => config.background_pressure_torr,
-    )
+	if !isnothing(param_config)
+		for (k, v) in pairs(param_config)
+			key_sym = Symbol(k)
+			if haskey(distributions, key_sym)
+				dist_type = v["type"]
+				@assert dist_type == "Uniform"
+				distributions[key_sym] = Uniform(v["args"][1], v["args"][2])
+			end
+		end
+	end
+
+	return distributions
 end
 
 """
@@ -60,8 +58,7 @@ sample_params()
 
 Sample a single random parameter set using the distributions specified in `param_distributions()`
 """
-function sample_params()
-    distributions = param_distributions()
+function sample_params(distributions)
     return Dict([
         param => rand(distribution) for (param, distribution) in pairs(distributions)
     ])
@@ -152,34 +149,32 @@ The thruster can be specified by the caller as a path to a JSON file, or else le
 In this case, the SPT-100 will be used.
 See the source code of `param_distributions()` for a listing of parameters.
 """
-function run_sim(params; thruster=nothing, num_cells = 128, perturbation_scale = 1.0)
+function run_sim(
+	params; 
+	config_dict,
+	num_cells = 128,
+	verbose = false,
+	perturbation_scale = 1.0
+)
 
-    if isnothing(thruster) 
-        thruster = het.SPT_100
-        geom = thruster.geometry
-
-        Bfield_base = het.MagneticField(file = "julia/bfield_spt100.csv")
-        het.load_magnetic_field!(Bfield_base)
-        B = params[:magnetic_field_scale] * Bfield_base.B
-        thruster = het.Thruster(
-            "SPT-100",
-            geom,
-            het.MagneticField("", Bfield_base.z, B),
-            false,
-        ) 
-        propellant, wall_material = het.Xenon, het.BNSiO2
-    else
-        config_dict = het.JSON.parse(read(thruster))
-        propellant = het.deserialize(het.Gas, config_dict["propellant"])
-        wall_material = het.deserialize(het.WallMaterial, config_dict["wall_material"])
-        thruster = het.deserialize(het.Thruster, config_dict["thruster"]) 
-    end
+	# Get thruster and operating details from configuration dictionary
+	propellant = het.deserialize(het.Gas, config_dict["propellant"])
+	wall_material = het.deserialize(het.WallMaterial, config_dict["wall_material"])
+	thruster = het.deserialize(het.Thruster, config_dict["thruster"]) 
 
     L_ch = thruster.geometry.channel_length
     domain = (0.0, 3.2 * L_ch)
     z_dimensional = LinRange(domain[1], domain[2], num_cells*2)
     z = z_dimensional ./ thruster.geometry.channel_length
     f_anom = anom_model(z, params; perturbation_scale)
+
+	filter_circuit = het.CircuitModel(
+		:NoCircuit,
+		# R = 10.0,
+		# L = 0.1e-3,
+		# C = 40e-6,
+		limit_current=100.0,
+	)
 
     config = het.Config(
         ncharge = 3,
@@ -194,6 +189,7 @@ function run_sim(params; thruster=nothing, num_cells = 128, perturbation_scale =
         discharge_voltage = params[:discharge_voltage_v],
         wall_loss_model = het.WallSheath(wall_material, params[:wall_loss_scale]),
         ion_wall_losses = true,
+		filter_circuit = filter_circuit
     )
 
     sim = het.SimParams(
@@ -201,8 +197,8 @@ function run_sim(params; thruster=nothing, num_cells = 128, perturbation_scale =
         dt = 1.0e-9,
         grid = het.EvenGrid(num_cells),
         num_save = 2001,
-        verbose = true,
-        print_errors = true,
+        verbose = verbose,
+        print_errors = verbose,
     )
 
     return het.run_simulation(config, sim)
@@ -217,10 +213,6 @@ In addition to axially-resolved fields, we also write out certain time-dependent
 as well as the params with which the simulation was run.
 """
 function save_sim(sim, params = nothing)
-    if (params === nothing)
-        params = get_params(sim)
-    end
-
     avg = if length(sim.frames) > 1
         het.time_average(sim, length(sim.frames) ÷ 2)
     else
@@ -240,8 +232,8 @@ function save_sim(sim, params = nothing)
     return out_dict
 end
 
-function save_sim(file::String, args...; kwargs...)
-    sim_dict = save_sim(args..., kwargs...)
+function save_sim(file::String, sim, params)
+    sim_dict = save_sim(sim, params)
     open(file, "w") do f
         serialize(f, sim_dict)
     end
@@ -255,9 +247,9 @@ Randomly generate a simulation, run it, and save it to disk in the specified dir
 The outputs are saved as serialized julia dictionaries, to be normalized and processed later.
 Each output file is given a uuid to avoid name collisions.
 """
-function gen_data_single(; thruster=nothing, num_cells = 128, save_dir = "julia/data")
-    params = sample_params()
-    sim = run_sim(params; thruster, num_cells)
+function gen_data_single(; param_distributions, save_dir = "julia/data", kwargs...)
+    params = sample_params(param_distributions)
+    sim = run_sim(params; kwargs...)
 
     mkpath(save_dir)
 
@@ -275,7 +267,12 @@ gen_data_multithreaded(num_sims; num_cells, save_dir = "data", statusfile = noth
 Generate `num_sims` simulations, each with `num_cells` cells. Outputs are saved to `save_dir`.
 If statusfile is not nothing, we write the status of data generation to that file in addition to displaying it in terminal.
 """
-function gen_data_multithreaded(num_sims, thruster_config; num_cells = 128, save_dir = "data", statusfile = nothing)
+function gen_data_multithreaded(
+	num_sims, config_dict;
+	statusfile = nothing,
+	save_dir = "data",
+	kwargs...,
+)
     mkpath(save_dir)
     p = Progress(
         num_sims;
@@ -287,7 +284,7 @@ function gen_data_multithreaded(num_sims, thruster_config; num_cells = 128, save
     start_time = time()
     try
         Threads.@threads for _ in 1:num_sims
-            gen_data_single(; thruster=thruster_config, num_cells, save_dir)
+            gen_data_single(; config_dict, save_dir, kwargs...)
             iters_local = copy(iters[])
             next!(p, showvalues = [("iteration count", "$(iters_local)/$(num_sims)")])
             if !isnothing(statusfile)
@@ -322,23 +319,25 @@ Generate a number of simulations according to the first command line argument, o
 """
 # Equiv. of `if __name__ == "__main__"`
 if abspath(PROGRAM_FILE) == @__FILE__ 
-    num_sims = if length(ARGS) > 0
-        parse(Int, ARGS[1])
-    else
-        6 * Threads.nthreads()
-    end
-    
-    thruster_config = if length(ARGS) > 1
-        ARGS[2]
-    else
-        nothing
-    end
 
-    save_dir = if length(ARGS) > 2
-        ARGS[2]
-    else
-        "julia/data"
-    end
+	parser = opt.object((
+		save_dir = opt.option("-o", "--out-dir", opt.str()),
+		config_file = opt.option("-c", "--config", opt.str()),
+		num_sims = opt.option("-n", "--num-sims", opt.integer()),
+		log_file = opt.option("-l", "--log-file", opt.str()),
+		verbose = opt.flag("-v", "--verbose")
+	))
+	
+	args = opt.argparse(parser, ARGS)
+	config = het.JSON.parse(read(args.config_file))
+	distributions = param_distributions(config["params"])
 
-    gen_data_multithreaded(num_sims, thruster_config; num_cells = 128, save_dir = save_dir, statusfile = "gendata.out")
+	gen_data_multithreaded(
+		args.num_sims, config;
+		param_distributions = distributions,
+		num_cells = 128,
+		save_dir = args.save_dir,
+		statusfile = args.log_file,
+		verbose = args.verbose,
+	)
 end
