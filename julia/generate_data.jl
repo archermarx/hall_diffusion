@@ -319,7 +319,6 @@ Generate a number of simulations according to the first command line argument, o
 """
 # Equiv. of `if __name__ == "__main__"`
 if abspath(PROGRAM_FILE) == @__FILE__ 
-
 	parser = opt.object((
 		save_dir = opt.option("-o", "--out-dir", opt.str()),
 		config_file = opt.option("-c", "--config", opt.str()),
