@@ -335,7 +335,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     end
 
     save_dir = if length(ARGS) > 2
-        ARGS[2]
+        ARGS[3]
     else
         "julia/data"
     end
