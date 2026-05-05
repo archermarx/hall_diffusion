@@ -328,11 +328,17 @@ if abspath(PROGRAM_FILE) == @__FILE__
         6 * Threads.nthreads()
     end
     
-    thurster_config = if length(ARGS) > 1
+    thruster_config = if length(ARGS) > 1
         ARGS[2]
     else
         nothing
     end
 
-    gen_data_multithreaded(num_sims, thurster_config; num_cells = 128, save_dir = "julia/data", statusfile = "gendata.out")
+    save_dir = if length(ARGS) > 2
+        ARGS[2]
+    else
+        "julia/data"
+    end
+
+    gen_data_multithreaded(num_sims, thruster_config; num_cells = 128, save_dir = save_dir, statusfile = "gendata.out")
 end
