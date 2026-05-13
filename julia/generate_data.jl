@@ -177,13 +177,13 @@ function run_sim(
 	)
 
     config = het.Config(
-        ncharge = 3,
         thruster = thruster,
         domain = domain,
         propellants = [het.Propellant(
             propellant,
             flow_rate_kg_s = params[:anode_mass_flow_rate_kg_s],
             velocity_m_s = params[:neutral_velocity_m_s],
+            max_charge=3,
         )],
         anom_model = het.MultiLogBohm(z_dimensional, f_anom),
         discharge_voltage = params[:discharge_voltage_v],
