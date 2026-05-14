@@ -71,7 +71,7 @@ plot_roberts target="roberts":
 
 # Plot anom collision freq
 plot_anom:
-    uv run python/plot.py --anom -o "anom.png"
+    uv run python/plot.py --type="anom" -o "anom.png"
 
 plot_unconditional target:
     uv run python/plot.py \

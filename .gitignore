@@ -17,3 +17,5 @@ profile.txt
 *.log
 std.csv
 tmp_ref
+*.svg
+*.pdf

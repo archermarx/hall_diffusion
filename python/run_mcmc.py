@@ -170,32 +170,35 @@ class Truncated(Distribution):
         else:
             return (self.dist.cdf(x) - self.cdf_lo) / (self.cdf_hi - self.cdf_lo)
 
+def param_distributions(max_rank=MAX_RANK):
+    # Model parameters
+    param_distributions = dict(
+        anom_minimum=Truncated(Normal(np.log(0.05), np.log(10)), -np.inf, 0.0),
+        anom_width=Truncated(Normal(0.3, 0.5), 0, np.inf),
+        anom_slope=Uniform(0.0, 1.0),
+        anom_step=Uniform(0.0, 1.0),
+        anom_scale=Normal(np.log(0.1), np.log(5)),
+        anom_center=Truncated(Normal(1.1, 1 / 3), 0, 2),
+        neutral_velocity=Truncated(Normal(300, 100), 0, np.inf),
+        wall_loss_coeff=Truncated(Normal(1.0, 0.5), 0, np.inf),
+    )
 
-# Model parameters
-param_distributions = dict(
-    anom_minimum=Truncated(Normal(np.log(0.05), np.log(10)), -np.inf, 0.0),
-    anom_width=Truncated(Normal(0.3, 0.5), 0, np.inf),
-    anom_slope=Uniform(0.0, 1.0),
-    anom_step=Uniform(0.0, 1.0),
-    anom_scale=Normal(np.log(0.1), np.log(5)),
-    anom_center=Truncated(Normal(1.1, 1 / 3), 0, 2),
-    neutral_velocity=Truncated(Normal(300, 100), 0, np.inf),
-    wall_loss_coeff=Truncated(Normal(1.0, 0.5), 0, np.inf),
-)
+    for i in range(max_rank):
+        param_distributions[f"w_{i}"] = Normal(0.0, 1.0)
+    
+    return param_distributions
 
-for i in range(MAX_RANK):
-    param_distributions[f"w_{i}"] = Normal(0.0, 1.0)
-
-
-def sample_parameters():
-    params = {k: v.sample() for (k, v) in param_distributions.items()}
+def sample_parameters(max_rank=MAX_RANK):
+    dists = param_distributions(max_rank)
+    params = {k: v.sample() for (k, v) in dists.items()}
     return params
 
 
-def log_prior(params):
+def log_prior(params, max_rank=MAX_RANK):
     logp = 0.0
+    dists = param_distributions(max_rank)
     for k, v in params.items():
-        dist = param_distributions[k]
+        dist = dists[k]
         logp += dist.logpdf(v)
 
     return logp
@@ -223,26 +226,27 @@ def anom_model(z, params):
 
 def anom_model_with_noise(grid, params, basis_functions, channel_length):
     f_anom_base = anom_model(grid / channel_length, params)
-
     gpr_weights = np.array([params[f"w_{i}"] for i in range(basis_functions.shape[1])])
     noise = basis_functions @ gpr_weights
     return f_anom_base, np.exp(np.log(f_anom_base) + noise)
 
-def setup_grid(domain, N, L_ch):
+def setup_grid(domain, N, L_ch, max_rank=MAX_RANK):
     # Generate grid
     grid = np.linspace(domain[0], domain[1], N + 2)
 
     # Compute kernel and decompose into eigenfunctions
     noise_length = L_ch
-    K = gp_covariance_matrix(grid, noise_length)
+    nugget = 1e-16
+    K = gp_covariance_matrix(grid, noise_length) + nugget * np.eye(len(grid))
     eig_results = np.linalg.eig(K)
     eigenvalues = np.real(eig_results.eigenvalues)
     eigenvectors = np.real(eig_results.eigenvectors)
 
     # With this scaling, the leading coefficients of the basis functions are normally-distributed
-    coeffs = np.sqrt(eigenvalues[:MAX_RANK])
-    basis_functions = eigenvectors[:, :MAX_RANK] * coeffs
-    return grid, basis_functions
+    eigenvalues[eigenvalues < nugget] = 0.0
+    coeffs = np.sqrt(eigenvalues[:max_rank])
+    basis_functions = eigenvectors[:, :max_rank] * coeffs
+    return grid, basis_functions, eigenvalues
 
 def setup_sim(args):
     # Problem setup
@@ -260,7 +264,7 @@ def setup_sim(args):
     domain = base_inputs["config"]["domain"]
     L_ch = base_inputs["config"]["thruster"]["geometry"]["channel_length"]
 
-    grid, basis_functions = setup_grid(domain, N, L_ch)
+    grid, basis_functions, _ = setup_grid(domain, N, L_ch)
     # Find and configure HallThruster.jl
     # julia_env=args.julia_env
     # julia_args = ["julia", f'--project="{julia_env}"', "-e"]

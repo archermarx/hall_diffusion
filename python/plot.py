@@ -54,7 +54,15 @@ OBS_COLOR = "orange"
 XLABEL = "z (channel lengths)"
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
 COLORS = ["tab:blue", "tab:orange", "tab:green"]
-LEGEND_ARGS = dict(fancybox=False, framealpha=1.0, labelspacing=0.4, borderaxespad=0, borderpad=0.25, handlelength=1.5, edgecolor='black')
+LEGEND_ARGS = dict(
+    fancybox=False,
+    framealpha=1.0,
+    labelspacing=0.4,
+    borderaxespad=0,
+    borderpad=0.25,
+    handlelength=1.5,
+    edgecolor='black'
+)
 
 # Build quantiles/credible intervals we want to plot
 CREDIBLE_INTERVALS = [0.5, 0.95]
@@ -568,45 +576,72 @@ def plot_sidebyside(args, **kwargs):
     savefig(fig, args.output)
 
 def plot_anom(args):
-    col_width = 3.6
+    col_width = 4
     row_height = 3.5
 
-    figsize = (col_width * 2, row_height)
-    fig, axs = plt.subplots(1, 2, figsize=figsize, layout="constrained", dpi=200)
+    fig_args = dict(figsize=(col_width, row_height), layout="constrained", dpi=200)
+    fig_eigenvecs, ax_eigenvecs = plt.subplots(1,1, **fig_args)
+    fig_eigenvals, ax_eigenvals = plt.subplots(1,1, **fig_args)
+    fig_anom, ax_anom = plt.subplots(1,1, **fig_args)
 
     L_ch = CHANNEL_LENGTH
     domain = (0.0, 0.08)
     N = 128
-    grid, basis_functions = run_mcmc.setup_grid(domain, N, L_ch)
+    MAX_RANK=130
+    MIN_RANK=5
+    grid, basis_functions, eigenvalues = run_mcmc.setup_grid(domain, N, L_ch, max_rank=MAX_RANK)
+    basis_functions_trunc = basis_functions[:, :MIN_RANK]
     grid_norm = grid / L_ch
+    xlim = (grid_norm[0], grid_norm[-1])
 
-    eig_ind = 0
-    anom_ind = 1
-    ax_eig = axs[0]
-    ax_anom = axs[1]
-
-    ax_anom.set(yscale="log", xticks=range(math.ceil(grid_norm[-1])), xlabel="z (channel lengths)", ylabel = "Inverse Hall parameter")
+    ax_anom.set(xlim=xlim, yscale="log", xticks=range(math.ceil(grid_norm[-1])), xlabel="z (channel lengths)", ylabel = "Inverse Hall parameter")
 
     num_samples = 3
     for i in range(num_samples):
-        params = run_mcmc.sample_parameters()
+        params = run_mcmc.sample_parameters(max_rank=MAX_RANK)
+        line_args = dict(color=COLORS[i], linewidth=2)
+
+        # Plot base anomalous collision frequency plus that with full-rank correlated Gaussian noise
         f_base, f_withnoise = run_mcmc.anom_model_with_noise(grid, params, basis_functions, L_ch)
-        ax_anom.plot(grid_norm, f_base, color=COLORS[i])
-        ax_anom.plot(grid_norm, f_withnoise, color=COLORS[i], linestyle="-.")
+        ax_anom.plot(grid_norm, f_base, **line_args)
+        ax_anom.plot(grid_norm, f_withnoise, dashes = (3, 5), **line_args)
 
-    add_letter(ax_anom, anom_ind, "bottom right")
-    add_letter(ax_eig, eig_ind, "bottom right")
+        # Plot perturbation with same parameters, but truncating expansion at MIN_RANK eigenfunctions
+        params_trunc = {
+            k: v for (k, v) in params.items() if not k.startswith("w_") or (k.startswith("w_") and int(k.split("_")[1]) < MIN_RANK)
+        }
+        _, f_withnoise_trunc = run_mcmc.anom_model_with_noise(grid, params_trunc, basis_functions_trunc, L_ch)
+        ax_anom.plot(grid_norm, f_withnoise_trunc, dashes=(0, 5, 1, 2), **line_args)
 
-    ax_eig.set(ylim=(-1,1), xlabel="z (channel lengths)", ylabel="$\\phi(z)$")
-    for (i, b) in enumerate(basis_functions.T):
-        ax_eig.plot(grid_norm, b, label = f"$\\phi_{i}$")
+    # Plot first five eigenvectors of the squared exponential
+    ax_eigenvecs.set(xlim=xlim, xlabel="z (channel lengths)", ylabel="$\\phi(z)$")
+    for (i, b) in enumerate(basis_functions_trunc.T):
+        ax_eigenvecs.plot(grid_norm, b / np.sqrt(eigenvalues[i]), label = f"$\\phi_{i+1}$")
+        
+    # Plot eigenvalues of squared exponential kernel, indicating the index of the 
+    MAX_EIG_PLOT = 15
+    ax_eigenvals.set(xticks = [1, 5, 10, 15], yscale="log", xlabel="Eigenvalue index $(i)$", ylabel=r"Eigenvalue $(\lambda_i)$", xlim=(1, MAX_EIG_PLOT))
+    ax_eigenvals.grid()
+    ax_eigenvals.plot(np.arange(1, MAX_EIG_PLOT+1), eigenvalues[:MAX_EIG_PLOT])
+    ax_eigenvals.axvline([MIN_RANK], linestyle = "--", color = 'black', linewidth=2.5)
+    print(f"{eigenvalues[MIN_RANK] / eigenvalues[0]=}")
 
     legend_args = LEGEND_ARGS.copy()
-    legend_args.update(loc="upper center", ncols=len(basis_functions.T), fontsize=12, columnspacing=0.5, handlelength=0.7)
-    ax_eig.legend(**legend_args)
+    legend_args.update(
+        ncols=len(basis_functions_trunc.T),
+        fontsize=12,
+        columnspacing=0.5,
+        handlelength=1.0,
+        loc = "upper left",
+        bbox_to_anchor=(0, 0.9, 1, 0.1),  # (x, y, width, height) in axes coords
+        mode="expand",
+        bbox_transform=ax_eigenvecs.transAxes
+    )
+    ax_eigenvecs.legend(**legend_args)
 
-    savefig(fig, args.output)
-
+    savefig(fig_eigenvecs, "eigenvecs.png")
+    savefig(fig_eigenvals, "eigenvals.png")
+    savefig(fig_anom, args.output)
 
 def plot_tensors(args):
     dataset, samples = load_samples(args.samples, denormalize=False)
