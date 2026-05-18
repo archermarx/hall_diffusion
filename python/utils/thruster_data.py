@@ -13,8 +13,17 @@ if __name__ == "__main__":
 else:
     from .normalization import Normalizer
 
+
 class ThrusterDataset(Dataset):
-    def __init__(self, dir, subset_size: int | None = None, start_index: int = 0, scalars_in_tensor=False, files=None, downsample_res=None):
+    def __init__(
+        self,
+        dir,
+        subset_size: int | None = None,
+        start_index: int = 0,
+        scalars_in_tensor=False,
+        files=None,
+        downsample_res=None,
+    ):
         super().__init__()
         self.dir = Path(dir)
         self.data_dir = self.dir / "data"
@@ -51,10 +60,10 @@ class ThrusterDataset(Dataset):
 
     def fields(self):
         return self.norm.fields()
-    
+
     def params(self):
         return self.norm.params()
-    
+
     def get_field(self, tens, name, action=None):
         row = tens[:, self.fields()[name], :]
         if action == "normalize":
@@ -65,10 +74,10 @@ class ThrusterDataset(Dataset):
             return row
         else:
             raise NameError(f"Action '{name}' not allowed. Action must be 'normalize', 'denormalize' or `None`.")
-        
+
     def get_denorm(self, tens, name):
         return self.get_field(tens, name, action="denormalize")
-        
+
     def get_param(self, p, name, action=None):
         param = p[self.params()[name]]
         if action == "normalize":
@@ -102,13 +111,15 @@ class ThrusterDataset(Dataset):
             params = torch.tensor([])
 
         if self.downsample_res is not None:
-            tensor = tensor.unsqueeze(0) # add batch dimension for interpolation
-            tensor = torch.nn.functional.interpolate(tensor, size=self.downsample_res, mode="linear", align_corners=True)
-            tensor = tensor.squeeze(0) # remove batch dimension
+            tensor = tensor.unsqueeze(0)  # add batch dimension for interpolation
+            tensor = torch.nn.functional.interpolate(
+                tensor, size=self.downsample_res, mode="linear", align_corners=True
+            )
+            tensor = tensor.squeeze(0)  # remove batch dimension
 
         return self.files[idx], params, tensor
 
-    def generate_measurements(self, sim: torch.Tensor):
+    def generate_measurements(self, sim: torch.Tensor, sqrt_weight=True):
         """Mask whole and partial fields for conditioning, and add noise to unmasked pixels.
 
         Args:
@@ -156,10 +167,8 @@ class ThrusterDataset(Dataset):
         noise_s = torch.randn(B, num_spatial, res, device=dev) * stds_s
 
         active_s = (~sf_mask[:, :, None]) & pixel_kept  # unmasked field + kept pixel
-        masked_sim[:, :num_spatial] = torch.where(
-            active_s, sim[:, :num_spatial] + noise_s, masked_sim[:, :num_spatial]
-        )
-        precision[:, :num_spatial] = torch.where(active_s, (1.0 / stds_s)**2, torch.zeros_like(stds_s))
+        masked_sim[:, :num_spatial] = torch.where(active_s, sim[:, :num_spatial] + noise_s, masked_sim[:, :num_spatial])
+        precision[:, :num_spatial] = torch.where(active_s, (1.0 / stds_s) ** 2, torch.zeros_like(stds_s))
 
         # --- Parameter fields (constant across space; single noise draw per field) ---
         if num_params > 0:
@@ -176,19 +185,24 @@ class ThrusterDataset(Dataset):
                 masked_sim[:, num_spatial:],
             )
             precision[:, num_spatial:] = torch.where(
-                active_p[:, :, None], ((1.0 / stds_p)**2)[:, :, None], torch.zeros_like(precision[:, num_spatial:])
+                active_p[:, :, None], ((1.0 / stds_p) ** 2)[:, :, None], torch.zeros_like(precision[:, num_spatial:])
             )
 
         observed = precision > 0
-        frac_observed = observed.float().mean(dim=[1,2])  # (B,)
+        frac_observed = observed.float().mean(dim=[1, 2])  # (B,)
         log_precision = torch.log(precision + 1)
 
-        loss_weight_observed = torch.sqrt(1 + log_precision) / frac_observed[:, None, None]
+        if sqrt_weight:
+            loss_weight_observed = torch.sqrt(1 + log_precision) / frac_observed[:, None, None]
+        else:
+            loss_weight_observed = (1 + log_precision) / frac_observed[:, None, None]
+
         loss_weight_unobserved = 1 / (1 - frac_observed[:, None, None] + 1e-8)
         loss_weight = torch.where(observed, loss_weight_observed, loss_weight_unobserved)
 
         condition_tensor = torch.cat([log_precision, observed, masked_sim], dim=1)
         return condition_tensor, loss_weight
+
 
 class ThrusterPlotter1D:
     def __init__(
@@ -230,8 +244,8 @@ class ThrusterPlotter1D:
                 if denormalize:
                     wce = np.log(1.6e-19) + _B - np.log(9.1e-31)
                 else:
-                    wce = _B 
-                
+                    wce = _B
+
                 ys.append(_nu - wce)
 
             return ys
@@ -298,14 +312,15 @@ class ThrusterPlotter1D:
                 self._plot_field(ax, field, denormalize=denormalize, obs_locations=obs_locations)
             else:
                 self._plot_field(ax, field, denormalize=denormalize)
-                
+
             axes.append(ax)
 
         return fig, axes
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("data_dir", type=str, default="data/training")
     args = parser.parse_args()
@@ -315,14 +330,14 @@ if __name__ == "__main__":
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     files, labels, sims = next(iter(loader))
-    
+
     names = [k for k in dataset.fields().keys()] + [k for k in dataset.params().keys()]
     param_names = dataset.params().keys()
     print(param_names)
 
     condition_tensor, _ = dataset.generate_measurements(sims)
-    precision = condition_tensor[:, :dataset.num_fields, :]
-    measurements = condition_tensor[:, dataset.num_fields:, :]
+    precision = condition_tensor[:, : dataset.num_fields, :]
+    measurements = condition_tensor[:, dataset.num_fields :, :]
 
     sim = sims[0]
     precision = precision[0]
@@ -332,28 +347,28 @@ if __name__ == "__main__":
     sim_normalized = (sim - sim_min) / (sim_max - sim_min)
     sim_rgb = sim_normalized.unsqueeze(2).repeat(1, 1, 3)
     # Set masked pixels to magenta
-    sim_rgb[precision==0, :] = torch.tensor([1.0, 0.0, 1.0]) # Magenta color for masked pixels
+    sim_rgb[precision == 0, :] = torch.tensor([1.0, 0.0, 1.0])  # Magenta color for masked pixels
 
-    fig, axs = plt.subplots(1, 3, figsize=(16,6), layout='constrained')
-    axs[0].imshow(sim_rgb, aspect='auto')
-    axs[1].imshow(precision, aspect='auto', cmap='gray')
+    fig, axs = plt.subplots(1, 3, figsize=(16, 6), layout="constrained")
+    axs[0].imshow(sim_rgb, aspect="auto")
+    axs[1].imshow(precision, aspect="auto", cmap="gray")
 
     # Remove green channel for masked pixels
     masked_sim_rgb = measurements.unsqueeze(2).repeat(1, 1, 3)
-    masked_sim_rgb[precision==0, 1] = 0.0 # Set green channel to 0 for masked pixels
-    axs[2].imshow(masked_sim_rgb, aspect='auto', cmap='gray')
+    masked_sim_rgb[precision == 0, 1] = 0.0  # Set green channel to 0 for masked pixels
+    axs[2].imshow(masked_sim_rgb, aspect="auto", cmap="gray")
 
-    for (i, ax) in enumerate(axs):
-        ax.set(yticks = range(len(names)), yticklabels=names if i == 0 else [], xlabel = "Axial index")
+    for i, ax in enumerate(axs):
+        ax.set(yticks=range(len(names)), yticklabels=names if i == 0 else [], xlabel="Axial index")
         ax.set_box_aspect(1)
 
-    axs[0].set_title(f"Sim with masked pixels in magenta")
-    axs[1].set_title(f"Measurement precision")
-    axs[2].set_title(f"Resulting data tensor")
+    axs[0].set_title("Sim with masked pixels in magenta")
+    axs[1].set_title("Measurement precision")
+    axs[2].set_title("Resulting data tensor")
 
     # Need to add colorbar to right of second plot
-    cb = fig.colorbar(axs[1].images[0], ax=axs[1], location='right', shrink=0.5)
-    cb.set_label('log(1 / $\\sigma^2$)')
+    cb = fig.colorbar(axs[1].images[0], ax=axs[1], location="right", shrink=0.5)
+    cb.set_label("log(1 / $\\sigma^2$)")
 
     plt.show()
 
@@ -363,16 +378,16 @@ if __name__ == "__main__":
         if sum(kept_index) == 0:
             continue
 
-        fig, ax = plt.subplots(figsize=(8,4))
+        fig, ax = plt.subplots(figsize=(8, 4))
         x = dataset.grid
         ax.plot(x, sim[index].numpy(), label="Original sim")
 
         precision_kept = precision[index, kept_index]
         x_kept = x[kept_index]
         sim_kept = measurements[index, kept_index].numpy()
-        error_bars = 2*torch.sqrt(1 / torch.exp(precision_kept)).numpy()
+        error_bars = 2 * torch.sqrt(1 / torch.exp(precision_kept)).numpy()
         ax.scatter(x_kept, sim_kept, label="Simulated data with noise", color="orange", s=20, zorder=5)
-        ax.errorbar(x_kept, sim_kept, yerr=error_bars, fmt='none', ecolor='orange', alpha=0.5, zorder=4)
+        ax.errorbar(x_kept, sim_kept, yerr=error_bars, fmt="none", ecolor="orange", alpha=0.5, zorder=4)
         ax.set_title(name)
         ax.set_xlabel("Axial index")
         ax.legend()

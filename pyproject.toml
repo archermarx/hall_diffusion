@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "htucker",
+    "joblib>=1.5.3",
     "matplotlib>=3.10.3",
     "mcmciterators",
     "numpy>=2.3.0",
