@@ -336,7 +336,7 @@ def _encoder_blocks(resolution, in_channels, cblock, cemb, num_blocks, attn_reso
             # )
 
         if res % 2 != 0:
-            raise ValueError("Resolution {res} is not divisible by 2 at UNet level {level}!")
+            raise ValueError(f"Resolution {res} is not divisible by 2 at UNet level {level}!")
         res //= 2
 
     return enc, cout
