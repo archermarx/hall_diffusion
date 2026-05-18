@@ -118,6 +118,12 @@ class ThrusterDataset(Dataset):
                 tensor, size=self.downsample_res, mode="linear", align_corners=True
             )
             tensor = tensor.squeeze(0)  # remove batch dimension
+        else:
+            # Should be 128 (TODO: fix this hardcode)
+            if tensor.shape[1] == 130:
+                tensor = tensor[:, 1:-1]
+            
+            assert tensor.shape[1] == 128
 
         if self.fourier_features:
             max_features = 64
