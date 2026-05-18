@@ -15,6 +15,8 @@ class Normalizer:
         self.dir = Path(dir)
         self.norm_tensor, self.metadata_tensor = Normalizer.read_normalization_info(self.dir/"norm_data.csv")
         self.norm_params, self.metadata_params = Normalizer.read_normalization_info(self.dir/"norm_params.csv")
+        self.norm_fourier, self.metadata_fourier = Normalizer.read_normalization_info(self.dir/"norm_fourier.csv")
+        self.norm_perf, self.metadata_perf = Normalizer.read_normalization_info(self.dir/"norm_perf.csv")
 
     @staticmethod
     def read_normalization_info(path: Path|str) -> tuple[NormInfo, pd.DataFrame]:

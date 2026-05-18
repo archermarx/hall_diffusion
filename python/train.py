@@ -290,6 +290,7 @@ def train(args):
     data_cfg = models.dataset_config(config["model"])
     print(data_cfg)
 
+    # Decide whether to include scalar params in tensor
     if "scalars_in_tensor" in data_cfg:
         scalars_in_tensor = data_cfg["scalars_in_tensor"]
     else:
@@ -297,6 +298,12 @@ def train(args):
             scalars_in_tensor = True
         else:
             scalars_in_tensor = False
+
+    # Decide whether to include fourier features in tensor
+    # TODO: remove scalars_in_tensor and fourier_features from this, put in data instead
+    fourier_features = data_cfg.get("fourier_features", False)
+    data_cfg.pop("fourier_features")
+    
 
     if "downsample_res" in data_cfg:
         downsample_res = data_cfg["downsample_res"]
@@ -306,10 +313,10 @@ def train(args):
         downsample_res = None
 
     train_dataset = thruster_data.ThrusterDataset(
-        train_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res
+        train_data_dir, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features, downsample_res=downsample_res
     )
     test_dataset = thruster_data.ThrusterDataset(
-        test_data_dir, scalars_in_tensor=scalars_in_tensor, downsample_res=downsample_res
+        test_data_dir, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features, downsample_res=downsample_res
     )
 
     # Check that normalization is the same between training and test datasets

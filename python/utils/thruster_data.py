@@ -21,6 +21,7 @@ class ThrusterDataset(Dataset):
         subset_size: int | None = None,
         start_index: int = 0,
         scalars_in_tensor=False,
+        fourier_features=False,
         files=None,
         downsample_res=None,
     ):
@@ -47,6 +48,7 @@ class ThrusterDataset(Dataset):
         self.num_fields = len(self.norm.norm_tensor["names"])
         self.num_params = len(self.norm.norm_params["names"])
         self.scalars_in_tensor = scalars_in_tensor
+        self.fourier_features = fourier_features
         self.resolution = len(self.grid)
 
         if self.scalars_in_tensor:
@@ -116,6 +118,18 @@ class ThrusterDataset(Dataset):
                 tensor, size=self.downsample_res, mode="linear", align_corners=True
             )
             tensor = tensor.squeeze(0)  # remove batch dimension
+
+        if self.fourier_features:
+            max_features = 64
+            fourier_tensor = torch.tensor(data["fourier"], dtype=torch.float32)
+            perf_tensor = torch.tensor(data["perf"], dtype=torch.float32)
+
+            _, num_fourier_channels = fourier_tensor.shape
+            fourier_tensor = fourier_tensor[:max_features, :].reshape((max_features * num_fourier_channels,))
+
+            discharge_current, thrust = perf_tensor
+            # Append mean discharge current + fourier features (freq, real ampl, imag ampl) to param vec
+            params = torch.concat([params, torch.tensor([discharge_current]), fourier_tensor])
 
         return self.files[idx], params, tensor
 
