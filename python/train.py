@@ -441,7 +441,13 @@ def train(args):
 
     # ---------------------------------------------
     # ControlNet measurement generator (None for vanilla EDM2)
-    ctrl_fn = train_dataset.generate_measurements if isinstance(model, ControlNet) else None
+    sqrt_weight = train_args.get("sqrt_loss_weight", True)
+    print(f"{sqrt_weight=}")
+
+    def ctrl_fn_base(x):
+        return train_dataset.generate_measurements(x, sqrt_weight=sqrt_weight)
+
+    ctrl_fn = ctrl_fn_base if isinstance(model, ControlNet) else None
 
     # ---------------------------------------------
     # Noise args
