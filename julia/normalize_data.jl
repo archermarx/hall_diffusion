@@ -201,8 +201,11 @@ function load_single_sim(file; include_timevarying=false)
         catch e
             # Catch issues with logarithms
             println("-----------------")
+            println("file = ", file)
             println("field = ", row)
+            println("vec = ", vec)
             println("-----------------")
+            return nothing
             rethrow(e)
         end
         push!(tensor_rows, vec)
