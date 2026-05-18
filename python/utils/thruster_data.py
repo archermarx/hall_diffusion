@@ -276,10 +276,10 @@ class ThrusterPlotter1D:
 
         if field == "Id" or field == "T":
             x = np.linspace(0.5, 1, w)
-            ax.set_xlabel("Time [ms]")
+            ax.set_xlabel("Time (ms)")
         else:
             x = np.linspace(0, self.xmax, w)
-            ax.set_xlabel("Axial location [channel lengths]")
+            ax.set_xlabel("Axial location (m)")
 
         norm_tensor = self.norm.norm_tensor
         ind = norm_tensor["names"][field]

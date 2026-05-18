@@ -432,10 +432,10 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
             Threads.atomic_add!(num_discarded, 1)
             continue
         else
-            _, p = s.params
-            _, t = s.fields
-            _, f = s.fourier
-            _, pf = s.performance
+            _, p = _s.params
+            _, t = _s.fields
+            _, f = _s.fourier
+            _, pf = _s.performance
         end
 
         Threads.atomic_add!(num_accepted, 1)
