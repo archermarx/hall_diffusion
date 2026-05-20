@@ -13,3 +13,5 @@ samples/
 anom.pdf
 anom.png
 *.tar.gz
+checkpoints/
+*.pth.tar
