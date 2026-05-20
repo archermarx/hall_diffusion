@@ -18,12 +18,18 @@ class NoiseSampler(object):
         raise NotImplementedError() 
 
     @staticmethod
-    def from_config(*args, **kwargs):
+    def from_config(channels, resolution, device, **kwargs):
+        # `device` is named explicitly so both calling conventions work:
+        # - sample.py passes it positionally
+        # - train.py passes it as device=DEVICE keyword
+        # The previous `*args, **kwargs` signature silently dropped device when
+        # it was passed as a keyword, leaving the subclass __init__ short one
+        # required positional argument.
         match kwargs.get("type", "gaussian"):
             case "gaussian":
-                return RandomNoise(*args)
+                return RandomNoise(channels, resolution, device)
             case "rbf":
-                return RBFKernel(*args, scale=kwargs["scale"])
+                return RBFKernel(channels, resolution, device, scale=kwargs["scale"])
             case _:
                 raise NotImplementedError()
 

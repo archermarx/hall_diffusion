@@ -243,6 +243,12 @@ def train(args):
     batch_size = train_args["batch_size"]
     evaluation_iters = train_args["eval_freq"]
     use_amp = train_args.get("use_amp", True)
+    # AMP (mixed precision) and gradient scaling are CUDA-specific paths. On
+    # MPS/CPU, GradScaler() defaults to a CUDA-only implementation and
+    # autocast support is limited, so disable AMP off-CUDA regardless of config.
+    if use_amp and DEVICE.type != "cuda":
+        print(f"Note: AMP disabled on device '{DEVICE.type}' (CUDA-only path).")
+        use_amp = False
     ema_factor = train_args["ema"]
     load_workers = train_args.get("load_workers", 2)
 
@@ -262,22 +268,23 @@ def train(args):
     # Check that normalization is the same between training and test datasets
     assert train_dataset.norm == test_dataset.norm
 
+    # pin_memory is a CUDA-only optimization; pin_memory_device must only be
+    # set when pin_memory is True, otherwise newer PyTorch raises.
     pin = DEVICE.type == "cuda"
+    pin_kwargs = {"pin_memory": True, "pin_memory_device": DEVICE.type} if pin else {}
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        pin_memory=pin,
-        pin_memory_device=DEVICE.type,
         num_workers=load_workers,
+        **pin_kwargs,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        pin_memory=pin,
-        pin_memory_device=DEVICE.type,
         num_workers=load_workers,
+        **pin_kwargs,
     )
 
     # ---------------------------------------------
@@ -313,7 +320,11 @@ def train(args):
         weight_decay=train_args["weight_decay"],
         betas=betas,
     )
-    scaler = torch.amp.grad_scaler.GradScaler()
+    # GradScaler is only meaningful with CUDA AMP. On other devices we still
+    # construct a no-op scaler so the function signature for train_one_batch
+    # stays unchanged, but it will never be exercised (use_amp is forced to
+    # False above for non-CUDA devices).
+    scaler = torch.amp.grad_scaler.GradScaler() if DEVICE.type == "cuda" else None
 
     # ---------------------------------------------
     # Checkpoint configuration
@@ -323,7 +334,7 @@ def train(args):
 
     # Load checkpoint if found
     if load_checkpoint and os.path.exists(checkpoint_file):
-        state = torch.load(checkpoint_file, weights_only=False)
+        state = torch.load(checkpoint_file, weights_only=False, map_location=DEVICE)
         model.load_state_dict(state["model"])
         print("Model loaded from checkpoint")
         optimizer.load_state_dict(state["optimizer"])

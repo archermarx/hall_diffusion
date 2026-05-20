@@ -19,6 +19,7 @@ class LossFunction(ABC):
                 loss_fn = FlowMatchingLoss(**kwargs)
             case _:
                 raise NotImplementedError
+        return loss_fn
 
 # ----------------------------------------------------------------------------
 # Loss function for Flow matching

@@ -422,7 +422,7 @@ if __name__ == "__main__":
         sampling_config["batch_size"] = args.batch_size
 
     # Load model and config from checkpoint
-    model_dict = torch.load(args.model, weights_only=False)
+    model_dict = torch.load(args.model, weights_only=False, map_location=DEVICE)
     model_config = model_dict["model_config"]
     model = models.from_config(model_config, device=DEVICE)
 
