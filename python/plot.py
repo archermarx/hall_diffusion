@@ -594,6 +594,9 @@ def plot_anom(args):
     grid_norm = grid / L_ch
     xlim = (grid_norm[0], grid_norm[-1])
 
+    explained_variance = sum(eigenvalues[:MIN_RANK]) / sum(eigenvalues)
+    print(f"{explained_variance=}")
+
     ax_anom.set(xlim=xlim, yscale="log", xticks=range(math.ceil(grid_norm[-1])), xlabel="z (channel lengths)", ylabel = "Inverse Hall parameter")
 
     num_samples = 3

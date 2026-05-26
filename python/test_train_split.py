@@ -65,6 +65,8 @@ def make_split(train_dir, test_dir, num_to_split):
 
     shutil.copyfile(train_dir / "norm_data.csv", test_dir / "norm_data.csv")
     shutil.copyfile(train_dir / "norm_params.csv", test_dir / "norm_params.csv")
+    shutil.copyfile(train_dir / "norm_data.csv", test_dir / "norm_perf.csv")
+    shutil.copyfile(train_dir / "norm_params.csv", test_dir / "norm_fourier.csv")
     shutil.copyfile(train_dir / "grid.csv", test_dir / "grid.csv")
 
     for file in test_files:
