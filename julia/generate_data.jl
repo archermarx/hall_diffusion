@@ -319,7 +319,7 @@ Generate a number of simulations according to the first command line argument, o
 """
 # Equiv. of `if __name__ == "__main__"`
 if abspath(PROGRAM_FILE) == @__FILE__ 
-	parser = opt.object((
+	parser = opt.record((
 		save_dir = opt.option("-o", "--out-dir", opt.str()),
 		config_file = opt.option("-c", "--config", opt.str()),
 		num_sims = opt.option("-n", "--num-sims", opt.integer()),
@@ -327,7 +327,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
 		verbose = opt.flag("-v", "--verbose")
 	))
 	
-	args = opt.argparse(parser, ARGS)
+	args = opt.optparse(parser, ARGS)
 	config = het.JSON.parse(read(args.config_file))
 	distributions = param_distributions(config["params"])
 
