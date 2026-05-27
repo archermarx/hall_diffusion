@@ -159,37 +159,6 @@ def sample(model, shape, scalars_in_tensor, args):
         unconditional_dataset = None
         param_vec = None
 
-    # assert unconditional_dataset is not None
-
-    # # try conditioning on scalar params alone
-    # data = unconditional_dataset[0][2]
-    # #data = data.unsqueeze(0)
-
-    # # condition_tensor = unconditional_dataset.generate_measurements(data)
-    # # condition_tensor = condition_tensor.tile(num_samples, 1, 1).to(DEVICE)
-
-    # scalar_ind = 17
-
-    # inv_std = torch.zeros_like(data)
-    # std = 1e0
-    # inv_std[scalar_ind:] = 1 / std
-    # precision = torch.log(1 + inv_std**2)
-
-    # mask = data.clone()
-    # mask[:scalar_ind] = 0
-
-    # import matplotlib.pyplot as plt
-    # # fig, axs = plt.subplots(1, 2, layout='constrained', figsize=(7,3), squeeze=False)
-    # # axs = axs.ravel()
-    # # im_args = dict(interpolation="none", aspect="auto", cmap="gray")
-    # # axs[0].imshow(precision, **im_args)
-    # # axs[1].imshow(mask, **im_args)
-    # # plt.show()
-
-    # condition_tensor_base = torch.cat([precision, precision > 0, mask], dim=0)
-    # condition_tensor = condition_tensor_base.unsqueeze(0).to(DEVICE).tile((num_samples, 1, 1))
-    # print(f"{condition_tensor.shape=}")
-
     print(args)
     if "observation" in args:
         obs_args = utils.read_observation(args["observation"])
@@ -250,22 +219,6 @@ def sample(model, shape, scalars_in_tensor, args):
 
     final = output[-1, ...]
 
-    # fig, axs = plt.subplots(2, 3, layout="constrained", figsize=(10,6), squeeze=False)
-    # axs = axs.ravel()
-    # names = [k for k in unconditional_dataset.params().keys()]
-
-    # stds = []
-    # for (i, ind) in enumerate(range(scalar_ind, 23)):
-    #     samples = final[:, ind, 0]
-    #     stds.append(torch.std(samples).item())
-    #     axs[i].hist(samples)
-    #     axs[i].axvline(data[ind, 0], linestyle='--', color='red')
-    #     axs[i].set(xlim=(-1.5, 1.5), title = names[i])
-
-    # print(",".join([f"{std:.4e}" for std in stds]))
-
-    # plt.show()
-
     # Save generated samples
     out_dir = Path(args["out_dir"])
     data_dir = out_dir / "data"
@@ -276,7 +229,6 @@ def sample(model, shape, scalars_in_tensor, args):
     # Make folder and write metadata
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"{len(dataset.grid)=}")
     dataset.write_metadata(out_dir)
 
     # Write final sample data to independent output dirs
@@ -319,6 +271,7 @@ if __name__ == "__main__":
     if "label_dim" in model_config:
         model_config["condition_dim"] = model_config.pop("label_dim")
 
+    print(f"{model_config=}")
     model = models.from_config(model_config, device=DEVICE)
 
     # Determine which weights to load
@@ -352,8 +305,9 @@ if __name__ == "__main__":
 
     channels = base_model.img_channels
     resolution = base_model.img_resolution
-    # scalars_in_tensor = True #base_model.scalars_in_tensor
-    scalars_in_tensor = False
+
+    # TODO: expose this as an option
+    scalars_in_tensor = True 
 
     # Sample in batches
     for i, batch_num_samples in enumerate(batches):

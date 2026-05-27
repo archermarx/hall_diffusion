@@ -24,7 +24,7 @@ def dataset_config(config: dict) -> dict:
 
 
 def from_config(config: dict, device: torch.device):
-    arch = config["architecture"]
+    arch = config.get("architecture", "edm2")
     assert arch in {"edm2", "controlnet"}
 
     match arch:

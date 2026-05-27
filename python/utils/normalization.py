@@ -10,13 +10,31 @@ class NormInfo(TypedDict):
     std: np.ndarray
     log: np.ndarray
 
+def concat_norm_info(n1, n2):
+    count = len(n1['mean'])
+    for (n, i) in n2['names'].items():
+        n1['names'][n] = i + count
+    n1['mean'] = np.concat((n1['mean'], n2['mean']))
+    n1['std']= np.concat((n1['std'], n2['std']))
+    n1['log'] = np.concat((n1['log'], n2['log']))
+
+    return n1
+
+
 class Normalizer:
-    def __init__(self, dir):
+    def __init__(self, dir, scalars_in_tensor=False, fourier_features=False):
         self.dir = Path(dir)
+        self.fourier_features=fourier_features
+        self.scalars_in_tensor=scalars_in_tensor
         self.norm_tensor, self.metadata_tensor = Normalizer.read_normalization_info(self.dir/"norm_data.csv")
         self.norm_params, self.metadata_params = Normalizer.read_normalization_info(self.dir/"norm_params.csv")
-        self.norm_fourier, self.metadata_fourier = Normalizer.read_normalization_info(self.dir/"norm_fourier.csv")
-        self.norm_perf, self.metadata_perf = Normalizer.read_normalization_info(self.dir/"norm_perf.csv")
+        
+        if self.scalars_in_tensor:
+            self.norm_tensor = concat_norm_info(self.norm_tensor, self.norm_params)
+
+        if self.fourier_features:
+            self.norm_fourier, self.metadata_fourier = Normalizer.read_normalization_info(self.dir/"norm_fourier.csv")
+            self.norm_perf, self.metadata_perf = Normalizer.read_normalization_info(self.dir/"norm_perf.csv")
 
     @staticmethod
     def read_normalization_info(path: Path|str) -> tuple[NormInfo, pd.DataFrame]:
@@ -32,6 +50,9 @@ class Normalizer:
         path = Path(path)
         self.metadata_params.to_csv(path/ "norm_params.csv", index=False)
         self.metadata_tensor.to_csv(path / "norm_data.csv", index=False)
+        if self.fourier_features:
+            self.metadata_fourier.to_csv(path / "norm_fourier.csv", index=False)
+            self.metadata_perf.to_csv(path / "norm_perf.csv", index=False)
     
     def find_name(self, name: str):
         if name in self.fields():

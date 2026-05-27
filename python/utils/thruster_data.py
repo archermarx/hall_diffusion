@@ -44,7 +44,7 @@ class ThrusterDataset(Dataset):
             self.grid = np.linspace(self.grid[0], self.grid[-1], downsample_res)
 
         self.dx = self.grid[2] - self.grid[1]
-        self.norm = Normalizer(dir)
+        self.norm = Normalizer(dir, scalars_in_tensor, fourier_features)
         self.num_fields = len(self.norm.norm_tensor["names"])
         self.num_params = len(self.norm.norm_params["names"])
         self.scalars_in_tensor = scalars_in_tensor
@@ -75,7 +75,7 @@ class ThrusterDataset(Dataset):
         elif action is None:
             return row
         else:
-            raise NameError(f"Action '{name}' not allowed. Action must be 'normalize', 'denormalize' or `None`.")
+            raise NameError(f"Action '{action}' not allowed. Action must be 'normalize', 'denormalize' or `None`.")
 
     def get_denorm(self, tens, name):
         return self.get_field(tens, name, action="denormalize")
