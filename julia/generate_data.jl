@@ -188,8 +188,11 @@ function run_sim(
         anom_model = het.MultiLogBohm(z_dimensional, f_anom),
         discharge_voltage = params[:discharge_voltage_v],
         wall_loss_model = het.WallSheath(wall_material, params[:wall_loss_scale]),
+        cathode_coupling_voltage = params[:cathode_coupling_voltage_v],
+        magnetic_field_scale = params[:magnetic_field_scale],
         ion_wall_losses = true,
-		filter_circuit = filter_circuit
+		filter_circuit = filter_circuit,
+        conductivity_model = het.Braginskii(),
     )
 
     sim = het.SimParams(
