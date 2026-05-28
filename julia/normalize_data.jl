@@ -15,7 +15,7 @@ using FFTW: fft, fftfreq
 Specified the variables which should be saved in log form.
 Note that we take the natural logarithm (base-e), not the base ten logarithm.
 """
-const LOG_VARS = Set([:B, :nu_e, :nu_an, :nn, :ne, :ni_1, :ni_2, :ni_3, :pe, :Id, :T, :background_pressure_torr, :discharge_current_A, :thrust_mN, :frequency])
+const LOG_VARS = Set([:B, :nu_e, :nu_an, :nn, :ne, :ni_1, :ni_2, :ni_3, :pe, :Id, :T, :background_pressure_torr])
 
 function calc_fourier_features(sample, k = nothing)
     time = Float64.(sample[:time][:time_s])
@@ -143,8 +143,17 @@ function load_single_sim(sim_dict; include_timevarying=false)
         return nothing
     end
 
-    #. 5. The total collision frequency must be greater than or equal to the anomalous collision frequency
+    # 5. The total collision frequency must be greater than or equal to the anomalous collision frequency
     avg["nu_an"] = max.(avg["nu_an"], avg["nu_e"])
+
+    # 6. Throw out sims with strong shocks
+    ui_1 = avg["ions"][prop][1]["u"]
+    max_ui_ind = argmax(ui_1)
+    has_shock = max_ui_ind < 0.75 * length(ui_1) && ui_1[max_ui_ind] > 1.5 * ui_1[end]
+    if has_shock
+        println("Has shock")
+        return nothing
+    end
 
     # TODO: get these automatically
     field_names = [
@@ -196,21 +205,6 @@ function load_single_sim(sim_dict; include_timevarying=false)
             avg[row_str]
         end
 
-        # Take log of `log_vars`
-        try
-            if row in LOG_VARS
-                @. vec = log(vec)
-            end
-        catch e
-            # Catch issues with logarithms
-            println("-----------------")
-            println("file = ", file)
-            println("field = ", row)
-            println("vec = ", vec)
-            println("-----------------")
-            return nothing
-            rethrow(e)
-        end
         push!(tensor_rows, vec)
     end
 
@@ -219,25 +213,15 @@ function load_single_sim(sim_dict; include_timevarying=false)
 
     # TODO: get these automatically
     param_names = [
-        #:background_pressure_torr,
         :anode_mass_flow_rate_kg_s,
         :discharge_voltage_v,
         :magnetic_field_scale,
         :cathode_coupling_voltage_v,
         :neutral_velocity_m_s,
-        #:neutral_ingestion_scale,
         :wall_loss_scale,
-        #:anom_shift_scale,
     ]
 
     param_vec = [sim_dict[:params][param] for param in param_names]
-
-    # Lay out parameters into a vector for later conditioning
-    for (i, param) in enumerate(param_names)
-        if param in LOG_VARS
-            param_vec[i] = log(param_vec[i])
-        end
-    end
 
     fourier_data = sim_dict[:fourier]
     fourier_names = collect(keys(fourier_data))
@@ -256,14 +240,35 @@ function load_single_sim(sim_dict; include_timevarying=false)
     )
 end
 
+function take_log(sim)
+    if isnothing(sim)
+        return nothing
+    end
+    field_names, field_tensor = sim.fields
+    for (i, name) in enumerate(field_names)
+        if name in LOG_VARS
+            field_tensor[:, i] = log.(field_tensor[:, i])
+        end
+    end
+
+    param_names, param_vec = sim.params
+    for (i, name) in enumerate(param_names)
+        if name in LOG_VARS
+            param_vec[i] = log(param_vec[i])
+        end
+    end
+
+    return sim
+end
+
 """
 load_data(files)
 
-Given a list of files, runs `load_single_sim` on each.
+Given a list of files, runs `load_single_sim` and `take_log` on each.
 Prints a report of how many simulations were deemed outliers and filtered out.
 """
 function load_data(files)
-    sims = @showprogress map(load_single_sim, files)
+    sims = @showprogress map(take_log ∘ load_single_sim, files)
     filtered = filter(!isnothing, sims)
     println("Removed $(length(sims) - length(filtered))/$(length(files)) sims")
     return filtered
@@ -388,7 +393,7 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
     s = nothing
     i = 1
     while isnothing(s)
-        s = load_single_sim(files[i])
+        s = take_log(load_single_sim(files[i]))
         i += 1
     end
 
@@ -428,7 +433,7 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
 
     # Process data in a multithreaded manner
     Threads.@threads for file in files
-        _s = load_single_sim(file)
+        _s = take_log(load_single_sim(file))
 
         # Keep track fo number of simulations discarded
         if isnothing(_s)
