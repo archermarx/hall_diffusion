@@ -12,7 +12,7 @@ MCMC_DIR := "mcmc_reference/mcmc_3charge/normalized"
 
 # Sample from a provided sampling config
 sample target:
-    uv run python/sample.py {{MODEL}} configs/sample_{{target}}.toml -o samples/{{target}}
+    uv run hall_diffusion/sample.py {{MODEL}} configs/sample_{{target}}.toml -o samples/{{target}}
 
 # Run experimental data processing using perez-luna or roberts methods
 calc target:
@@ -20,7 +20,7 @@ calc target:
 
 # Plots predictions for ui_1, ne, Tev, and nu_an horizonatally for the target case
 plot_forward target +fields=DEFAULT_FIELDS:
-    uv run python/plot.py \
+    uv run hall_diffusion/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"forward.png" \
         -f {{fields}} \
@@ -32,7 +32,7 @@ plot_forward target +fields=DEFAULT_FIELDS:
 # Plots predictions for ui_1, ne, Tev, nu_an in two rows
 # with the top being an MCMC reference case and the bottom being the diffusion model's predictions
 plot_mcmc target +fields=DEFAULT_FIELDS:
-    uv run python/plot.py \
+    uv run hall_diffusion/plot.py \
         --samples=samples/{{target}} \
         --mcmc={{MCMC_DIR}} \
         --ref={{REF_SIM}} \
@@ -46,7 +46,7 @@ plot_mcmc target +fields=DEFAULT_FIELDS:
 
 # Plot comparisons to Perez-Luna
 plot_perez_luna target="perez_luna" +fields="ui_1 E nu_iz inv_hall":
-        uv run python/plot.py \
+        uv run hall_diffusion/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"{{target}}.png" \
         -f {{fields}} \
@@ -60,7 +60,7 @@ plot_perez_luna target="perez_luna" +fields="ui_1 E nu_iz inv_hall":
 
 # Plot comparisons to Roberts and Jorns' method
 plot_roberts target="roberts":
-    uv run python/plot.py \
+    uv run hall_diffusion/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"{{target}}.png" \
         -f ui_1,ui_2,ui_3 ne Tev E ue ni_1,ni_2,ni_3 nn inv_hall \
@@ -73,10 +73,10 @@ plot_roberts target="roberts":
 
 # Plot anom collision freq
 plot_anom:
-    uv run python/plot.py --type="anom" -o "anom.png"
+    uv run hall_diffusion/plot.py --type="anom" -o "anom.png"
 
 plot_unconditional target:
-    uv run python/plot.py \
+    uv run hall_diffusion/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"{{target}}.png" \
         -f ui_1 ne nn E Tev inv_hall \
@@ -85,7 +85,7 @@ plot_unconditional target:
         --mode="curves"
 
 plot_tensors target:
-    uv run python/plot.py \
+    uv run hall_diffusion/plot.py \
         --samples=samples/{{target}} \
         -o samples/{{target}}/"{{target}}_2D.png" \
         --type="tensors"
