@@ -64,6 +64,10 @@ function calc_fourier_features(sample, k = nothing)
     return sample
 end
 
+function load_single_sim(file::String; kwargs...)
+    return load_single_sim(deserialize(file); kwargs...)
+end
+
 """
 load_single_sim(file)
 
@@ -81,16 +85,15 @@ Otherwise, returns the following:
 - tensor_row_names: list of axially/temporally-resolved sim. output names
 - tensor: tensor containing data for above variables, laid out one quantity per row.
 """
-function load_single_sim(file; include_timevarying=false)
-    raw = deserialize(file)
-    raw = calc_fourier_features(raw)
+function load_single_sim(sim_dict; include_timevarying=false)
+    sim_dict = calc_fourier_features(sim_dict)
 
-    grid = raw[:sim]["grid"]
+    grid = sim_dict[:sim]["grid"]
     resolution = length(grid)
 
-    time = raw[:time][:time_s]
-    I_raw = raw[:time][:discharge_current_A]
-    T_raw = raw[:time][:thrust_mN]
+    time = sim_dict[:time][:time_s]
+    I_raw = sim_dict[:time][:discharge_current_A]
+    T_raw = sim_dict[:time][:thrust_mN]
 
     time_itp = LinRange(5.0e-4, maximum(time), resolution)
     I_itp = het.LinearInterpolation(time, I_raw).(time_itp)
@@ -106,8 +109,8 @@ function load_single_sim(file; include_timevarying=false)
     I_itp = max.(I_itp, I_MIN)
     T_itp = max.(T_itp, T_MIN)
 
-    I_mean = raw[:performance][:discharge_current_A]
-    T_mean = raw[:performance][:thrust_N]
+    I_mean = sim_dict[:performance][:discharge_current_A]
+    T_mean = sim_dict[:performance][:thrust_N]
 
     # 2. Throw out sims with too-high or too-low thrusts and currents
     if !(I_MIN <= I_mean <= I_MAX) 
@@ -116,14 +119,14 @@ function load_single_sim(file; include_timevarying=false)
         return nothing
     end
 
-    avg = raw[:sim]["frames"][1]
+    avg = sim_dict[:sim]["frames"][1]
     prop = collect(keys(avg["neutrals"]))[1]
     neutrals = avg["neutrals"][prop]
     ions = avg["ions"][prop]
 
     # 3. Throw out sims with min(phi) < 0.5 * V_d or max(abs(phi)) > 1.5 * V_d
     phi = avg["potential"]
-    V_d = raw[:params][:discharge_voltage_v]
+    V_d = sim_dict[:params][:discharge_voltage_v]
     if abs(minimum(phi)) > 0.5 * V_d || maximum(abs.(phi)) > 1.5 * V_d
         return nothing
     end
@@ -227,7 +230,7 @@ function load_single_sim(file; include_timevarying=false)
         #:anom_shift_scale,
     ]
 
-    param_vec = [raw[:params][param] for param in param_names]
+    param_vec = [sim_dict[:params][param] for param in param_names]
 
     # Lay out parameters into a vector for later conditioning
     for (i, param) in enumerate(param_names)
@@ -236,11 +239,11 @@ function load_single_sim(file; include_timevarying=false)
         end
     end
 
-    fourier_data = raw[:fourier]
+    fourier_data = sim_dict[:fourier]
     fourier_names = collect(keys(fourier_data))
     fourier_tensor = hcat([fourier_data[n] for n in fourier_names]...)
 
-    performance_data = raw[:performance]
+    performance_data = sim_dict[:performance]
     performance_names = collect(keys(performance_data))
     performance_vec = [performance_data[n] for n in performance_names]
 
