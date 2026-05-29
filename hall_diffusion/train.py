@@ -508,7 +508,7 @@ def train(args):
                     break
 
             # Condition vector dropout
-            if np.rand() < condition_dropout:
+            if np.random.rand() < condition_dropout:
                 vec = None
 
             state.batch_idx += 1
