@@ -490,9 +490,11 @@ def train(args):
     # Main training loop
     epoch_range = range(start_epoch, max_epochs + 1) if max_epochs > 0 else itertools.count(start_epoch)
     for epoch_idx in epoch_range:
-        epoch_start_time = datetime.now()
-        progress = tqdm(train_loader)
-        data_iter = iter(progress)
+
+        with timer.section("epoch_setup"):
+            epoch_start_time = datetime.now()
+            progress = tqdm(train_loader)
+            data_iter = iter(progress)
 
         batch_losses = []
         val_losses = []
