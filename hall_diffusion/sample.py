@@ -6,19 +6,17 @@ import os
 import shutil
 import uuid
 import math
-from typing import Literal
 
 # Third-party deps
 import torch
-from tqdm import tqdm
 import numpy as np
 
 # Local deps
-import models
-from models.controlnet import ControlNet
-from utils import utils
-from utils.thruster_data import ThrusterDataset
-from samplers.edmsampler import EDMSampler, RK2Integrator, ObservationGuidance
+from hall_diffusion import models
+from hall_diffusion.models.controlnet import ControlNet
+from hall_diffusion.utils import utils
+from hall_diffusion.utils.thruster_data import ThrusterDataset
+from hall_diffusion.samplers.edmsampler import EDMSampler, RK2Integrator, ObservationGuidance
 
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str, nargs="?")
@@ -29,16 +27,14 @@ parser.add_argument("-b", "--batch-size", type=int)
 parser.add_argument("-s", "--num-steps", type=int)
 parser.add_argument("--test-dir", type=Path)
 
-DEVICE = torch.device("cpu")
-
-def build_observation(dataset, observations, param_vec=None, default_stddev=1.0):
+def build_observation(dataset, observations, param_vec=None, default_stddev=1.0, device="cpu"):
     _, data_params, data_tensor = dataset[0]
 
     (num_channels, resolution) = data_tensor.shape
 
-    obs_matrix_loc = torch.zeros(num_channels, resolution, device=DEVICE)
-    obs_matrix_dat = torch.zeros(num_channels, resolution, device=DEVICE)
-    obs_matrix_var = torch.zeros(num_channels, resolution, device=DEVICE)
+    obs_matrix_loc = torch.zeros(num_channels, resolution, device=device)
+    obs_matrix_dat = torch.zeros(num_channels, resolution, device=device)
+    obs_matrix_var = torch.zeros(num_channels, resolution, device=device)
 
     default_stddev = observations.get("stddev", observations.get("std_dev", 1.0))
 
@@ -85,7 +81,7 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0)
                 obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
             else:
                 print(obs_field + ":\tusing data from file.")
-                obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32, device=DEVICE)
+                obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32, device=device)
 
     # Dimensions
     # m = num_channels * resolution
@@ -93,7 +89,7 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0)
     # A (linear observation operator) = (n, m)
     # y (observed data) = (n,)
     obs_matrix_loc = obs_matrix_loc.reshape(-1)
-    obs_A = torch.zeros(n, m, device=DEVICE)
+    obs_A = torch.zeros(n, m, device=device)
 
     j = 0
     for i in range(m):
@@ -106,7 +102,7 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0)
 
     # If no param vec specified here, we use the one from the reference dataset
     if param_vec is None:
-        param_vec = data_params.detach().clone().to(DEVICE)
+        param_vec = data_params.detach().clone().to(device)
 
     # Read scalar parameters if present
     if (params := observations.get("params", None)) is not None:
@@ -144,7 +140,7 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
 
     return score
 
-def sample(model, shape, scalars_in_tensor, args):
+def sample(model, shape, scalars_in_tensor, args, device="cpu"):
     num_samples, _, resolution = shape
 
     # Determine if we're doing condional or unconditional sampling
@@ -154,7 +150,7 @@ def sample(model, shape, scalars_in_tensor, args):
     # These are drawn from the same distributions as the training set
     if (uncond_dir := args.get("unconditional_data_dir", None)) is not None:
         unconditional_dataset = ThrusterDataset(uncond_dir, downsample_res=resolution, scalars_in_tensor=scalars_in_tensor)
-        param_vec = unconditional_dataset.sample_params(num_samples=num_samples, device=DEVICE)
+        param_vec = unconditional_dataset.sample_params(num_samples=num_samples, device=device)
     else:
         unconditional_dataset = None
         param_vec = None
@@ -176,7 +172,7 @@ def sample(model, shape, scalars_in_tensor, args):
             # Use the parameter vector from the ref simulation
             param_vec = None
 
-        obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, param_vec)
+        obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, param_vec, device=device)
         obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
     else:
         if param_vec is None or unconditional_dataset is None:
@@ -213,7 +209,7 @@ def sample(model, shape, scalars_in_tensor, args):
     output = sampler.sample(
         integrator,
         showprogress=True,
-        device=DEVICE,
+        device=device,
         model_args=dict(condition_vector=param_vec)
     )
 
@@ -242,8 +238,8 @@ def sample(model, shape, scalars_in_tensor, args):
     # Write samples at all iterations to a single tensor
     np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
 
-def infer(config_file, out_dir=None, num_steps=None, num_samples=None, batch_size=None, verbose=False):
-    DEVICE = utils.get_device()
+def infer(model, config_file, out_dir=None, num_steps=None, num_samples=None, batch_size=None, verbose=False):
+    device = utils.get_device()
 
     # Load sampling configuration
     with open(config_file, "rb") as fp:
@@ -263,7 +259,7 @@ def infer(config_file, out_dir=None, num_steps=None, num_samples=None, batch_siz
         sampling_config["batch_size"] = batch_size
 
     # Load model and config from checkpoint
-    model_dict = torch.load(args.model, weights_only=False)
+    model_dict = torch.load(model, weights_only=False)
     model_config = model_dict["model_config"]
     if "label_dim" in model_config:
         model_config["condition_dim"] = model_config.pop("label_dim")
@@ -271,7 +267,7 @@ def infer(config_file, out_dir=None, num_steps=None, num_samples=None, batch_siz
     if verbose:
         print(f"{model_config=}")
 
-    model = models.from_config(model_config, device=DEVICE)
+    model = models.from_config(model_config, device=device)
 
     # Determine which weights to load
     model_type = sampling_config.get("model_type", "ema")
@@ -305,13 +301,13 @@ def infer(config_file, out_dir=None, num_steps=None, num_samples=None, batch_siz
     # Sample in batches
     for i, batch_num_samples in enumerate(batches):
         size = (batch_num_samples, channels, resolution)
-        sample(model, size, scalars_in_tensor, sampling_config)
+        sample(model, size, scalars_in_tensor, sampling_config, device=device)
 
         # Make sure we don't remove old samples
         sampling_config["replace_samples"] = False
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    infer(args.config, args.out_dir, args.num_steps, args.num_samples, args.batch_size)
+    infer(args.model, args.config, args.out_dir, args.num_steps, args.num_samples, args.batch_size)
 
 

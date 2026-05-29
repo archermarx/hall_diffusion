@@ -13,6 +13,29 @@ if __name__ == "__main__":
 else:
     from .normalization import Normalizer
 
+def invert_fft_vector(t, fourier_vec):
+    fourier_vec = fourier_vec.numpy()
+    mean_current = fourier_vec[0]
+    fourier_tensor = fourier_vec[1:].reshape((-1, 3))
+    num_freqs = fourier_tensor.shape[0]
+
+    freqs = fourier_tensor[:, 0]
+    reals = fourier_tensor[:, 1]
+    imags = fourier_tensor[:, 2]
+
+    # Convert complex fourier coeffs to amplitudes and phases
+    # These coeffs have been normalized by the mean current, so we undo that
+    ampls = np.sqrt(reals**2 + imags**2) * mean_current
+    phases = np.atan2(imags, reals) 
+
+    signal_mat = np.zeros((num_freqs, len(t)))
+    for (i, (freq, ampl, phase)) in enumerate(zip(freqs, ampls, phases)):
+        signal_mat[i, :] = ampl * np.cos(2 * np.pi * freq * t + phase)
+
+    signal = mean_current + np.sum(signal_mat, axis=0)
+    print(f"{signal.shape=}")
+    assert signal.shape == (len(t),)
+    return signal
 
 class ThrusterDataset(Dataset):
     def __init__(
@@ -24,6 +47,7 @@ class ThrusterDataset(Dataset):
         fourier_features=False,
         files=None,
         downsample_res=None,
+        max_freqs=None,
     ):
         super().__init__()
         self.dir = Path(dir)
@@ -49,6 +73,7 @@ class ThrusterDataset(Dataset):
         self.num_params = len(self.norm.norm_params["names"])
         self.scalars_in_tensor = scalars_in_tensor
         self.fourier_features = fourier_features
+        self.max_freqs = max_freqs
         self.resolution = len(self.grid)
 
     def write_metadata(self, path: Path | str):
@@ -98,7 +123,6 @@ class ThrusterDataset(Dataset):
 
     def __getitem__(self, idx):
         data = np.load(self.data_dir / self.files[idx])
-
         tensor = torch.tensor(data["data"], dtype=torch.float32)
         params = torch.tensor(data["params"], dtype=torch.float32)
 
@@ -123,14 +147,14 @@ class ThrusterDataset(Dataset):
             assert tensor.shape[1] == 128
 
         if self.fourier_features:
-            max_features = 64
             fourier_tensor = torch.tensor(data["fourier"], dtype=torch.float32)
             perf_tensor = torch.tensor(data["perf"], dtype=torch.float32)
 
-            _, num_fourier_channels = fourier_tensor.shape
-            fourier_tensor = fourier_tensor[:max_features, :].reshape((max_features * num_fourier_channels,))
+            max_freqs, num_fourier_channels = fourier_tensor.shape
+            max_freqs = self.max_freqs if self.max_freqs else max_freqs
+            fourier_tensor = fourier_tensor[:max_freqs, :].reshape((max_freqs * num_fourier_channels,))
 
-            discharge_current, thrust = perf_tensor
+            discharge_current, _ = perf_tensor
             # Append mean discharge current + fourier features (freq, real ampl, imag ampl) to param vec
             params = torch.concat([params, torch.tensor([discharge_current]), fourier_tensor])
 
