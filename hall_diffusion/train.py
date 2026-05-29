@@ -448,7 +448,6 @@ def train(args):
     # ---------------------------------------------
     # ControlNet measurement generator (None for vanilla EDM2)
     sqrt_weight = train_args.get("sqrt_loss_weight", True)
-    print(f"{sqrt_weight=}")
 
     def ctrl_fn_base(x):
         return train_dataset.generate_measurements(x, sqrt_weight=sqrt_weight)
