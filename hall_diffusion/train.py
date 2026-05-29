@@ -592,7 +592,7 @@ def train(args):
         logger.info(f"Epoch {epoch_idx} finished in {time_delta}")
         logger.info(f"\tAvg train loss: {avg_batch_loss:.3e}")
 
-        if len(val_losses) > 0 and len(ema_losses > 0):
+        if len(val_losses) > 0 and len(ema_losses) > 0:
             avg_val_loss, avg_ema_loss = np.mean(val_losses), np.mean(ema_losses)
             logger.info(f"\tAvg val loss: {avg_val_loss:.3e}\n\tAvg ema loss: {avg_ema_loss:.3e}")
 
