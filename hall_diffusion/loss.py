@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from models.controlnet import ControlNet
 
 # ----------------------------------------------------------------------------

@@ -269,6 +269,7 @@ def train(args):
     train_args = config["training"]
     max_epochs = train_args["epochs"]
     batch_size = train_args["batch_size"]
+    condition_dropout = train_args.get("condition_dropout", 0.0)    # Condition dropout disabled by default
     evaluation_iters = train_args["eval_freq"]
     use_amp = train_args.get("use_amp", True)
     load_workers = train_args.get("load_workers", 2)
@@ -506,10 +507,15 @@ def train(args):
                 except StopIteration:
                     break
 
+            # Condition vector dropout
+            if np.rand() < condition_dropout:
+                vec = None
+
             state.batch_idx += 1
             state.example_idx += batch_size
 
             progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
+
 
             _, batch_loss, grad_norm = train_one_batch(
                 y, state, loss_fn, logger=logger, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn, timer=timer

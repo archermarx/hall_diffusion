@@ -63,11 +63,15 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
             indices[i] = j
             x_new[i] = grid[j]
     
-    assert (y is None) or (len(x) == len(y))
+    assert (y is None) or (len(x) == len(y)) or len(y) == 1
 
     if y is not None:
-        y = np.array(y)
-        normalized = obs[field]["normalized"]
+        if len(y) == 1:
+            y = np.full(len(x_new), y[0])
+        else:
+            y = np.array(y)
+
+        normalized = obs[field].get("normalized", False)
 
         if form == "normalized" and not normalized:
             if normalizer is None:
