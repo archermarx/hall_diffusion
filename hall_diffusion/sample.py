@@ -242,28 +242,25 @@ def sample(model, shape, scalars_in_tensor, args):
     # Write samples at all iterations to a single tensor
     np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
 
-
-if __name__ == "__main__":
-    args = parser.parse_args()
-
+def infer(config_file, out_dir=None, num_steps=None, num_samples=None, batch_size=None, verbose=False):
     DEVICE = utils.get_device()
 
     # Load sampling configuration
-    with open(args.config, "rb") as fp:
+    with open(config_file, "rb") as fp:
         sampling_config = tomllib.load(fp)
 
     # Read command line args and replace TOML args if needed
-    if args.out_dir is not None:
-        sampling_config["out_dir"] = args.out_dir
+    if out_dir is not None:
+        sampling_config["out_dir"] = out_dir
 
-    if args.num_steps is not None:
-        sampling_config["num_steps"] = args.num_steps
+    if num_steps is not None:
+        sampling_config["num_steps"] = num_steps
 
-    if args.num_samples is not None:
-        sampling_config["num_samples"] = args.num_samples
+    if num_samples is not None:
+        sampling_config["num_samples"] = num_samples
 
-    if args.batch_size is not None:
-        sampling_config["batch_size"] = args.batch_size
+    if batch_size is not None:
+        sampling_config["batch_size"] = batch_size
 
     # Load model and config from checkpoint
     model_dict = torch.load(args.model, weights_only=False)
@@ -271,7 +268,9 @@ if __name__ == "__main__":
     if "label_dim" in model_config:
         model_config["condition_dim"] = model_config.pop("label_dim")
 
-    print(f"{model_config=}")
+    if verbose:
+        print(f"{model_config=}")
+
     model = models.from_config(model_config, device=DEVICE)
 
     # Determine which weights to load
@@ -297,12 +296,6 @@ if __name__ == "__main__":
     if remainder > 0:
         batches.append(remainder)
 
-    # Create noise sampler and initial noise samples
-    if "train_config" in model_dict and "noise_sampler" in model_dict["train_config"]:
-        noise_sampler_args = model_dict["train_config"]["noise_sampler"]
-    else:
-        noise_sampler_args = dict(type="gaussian", scale=1.0)
-
     channels = base_model.img_channels
     resolution = base_model.img_resolution
 
@@ -316,3 +309,9 @@ if __name__ == "__main__":
 
         # Make sure we don't remove old samples
         sampling_config["replace_samples"] = False
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+    infer(args.config, args.out_dir, args.num_steps, args.num_samples, args.batch_size)
+
+

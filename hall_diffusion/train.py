@@ -589,11 +589,14 @@ def train(args):
 
         epoch_stop_time = datetime.now()
         time_delta = format_timedelta((epoch_stop_time - epoch_start_time).total_seconds())
-        avg_batch_loss, avg_val_loss, avg_ema_loss = np.mean(batch_losses), np.mean(val_losses), np.mean(ema_losses)
-        logger.info(
-            f"Epoch {epoch_idx} finished in {time_delta}.\n\tAvg train loss: {avg_batch_loss:.3e}\n\tAvg val loss: {avg_val_loss:.3e}\n\tAvg ema loss: {avg_ema_loss:.3e}"
-        )
 
+        avg_batch_loss = np.mean(batch_losses)
+        logger.info(f"Epoch {epoch_idx} finished in {time_delta}")
+        logger.info(f"\tAvg train loss: {avg_batch_loss:.3e}")
+
+        if len(val_losses) > 0 and len(ema_losses > 0):
+            avg_val_loss, avg_ema_loss = np.mean(val_losses), np.mean(ema_losses)
+            logger.info(f"\tAvg val loss: {avg_val_loss:.3e}\n\tAvg ema loss: {avg_ema_loss:.3e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
