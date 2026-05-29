@@ -51,9 +51,6 @@ class ThrusterDataset(Dataset):
         self.fourier_features = fourier_features
         self.resolution = len(self.grid)
 
-        if self.scalars_in_tensor:
-            self.num_fields += self.num_params
-
     def write_metadata(self, path: Path | str):
         path = Path(path)
         self.norm.write_normalization_info(path)

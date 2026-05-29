@@ -303,7 +303,6 @@ def train(args):
     # TODO: remove scalars_in_tensor and fourier_features from this, put in data instead
     fourier_features = data_cfg.get("fourier_features", False)
     data_cfg.pop("fourier_features")
-    
 
     if "downsample_res" in data_cfg:
         downsample_res = data_cfg["downsample_res"]

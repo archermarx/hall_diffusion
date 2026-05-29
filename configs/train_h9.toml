@@ -2,13 +2,13 @@
 # Architecture
 architecture = "edm2"
 # Number of up/down blocks at each level of the unet
-num_blocks = 2
+num_blocks = 3
 # Channels at top level
 base_channels = 64
 # Size of convolution kernel
 kernel_width = 3
 # Increase in channel count at each level
-channel_mult = [1, 2, 3, 4]
+channel_mult = [1, 2, 3, 4, 5]
 # Standard deviation of the data
 # The model works best if the data is normalized to a std of 0.5 and this argument is left untouched
 data_std = 0.5
@@ -25,7 +25,7 @@ fourier_features = true
 # Number of complete passes through the training data to complete
 epochs = 1024
 # Training mini-batch size
-batch_size = 2048
+batch_size = 1024
 # Frequency in batches with which the model is tested on the validation set
 eval_freq = 100
 # Exponential moving average timescale in epochs. If omitted, set to 5% of total epochs.
