@@ -47,7 +47,7 @@ class ThrusterDataset(Dataset):
         fourier_features=False,
         files=None,
         downsample_res=None,
-        max_freqs=None,
+        max_freqs=64,
     ):
         super().__init__()
         self.dir = Path(dir)
