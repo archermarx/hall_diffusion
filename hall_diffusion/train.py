@@ -269,7 +269,7 @@ def train(args):
     train_args = config["training"]
     max_epochs = train_args["epochs"]
     batch_size = train_args["batch_size"]
-    condition_dropout = train_args.get("condition_dropout", 0.0)    # Condition dropout disabled by default
+    condition_dropout = train_args.get("condition_dropout", 0.0)  # Condition dropout disabled by default
     evaluation_iters = train_args["eval_freq"]
     use_amp = train_args.get("use_amp", True)
     load_workers = train_args.get("load_workers", 2)
@@ -313,10 +313,16 @@ def train(args):
         downsample_res = None
 
     train_dataset = thruster_data.ThrusterDataset(
-        train_data_dir, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features, downsample_res=downsample_res
+        train_data_dir,
+        scalars_in_tensor=scalars_in_tensor,
+        fourier_features=fourier_features,
+        downsample_res=downsample_res,
     )
     test_dataset = thruster_data.ThrusterDataset(
-        test_data_dir, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features, downsample_res=downsample_res
+        test_data_dir,
+        scalars_in_tensor=scalars_in_tensor,
+        fourier_features=fourier_features,
+        downsample_res=downsample_res,
     )
 
     # Check that normalization is the same between training and test datasets
@@ -358,11 +364,12 @@ def train(args):
     # ---------------------------------------------
     # Set up the exponential moving average model
     ema_epochs = train_args.get("ema_epochs", None)
+    ema_start = train_args.get("ema_start_epochs", 128)
     ema_factor = EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, ema_epochs)
     logger.info(
         f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}."
     )
-    ema = EMA(ema_factor, step_start=2000)
+    ema = EMA(ema_factor, step_start=ema_start * batch_size)
     ema_model = copy.deepcopy(model).eval().requires_grad_(False)
 
     # ---------------------------------------------
@@ -491,7 +498,6 @@ def train(args):
     # Main training loop
     epoch_range = range(start_epoch, max_epochs + 1) if max_epochs > 0 else itertools.count(start_epoch)
     for epoch_idx in epoch_range:
-
         with timer.section("epoch_setup"):
             epoch_start_time = datetime.now()
             progress = tqdm(train_loader)
@@ -515,7 +521,6 @@ def train(args):
             state.example_idx += batch_size
 
             progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
-
 
             _, batch_loss, grad_norm = train_one_batch(
                 y, state, loss_fn, logger=logger, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn, timer=timer
@@ -605,6 +610,7 @@ def train(args):
                 avg_val_loss, avg_ema_loss = np.mean(val_losses), np.mean(ema_losses)
                 logger.info(f"\tAvg val loss: {avg_val_loss:.3e}")
                 logger.info(f"\tAvg ema loss: {avg_ema_loss:.3e}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
