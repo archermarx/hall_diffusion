@@ -88,8 +88,8 @@ Otherwise, returns the following:
 function load_single_sim(sim_dict; include_timevarying=false)
     sim_dict = calc_fourier_features(sim_dict)
 
-    grid = collect(sim_dict[:sim]["grid"])
-    resolution = length(grid)[2:end-1]
+	grid = collect(sim_dict[:sim]["grid"])[2:end-1]
+    resolution = length(grid)
 
     time = sim_dict[:time][:time_s]
     I_raw = sim_dict[:time][:discharge_current_A]
