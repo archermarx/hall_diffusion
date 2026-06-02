@@ -89,7 +89,7 @@ function load_single_sim(sim_dict; include_timevarying=false)
     sim_dict = calc_fourier_features(sim_dict)
 
     grid = sim_dict[:sim]["grid"]
-    resolution = length(grid)
+    resolution = length(grid)[2:end-1]
 
     time = sim_dict[:time][:time_s]
     I_raw = sim_dict[:time][:discharge_current_A]
@@ -438,6 +438,7 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         # Keep track fo number of simulations discarded
         if isnothing(_s)
             Threads.atomic_add!(num_discarded, 1)
+            next!(progress)
             continue
         else
             _, p = _s.params
