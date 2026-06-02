@@ -151,7 +151,6 @@ function load_single_sim(sim_dict; include_timevarying=false)
     max_ui_ind = argmax(ui_1)
     has_shock = max_ui_ind < 0.75 * length(ui_1) && ui_1[max_ui_ind] > 1.5 * ui_1[end]
     if has_shock
-        println("Has shock")
         return nothing
     end
 
