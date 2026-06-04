@@ -33,7 +33,6 @@ def invert_fft_vector(t, fourier_vec):
         signal_mat[i, :] = ampl * np.cos(2 * np.pi * freq * t + phase)
 
     signal = mean_current + np.sum(signal_mat, axis=0)
-    print(f"{signal.shape=}")
     assert signal.shape == (len(t),)
     return signal
 

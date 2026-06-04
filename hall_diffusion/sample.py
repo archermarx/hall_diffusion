@@ -147,7 +147,7 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
 
     return score
 
-def sample(model, shape, scalars_in_tensor, fourier_features, args, device="cpu"):
+def sample(model, shape, scalars_in_tensor, fourier_features, args, condition_vec=None, device="cpu"):
     num_samples, _, resolution = shape
 
     # Determine if we're doing condional or unconditional sampling
@@ -161,6 +161,9 @@ def sample(model, shape, scalars_in_tensor, fourier_features, args, device="cpu"
     else:
         unconditional_dataset = None
         param_vec = None
+    
+    if condition_vec is not None:
+        param_vec = condition_vec
 
     print(args)
     if "observation" in args:
@@ -247,7 +250,7 @@ def sample(model, shape, scalars_in_tensor, fourier_features, args, device="cpu"
 
     return output
 
-def infer(model, sampling_config, scalars_in_tensor, fourier_features, verbose=False):
+def infer(model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None, verbose=False):
     device = utils.get_device()
 
     # Load model and config from checkpoint
@@ -292,7 +295,13 @@ def infer(model, sampling_config, scalars_in_tensor, fourier_features, verbose=F
     # Sample in batches
     for i, batch_num_samples in enumerate(batches):
         size = (batch_num_samples, channels, resolution)
-        batch_samples = sample(model, size, scalars_in_tensor, fourier_features, sampling_config, device=device)
+        batch_samples = sample(
+            model, size,
+            scalars_in_tensor, fourier_features,
+            sampling_config,
+            condition_vec=condition_vec,
+            device=device
+        )
         samples.append(batch_samples)
 
         # Make sure we don't remove old samples

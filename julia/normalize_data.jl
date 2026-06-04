@@ -126,8 +126,9 @@ function load_single_sim(sim_dict; include_timevarying=false)
 
     # 3. Throw out sims with min(phi) < 0.5 * V_d or max(abs(phi)) > 1.5 * V_d
     phi = avg["potential"]
+    phi_min, phi_max = extrema(phi)
     V_d = sim_dict[:params][:discharge_voltage_v]
-    if abs(minimum(phi)) > 0.5 * V_d || maximum(abs.(phi)) > 1.5 * V_d
+    if phi_min > 0.5 * V_d || phi_min < -10 || phi_max > 1.5 * V_d
         return nothing
     end
 
