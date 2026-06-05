@@ -15,7 +15,7 @@ using FFTW: fft, fftfreq
 Specified the variables which should be saved in log form.
 Note that we take the natural logarithm (base-e), not the base ten logarithm.
 """
-const LOG_VARS = Set([:B, :nu_e, :nu_an, :nn, :ne, :ni_1, :ni_2, :ni_3, :pe, :Id, :T, :background_pressure_torr])
+const LOG_VARS = Set([:B, :nu_e, :nu_an, :nn, :ne, :ni_1, :ni_2, :ni_3, :pe, :background_pressure_torr, :frequency])
 
 function calc_fourier_features(sample, k = nothing)
     time = Float64.(sample[:time][:time_s])
@@ -231,11 +231,16 @@ function load_single_sim(sim_dict; include_timevarying=false)
     performance_names = collect(keys(performance_data))
     performance_vec = [performance_data[n] for n in performance_names]
 
+    time_data = sim_dict[:time]
+    time_names = collect(keys(time_data))
+    time_tens = hcat([time_data[n] for n in time_names]...)
+
     return (;
         params = (param_names, param_vec),
         fields = (field_names, field_tensor),
         fourier = (fourier_names, fourier_tensor),
         performance = (performance_names, performance_vec),
+        time = (time_names, time_tens),
         grid = grid
     )
 end
@@ -244,6 +249,7 @@ function take_log(sim)
     if isnothing(sim)
         return nothing
     end
+
     field_names, field_tensor = sim.fields
     for (i, name) in enumerate(field_names)
         if name in LOG_VARS
@@ -257,6 +263,10 @@ function take_log(sim)
             param_vec[i] = log(param_vec[i])
         end
     end
+
+    # Frequencies are in log-space
+    fourier_tensor = sim.fourier[2]
+    sim.fourier[2][:, 1] = log.(fourier_tensor[:, 1])
 
     return sim
 end
@@ -306,8 +316,8 @@ function get_data_normalization(sims; target_std = 1.0)
         _, pf = sim.performance
         param_mat[:, i] .= p
         tensor_block[:, :, i] .= t
-        frequencies[:, i] .= log.(f[:, 1])
-        perf_mat[:, i] .= log.(pf)
+        frequencies[:, i] .= f[:, 1]
+        perf_mat[:, i] .= pf
     end
 
     # Parameter/output-wise means
@@ -325,7 +335,7 @@ function get_data_normalization(sims; target_std = 1.0)
     frequency_std = std(frequencies) ./ target_std
 
     # Real and imaginary component of amplitudes are already normalized by the mean value and do not get additional normalization
-    fourier_means, fourier_stds, = [frequency_mean, 0.0, 0.0], [frequency_std, 1.0, 1.0]
+    fourier_means, fourier_stds = [frequency_mean, 0.0, 0.0], [frequency_std, 1.0, 1.0]
 
     param_info = (;names = param_names, means = param_means, stds = param_stds)
     field_info = (;names = tensor_row_names, means = tensor_means, stds = tensor_stds)
@@ -431,6 +441,9 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
     num_discarded = Threads.Atomic{Int}(0)
     num_accepted = Threads.Atomic{Int}(0)
 
+    @show fourier_norm.means[1]
+    @show fourier_norm.stds[1]
+
     # Process data in a multithreaded manner
     Threads.@threads for file in files
         _s = take_log(load_single_sim(file))
@@ -445,6 +458,7 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
             _, t = _s.fields
             _, f = _s.fourier
             _, pf = _s.performance
+            _, time_data = _s.time
         end
 
         Threads.atomic_add!(num_accepted, 1)
@@ -457,15 +471,16 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         t_norm = @. (t' - tensor_norm.means) / tensor_norm.stds
         pf_norm = @. (pf - perf_norm.means) / perf_norm.stds
 
-        # Normalize mean current and fourier frequencies
+        # Normalize fourier frequencies
         f[:, 1] = @. (f[:, 1] - fourier_norm.means[1]) / fourier_norm.stds[1]
-
+        
         # Write to file
         out_dict = Dict(
             "params" => Float32.(p_norm),
             "data" => Float32.(t_norm),
             "fourier" => Float32.(f),
             "perf" => Float32.(pf_norm),
+            "time" => Float32.(time_data),
         )
         npzwrite(out_path, out_dict)
 

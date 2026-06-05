@@ -59,6 +59,10 @@ class Normalizer:
             norm = self.norm_tensor
         elif name in self.params():
             norm = self.norm_params
+        elif name in self.norm_fourier["names"]:
+            norm = self.norm_fourier
+        elif name in self.norm_perf["names"]:
+            norm = self.norm_perf
         else:
             raise KeyError(f"{name} is not a valid field or param in the given dataset.")
 
@@ -70,7 +74,7 @@ class Normalizer:
 
     def params(self) -> dict:
         return self.norm_params["names"]
-
+    
     def normalize(self, val, name: str):
         index, norm = self.find_name(name)
         mean, std, log = norm["mean"], norm["std"], norm["log"]
@@ -118,5 +122,26 @@ class Normalizer:
             denormed[:, i, :] = self.denormalize(tensor[:, i, :], name)
         return denormed
     
+    def extract_fourier_comps(self, vec):
+        if isinstance(vec, torch.Tensor):
+            vec = vec.clone()
+        elif isinstance(vec, np.ndarray):
+            vec = np.copy(vec)
+        mean = vec[0]
+        tens = vec[1:].reshape(-1, 3)
+        return mean, tens
+
+    def normalize_fourier(self, vec):
+        mean, tens = self.extract_fourier_comps(vec)
+        mean_norm = self.normalize(mean, "discharge_current_A")
+        tens[:, 0] = self.normalize(tens[:, 0], "frequency")
+        return np.concat(([mean_norm], tens.reshape((-1,))))
+
+    def denormalize_fourier(self, vec):
+        mean, tens = self.extract_fourier_comps(vec)
+        mean_denorm = self.denormalize(mean, "discharge_current_A")
+        tens[:, 0] = self.denormalize(tens[:, 0], "frequency")
+        return np.concat(([mean_denorm], tens.reshape((-1,))))
+
     def __eq__(self, other):
         return all(self.metadata_params.eq(other.metadata_params)) and all(self.metadata_tensor.eq(other.metadata_tensor))

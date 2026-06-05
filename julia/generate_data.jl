@@ -24,6 +24,7 @@ function param_distributions(param_config = nothing)
 	distributions = Dict(
         # Main anom parameters
         :anom_minimum => Truncated(LogNormal(log(0.05), log(10)), 0.0, 1.0),
+        # TODO: truncate anom width to something slightly larger than 0
         :anom_width => Truncated(Normal(0.3, 0.5), 0, Inf),
         :anom_slope => Uniform(0.0, 1.0),
         :anom_step => Uniform(0.0, 1.0),

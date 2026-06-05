@@ -14,7 +14,8 @@ else:
     from .normalization import Normalizer
 
 def invert_fft_vector(t, fourier_vec):
-    fourier_vec = fourier_vec.numpy()
+    if isinstance(fourier_vec, torch.Tensor):
+        fourier_vec = fourier_vec.numpy()
     mean_current = fourier_vec[0]
     fourier_tensor = fourier_vec[1:].reshape((-1, 3))
     num_freqs = fourier_tensor.shape[0]
@@ -35,6 +36,29 @@ def invert_fft_vector(t, fourier_vec):
     signal = mean_current + np.sum(signal_mat, axis=0)
     assert signal.shape == (len(t),)
     return signal
+
+def compute_fft_vector(t, signal, num_freqs=None):
+    n = len(signal)
+    mean_current = np.mean(signal)
+    
+    # FFT of the signal (excluding DC component)
+    fft_coeffs = np.fft.rfft(signal) / n
+    freqs = np.fft.rfftfreq(n, d=(t[1] - t[0]))
+    
+    # Skip DC (index 0), take up to num_freqs
+    fft_coeffs = fft_coeffs[1:]
+    freqs = freqs[1:]
+    if num_freqs is not None:
+        fft_coeffs = fft_coeffs[:num_freqs]
+        freqs = freqs[:num_freqs]
+
+    # Normalize by mean, then extract real/imag
+    reals = fft_coeffs.real / mean_current  * 2 #for one-sided spectrum
+    imags = fft_coeffs.imag / mean_current * 2
+    
+
+    fourier_tensor = np.stack([freqs, reals, imags], axis=1)
+    return np.concatenate([[mean_current], fourier_tensor.flatten()])
 
 class ThrusterDataset(Dataset):
     def __init__(
