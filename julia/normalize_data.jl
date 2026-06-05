@@ -441,9 +441,6 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
     num_discarded = Threads.Atomic{Int}(0)
     num_accepted = Threads.Atomic{Int}(0)
 
-    @show fourier_norm.means[1]
-    @show fourier_norm.stds[1]
-
     # Process data in a multithreaded manner
     Threads.@threads for file in files
         _s = take_log(load_single_sim(file))
