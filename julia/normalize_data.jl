@@ -99,6 +99,7 @@ function load_single_sim(sim_dict; include_timevarying=false)
     I_itp = het.LinearInterpolation(time, I_raw).(time_itp)
     T_itp = het.LinearInterpolation(time, T_raw).(time_itp)
 
+
     # Fix some issues in the input data.
     # 1. The thrust and current cannot be negative.
     I_MAX = 150.0   # A
@@ -112,11 +113,9 @@ function load_single_sim(sim_dict; include_timevarying=false)
     I_mean = sim_dict[:performance][:discharge_current_A]
     T_mean = sim_dict[:performance][:thrust_N]
 
-    # 2. Throw out sims with too-high or too-low thrusts and currents
-    if !(I_MIN <= I_mean <= I_MAX) 
-        return nothing
-    elseif !(T_MIN <= T_mean <= T_MAX)
-        return nothing
+    # Throw out sims with too-high or too-low thrusts and currents
+	if !(I_MIN <= I_mean <= I_MAX) || !(T_MIN <= T_mean <= T_MAX)
+		return :thrust_or_current_out_of_bounds
     end
 
     avg = sim_dict[:sim]["frames"][1]
@@ -124,12 +123,12 @@ function load_single_sim(sim_dict; include_timevarying=false)
     neutrals = avg["neutrals"][prop]
     ions = avg["ions"][prop]
 
-    # 3. Throw out sims with min(phi) < 0.5 * V_d or max(abs(phi)) > 1.5 * V_d
+    # 2. Throw out sims with min(phi) < 0.5 * V_d or max(abs(phi)) > 1.5 * V_d
     phi = avg["potential"]
     phi_min, phi_max = extrema(phi)
     V_d = sim_dict[:params][:discharge_voltage_v]
     if phi_min > 0.5 * V_d || phi_min < -10 || phi_max > 1.5 * V_d
-        return nothing
+        return :potential_out_of_bounds
     end
 
     # 4. Throw out sims with too-low or too-high anomalous transport
@@ -141,7 +140,7 @@ function load_single_sim(sim_dict; include_timevarying=false)
     nu_an = avg["nu_an"]
     nu_min, nu_max = extrema(nu_an)
     if !((NU_MIN_MAX < nu_max < NU_MAX_MAX) && (NU_MIN_MIN < nu_min < NU_MAX_MIN))
-        return nothing
+        return :collision_frequency_out_of_bounds
     end
 
     # 5. The total collision frequency must be greater than or equal to the anomalous collision frequency
@@ -152,8 +151,14 @@ function load_single_sim(sim_dict; include_timevarying=false)
     max_ui_ind = argmax(ui_1)
     has_shock = max_ui_ind < 0.75 * length(ui_1) && ui_1[max_ui_ind] > 1.5 * ui_1[end]
     if has_shock
-        return nothing
+        return :ion_velocity_shock
     end
+
+	# 7. Throw out sims with broken electron velocities
+	ue = avg["ue"]
+	if maximum(abs.(ue)) >= 1_000_000
+		return :electron_velocity_too_large
+	end
 
     # TODO: get these automatically
     field_names = [
@@ -246,8 +251,8 @@ function load_single_sim(sim_dict; include_timevarying=false)
 end
 
 function take_log(sim)
-    if isnothing(sim)
-        return nothing
+    if isnothing(sim) || sim isa Symbol
+        return sim
     end
 
     field_names, field_tensor = sim.fields
@@ -279,8 +284,20 @@ Prints a report of how many simulations were deemed outliers and filtered out.
 """
 function load_data(files)
     sims = @showprogress map(take_log ∘ load_single_sim, files)
-    filtered = filter(!isnothing, sims)
-    println("Removed $(length(sims) - length(filtered))/$(length(files)) sims")
+	
+	keep_inds = [i for (i, sim) in enumerate(sims) if !(sim isa Symbol)]
+	discard_inds = [i for (i, sim) in enumerate(sims) if sim isa Symbol]
+	sims_to_discard = sims[discard_inds]
+	removal_keys = unique(sims_to_discard)
+	removal_counts = Dict(k => count(==(k), sims_to_discard) for k in removal_keys)
+	
+	filtered = sims[keep_inds]
+	println("Removed $(length(discard_inds))/$(length(files)) sims")
+	println("Reasons:\n---------------")
+	for (k, v) in pairs(removal_counts)
+		println("$(k): $(v)")
+	end
+	println()
     return filtered
 end
 
@@ -392,6 +409,11 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         perf_norm = read_normalization_file(joinpath(norm_file_dir, "norm_perf.csv"))
     end
 
+	norm_dict = Dict(
+		s => Dict(:mean => tensor_norm.means[i], :std => tensor_norm.stds[i]) for (i, s) in enumerate(tensor_norm.names)
+	)
+	@show norm_dict[:ue]
+
     println("Writing normalization files")
 
     # Create necessary directories
@@ -400,9 +422,9 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
     mkpath(data_dir)
 
     # Find the first valid in order to retrieve the QoI and parameter names.
-    s = nothing
+    s = :default
     i = 1
-    while isnothing(s)
+    while s isa Symbol
         s = take_log(load_single_sim(files[i]))
         i += 1
     end
@@ -446,7 +468,7 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         _s = take_log(load_single_sim(file))
 
         # Keep track fo number of simulations discarded
-        if isnothing(_s)
+        if _s isa Symbol
             Threads.atomic_add!(num_discarded, 1)
             next!(progress)
             continue
