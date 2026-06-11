@@ -29,7 +29,7 @@ parser.add_argument("--test-dir", type=Path)
 parser.add_argument("--scalars-in-tensor", action="store_true")
 parser.add_argument("--fourier-features", action="store_true")
 
-def build_observation(dataset, observations, param_vec=None, default_stddev=1.0, device="cpu"):
+def build_observation(dataset, observations, param_vec=None, default_stddev=1.0, device="cpu", verbose=False):
     _, data_params, data_tensor = dataset[0]
 
     (num_channels, resolution) = data_tensor.shape
@@ -64,7 +64,8 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0,
 
         if (len(x_data) == resolution) and np.all(x_inds == np.arange(resolution)):
             # If x_data == grid, then we're observing an entire row
-            print(obs_field + ":\tobserving entire row.")
+            if verbose:
+                print(obs_field + ":\tobserving entire row.")
             obs_matrix_loc[row_index, :] = 1.0
 
             if y_data is None:
@@ -84,10 +85,12 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0,
             n += len(x_inds)
 
             if y_data is None:
-                print(obs_field + ":\tusing data from ref sim at selected axial locs.")
+                if verbose:
+                    print(obs_field + ":\tusing data from ref sim at selected axial locs.")
                 obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
             else:
-                print(obs_field + ":\tusing data from file.")
+                if verbose:
+                    print(obs_field + ":\tusing data from file.")
                 obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32, device=device)
 
     # Dimensions
@@ -147,9 +150,8 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
 
     return score
 
-def sample(model, shape, scalars_in_tensor, fourier_features, args, condition_vec=None, device="cpu"):
-    num_samples, _, resolution = shape
-
+def parse_observation(shape, args, scalars_in_tensor, fourier_features, condition_vec=None, device='cpu', verbose=False):
+    _, _, resolution = shape
     # Determine if we're doing condional or unconditional sampling
     # If there is an `observation` field, then we're conditioning on a partial observation of that simulation
     # If not, we're sampling unconditionally
@@ -163,9 +165,10 @@ def sample(model, shape, scalars_in_tensor, fourier_features, args, condition_ve
         param_vec = None
     
     if condition_vec is not None:
-        param_vec = condition_vec
+        param_vec = torch.tensor(condition_vec, device=device)
 
-    print(args)
+    if verbose:
+        print("sampling args: ", args)
     if "observation" in args:
         obs_args = utils.read_observation(args["observation"])
         obs_file = Path(obs_args["base_sim"])
@@ -178,9 +181,9 @@ def sample(model, shape, scalars_in_tensor, fourier_features, args, condition_ve
                 # We didn't completely specify the parameter vector and have nothing to fall back on
                 raise RuntimeError("Incomplete parameter specification without data directory. Exiting.")
 
-        elif "params" not in obs_args:
+        elif "params" not in obs_args and param_vec is None:
             # Use the parameter vector from the ref simulation
-            param_vec = None
+            param_vec = None # This is redundant, and this entire code must be rewritten
 
         obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, param_vec, device=device)
         obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
@@ -190,6 +193,19 @@ def sample(model, shape, scalars_in_tensor, fourier_features, args, condition_ve
 
         dataset = unconditional_dataset
         obs = dict(operator=None, var=None, data=None)
+
+    return obs, dataset, param_vec
+    
+
+def sample(
+    model, shape,
+    scalars_in_tensor, fourier_features,
+    args, condition_vec=None, save_to_file=True,
+    device="cpu", verbose=False
+):
+    num_samples, _, resolution = shape
+
+    obs, dataset, param_vec = parse_observation(shape, args, scalars_in_tensor, fourier_features, condition_vec, device, verbose=verbose)
 
     # Timestep args
     num_steps = args.get("num_steps", 256)
@@ -225,32 +241,33 @@ def sample(model, shape, scalars_in_tensor, fourier_features, args, condition_ve
 
     final = output[-1, ...]
 
-    # Save generated samples
-    out_dir = Path(args["out_dir"])
-    data_dir = out_dir / "data"
-
-    if args.get("replace_samples", False) and data_dir.exists():
-        shutil.rmtree(data_dir)
-
-    # Make folder and write metadata
-    os.makedirs(out_dir, exist_ok=True)
-
-    dataset.write_metadata(out_dir)
-
-    # Write final sample data to independent output dirs
-    os.makedirs(data_dir, exist_ok=True)
-    params_cpu = param_vec.cpu().numpy()
-    for i in range(num_samples):
-        file = data_dir / f"{uuid.uuid4()}.npz"
-        tens = final[i, :].cpu().numpy()
-        np.savez(file, data=tens, params=params_cpu)
-        
-    # Write samples at all iterations to a single tensor
-    np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
+    if save_to_file:
+        # Save generated samples
+        out_dir = Path(args["out_dir"])
+        data_dir = out_dir / "data"
+    
+        if args.get("replace_samples", False) and data_dir.exists():
+            shutil.rmtree(data_dir)
+    
+        # Make folder and write metadata
+        os.makedirs(out_dir, exist_ok=True)
+    
+        dataset.write_metadata(out_dir)
+    
+        # Write final sample data to independent output dirs
+        os.makedirs(data_dir, exist_ok=True)
+        params_cpu = param_vec.cpu().numpy()
+        for i in range(num_samples):
+            file = data_dir / f"{uuid.uuid4()}.npz"
+            tens = final[i, :].cpu().numpy()
+            np.savez(file, data=tens, params=params_cpu)
+            
+        # Write samples at all iterations to a single tensor
+        np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
 
     return output
 
-def infer(model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None, verbose=False):
+def infer(model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None, save_to_file=True, verbose=False):
     device = utils.get_device()
 
     # Load model and config from checkpoint
@@ -300,7 +317,9 @@ def infer(model, sampling_config, scalars_in_tensor, fourier_features, condition
             scalars_in_tensor, fourier_features,
             sampling_config,
             condition_vec=condition_vec,
-            device=device
+            save_to_file=save_to_file,
+            device=device,
+            verbose=verbose,
         )
         samples.append(batch_samples)
 
