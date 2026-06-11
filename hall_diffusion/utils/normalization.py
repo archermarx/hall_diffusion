@@ -20,7 +20,6 @@ def concat_norm_info(n1, n2):
 
     return n1
 
-
 class Normalizer:
     def __init__(self, dir, scalars_in_tensor=False, fourier_features=False):
         self.dir = Path(dir)
@@ -30,11 +29,12 @@ class Normalizer:
         self.norm_params, self.metadata_params = Normalizer.read_normalization_info(self.dir/"norm_params.csv")
         
         if self.scalars_in_tensor:
+            self.norm_perf, self.metadata_perf = Normalizer.read_normalization_info(self.dir/"norm_perf.csv")
             self.norm_tensor = concat_norm_info(self.norm_tensor, self.norm_params)
+            self.norm_tensor = concat_norm_info(self.norm_tensor, self.norm_perf)
 
         if self.fourier_features:
             self.norm_fourier, self.metadata_fourier = Normalizer.read_normalization_info(self.dir/"norm_fourier.csv")
-            self.norm_perf, self.metadata_perf = Normalizer.read_normalization_info(self.dir/"norm_perf.csv")
 
     @staticmethod
     def read_normalization_info(path: Path|str) -> tuple[NormInfo, pd.DataFrame]:
@@ -121,27 +121,6 @@ class Normalizer:
         for (name, i) in self.fields().items():
             denormed[:, i, :] = self.denormalize(tensor[:, i, :], name)
         return denormed
-    
-    def extract_fourier_comps(self, vec):
-        if isinstance(vec, torch.Tensor):
-            vec = vec.clone()
-        elif isinstance(vec, np.ndarray):
-            vec = np.copy(vec)
-        mean = vec[0]
-        tens = vec[1:].reshape(-1, 3)
-        return mean, tens
-
-    def normalize_fourier(self, vec):
-        mean, tens = self.extract_fourier_comps(vec)
-        mean_norm = self.normalize(mean, "discharge_current_A")
-        tens[:, 0] = self.normalize(tens[:, 0], "frequency")
-        return np.concat(([mean_norm], tens.reshape((-1,))))
-
-    def denormalize_fourier(self, vec):
-        mean, tens = self.extract_fourier_comps(vec)
-        mean_denorm = self.denormalize(mean, "discharge_current_A")
-        tens[:, 0] = self.denormalize(tens[:, 0], "frequency")
-        return np.concat(([mean_denorm], tens.reshape((-1,))))
 
     def __eq__(self, other):
         return all(self.metadata_params.eq(other.metadata_params)) and all(self.metadata_tensor.eq(other.metadata_tensor))
