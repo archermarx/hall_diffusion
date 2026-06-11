@@ -7,6 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import math
 import random
+import h5py
 
 if __name__ == "__main__":
     from normalization import Normalizer
@@ -112,8 +113,17 @@ class ThrusterDataset(Dataset):
     ):
         super().__init__()
         self.dir = Path(dir)
-        self.data_dir = self.dir / "data"
-        self.files = os.listdir(self.data_dir)
+
+        self.h5_file = self.dir / "data.h5"
+
+        if os.path.exists(self.h5_file):
+            self.data_dir = None
+            with h5py.File(self.h5_file, "r") as f:
+                self.files = list(f.keys())
+        else:
+            self.h5_file = None
+            self.data_dir = self.dir / "data"
+            self.files = os.listdir(self.data_dir)
 
         if files is not None:
             filter_files = set(files)
@@ -212,7 +222,13 @@ class ThrusterDataset(Dataset):
         return torch.concat([torch.tensor([mean_norm, rms_norm]), bin_powers])
 
     def __getitem__(self, idx):
-        data = np.load(self.data_dir / self.files[idx])
+        if self.h5_file is None:
+            data = np.load(self.data_dir / self.files[idx])
+        else:
+            with h5py.File(self.h5_file, "r") as f:  # re-open per worker
+                grp = f[self.files[idx]] 
+                data = {k: grp[k][()] for k in grp} #type:ignore
+
         tensor = torch.tensor(data["data"], dtype=torch.float32)
         params = torch.tensor(data["params"], dtype=torch.float32)
         perf = None
@@ -248,11 +264,8 @@ class ThrusterDataset(Dataset):
             t_vals, I_vals = time[:,0], time[:,2]
             fourier = self._signal_to_vec(t_vals, I_vals)
             params = torch.concat((params, fourier))
-            I = I_vals
-        else:
-            I = []
 
-        return self.files[idx], params, I, tensor
+        return self.files[idx], params, tensor
 
 class ThrusterPlotter1D:
     def __init__(
