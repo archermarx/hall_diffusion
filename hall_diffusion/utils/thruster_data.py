@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import math
 import random
 import h5py
+from tqdm import tqdm
 
 if __name__ == "__main__":
     from normalization import Normalizer
@@ -157,8 +158,10 @@ class ThrusterDataset(Dataset):
         # Factor used to normalize power spectra
         self.power_norm_factor = np.abs(np.log(self.min_pow))
 
-        # h5 file handle
         self.f = None
+        if self.fourier_features:
+            self.fourier_cache_file = self.dir / "fourier_cache.h5"
+            self._build_fourier_cache()
 
     def write_metadata(self, path: Path | str):
         path = Path(path)
@@ -204,6 +207,40 @@ class ThrusterDataset(Dataset):
 
     def __len__(self):
         return len(self.files)
+
+    def _load_raw_signal(self, name):
+        if self.h5_file is None:
+            data = np.load(self.data_dir / name)
+            time = data["time"]
+        else:
+            with h5py.File(self.h5_file, "r") as f:
+                time = f[name]["time"][()]  # type:ignore
+
+        time = torch.tensor(time, dtype=torch.float32)
+        return time[:, 0], time[:, 2]
+
+    def _build_fourier_cache(self):
+        config = {
+            "max_freqs": self.max_freqs,
+            "min_freq": self.min_freq,
+            "max_freq": self.max_freq,
+            "min_pow": self.min_pow,
+        }
+
+        with h5py.File(self.fourier_cache_file, "a") as f:
+            stale = any(f.attrs.get(k) != v for k, v in config.items())
+            if stale:
+                for key in list(f.keys()):
+                    del f[key]
+                for k, v in config.items():
+                    f.attrs[k] = v
+
+            missing = [name for name in self.files if name not in f]
+
+            for name in tqdm(missing, desc="Computing fourier features"):
+                t_vals, I_vals = self._load_raw_signal(name)
+                vec = self._signal_to_vec(t_vals, I_vals)
+                f.create_dataset(name, data=vec.numpy())
 
     def _signal_to_vec(self, t, signal):
         num_pts = len(t)
@@ -267,9 +304,8 @@ class ThrusterDataset(Dataset):
             assert tensor.shape[1] == 128
 
         if self.fourier_features:
-            time = torch.tensor(data["time"], dtype=torch.float32)
-            t_vals, I_vals = time[:, 0], time[:, 2]
-            fourier = self._signal_to_vec(t_vals, I_vals)
+            with h5py.File(self.fourier_cache_file, "r") as f:  # re-open per worker
+                fourier = torch.tensor(f[self.files[idx]][()], dtype=torch.float32)  # type:ignore
             params = torch.concat((params, fourier))
 
         return self.files[idx], params, tensor
@@ -387,4 +423,3 @@ class ThrusterPlotter1D:
             axes.append(ax)
 
         return fig, axes
-
