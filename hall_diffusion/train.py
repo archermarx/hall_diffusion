@@ -454,15 +454,6 @@ def train(args):
     ema.step = state.batch_idx  # Ensure EMA step counter is in sync with loaded batch index
 
     # ---------------------------------------------
-    # ControlNet measurement generator (None for vanilla EDM2)
-    sqrt_weight = train_args.get("sqrt_loss_weight", True)
-
-    def ctrl_fn_base(x):
-        return train_dataset.generate_measurements(x, sqrt_weight=sqrt_weight)
-
-    ctrl_fn = ctrl_fn_base if isinstance(model, ControlNet) else None
-
-    # ---------------------------------------------
     # Noise args
     channels = config["model"]["in_channels"]
     resolution = config["model"]["resolution"]
@@ -523,7 +514,7 @@ def train(args):
             progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
 
             _, batch_loss, grad_norm = train_one_batch(
-                y, state, loss_fn, logger=logger, condition_vec=vec, use_amp=use_amp, ctrl_fn=ctrl_fn, timer=timer
+                y, state, loss_fn, logger=logger, condition_vec=vec, use_amp=use_amp, timer=timer
             )
             batch_losses.append(batch_loss)
             timer.step()
@@ -557,11 +548,10 @@ def train(args):
                         epoch_idx=epoch_idx,
                         out_folder=out_dir,
                         data_dir=test_data_dir,
-                        ctrl_fn=ctrl_fn,
                         seed=val_seed,
                     )
                     state.val_loss = validation_loss(
-                        state.model, loss_fn, test_loader, data_dir=test_data_dir, ctrl_fn=ctrl_fn, seed=val_seed
+                        state.model, loss_fn, test_loader, data_dir=test_data_dir, seed=val_seed
                     )
                     ema_losses.append(state.ema_loss)
                     val_losses.append(state.val_loss)

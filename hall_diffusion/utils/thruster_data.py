@@ -1,12 +1,13 @@
 import os
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
 import random
+import h5py
 
 if __name__ == "__main__":
     from normalization import Normalizer
@@ -55,10 +56,48 @@ def compute_fft_vector(t, signal, num_freqs=None):
     # Normalize by mean, then extract real/imag
     reals = fft_coeffs.real / mean_current  * 2 #for one-sided spectrum
     imags = fft_coeffs.imag / mean_current * 2
-    
 
     fourier_tensor = np.stack([freqs, reals, imags], axis=1)
     return np.concatenate([[mean_current], fourier_tensor.flatten()])
+
+def binned_psd(t, signal, n_bins=50, fmin=None, fmax=None, pow_min=1e-6):
+    fs = 1 / np.mean(np.diff(t))
+
+    freqs = np.fft.rfftfreq(len(signal), d=1/fs)
+    psd = (np.abs(np.fft.rfft(signal)) ** 2) / (len(signal) * fs)
+
+    freqs, psd = freqs[1:], psd[1:]  # drop DC
+
+    fmin = fmin or freqs[0]
+    fmax = fmax or freqs[-1]
+
+    mask = (freqs >= fmin) & (freqs <= fmax)
+    freqs, psd = freqs[mask], psd[mask]
+
+    bin_edges = np.logspace(np.log10(fmin), np.log10(fmax), n_bins + 1)
+    bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
+    bin_power = np.full(n_bins, np.nan)
+
+    for i in range(n_bins):
+        mask = (freqs >= bin_edges[i]) & (freqs < bin_edges[i + 1])
+        if mask.any():
+            bin_power[i] = psd[mask].mean()
+
+    if np.all(np.isnan(bin_power)):
+        bin_power[:] = pow_min
+    else:
+        with np.errstate(divide='ignore'):
+            # Interpolate NaNs in log-space
+            valid = ~np.isnan(bin_power)
+            bin_power[~valid] = np.exp(np.interp(
+                np.log(bin_centers[~valid]),
+                np.log(bin_centers[valid]),
+                np.log(bin_power[valid])
+            ))
+
+    bin_power = np.maximum(pow_min, bin_power)
+
+    return bin_centers, bin_power
 
 class ThrusterDataset(Dataset):
     def __init__(
@@ -74,8 +113,17 @@ class ThrusterDataset(Dataset):
     ):
         super().__init__()
         self.dir = Path(dir)
-        self.data_dir = self.dir / "data"
-        self.files = os.listdir(self.data_dir)
+
+        self.h5_file = self.dir / "data.h5"
+
+        if os.path.exists(self.h5_file):
+            self.data_dir = None
+            with h5py.File(self.h5_file, "r") as f:
+                self.files = list(f.keys())
+        else:
+            self.h5_file = None
+            self.data_dir = self.dir / "data"
+            self.files = os.listdir(self.data_dir)
 
         if files is not None:
             filter_files = set(files)
@@ -95,9 +143,17 @@ class ThrusterDataset(Dataset):
         self.num_fields = len(self.norm.norm_tensor["names"])
         self.num_params = len(self.norm.norm_params["names"])
         self.scalars_in_tensor = scalars_in_tensor
+        self.resolution = len(self.grid)
+
+        # Frequencies to analyze in fourier spectrum
         self.fourier_features = fourier_features
         self.max_freqs = max_freqs
-        self.resolution = len(self.grid)
+        self.min_freq = 5e3
+        self.max_freq = 5e5
+        # Minimum power spectral density
+        self.min_pow = 1e-6
+        # Factor used to normalize power spectra
+        self.power_norm_factor = np.abs(np.log(self.min_pow))
 
     def write_metadata(self, path: Path | str):
         path = Path(path)
@@ -144,16 +200,50 @@ class ThrusterDataset(Dataset):
     def __len__(self):
         return len(self.files)
 
+    def _signal_to_vec(self, t, signal):
+        num_pts = len(t)
+        t = t[num_pts//2:]
+        signal = signal[num_pts//2:]
+
+        mean = signal.mean()
+        rms = torch.maximum(signal.std(), torch.tensor([1e-2]))
+        signal_norm = (signal - mean) / rms
+        rms_norm = rms / mean
+        mean_norm = self.norm.normalize(mean, "discharge_current_A")
+        
+        _, bin_powers = binned_psd(
+            t, signal_norm,
+            n_bins = self.max_freqs,
+            fmin=self.min_freq, fmax=self.max_freq,
+            pow_min=self.min_pow
+        )
+        bin_powers = torch.tensor(bin_powers).log() / self.power_norm_factor
+
+        return torch.concat([torch.tensor([mean_norm, rms_norm]), bin_powers])
+
     def __getitem__(self, idx):
-        data = np.load(self.data_dir / self.files[idx])
+        if self.h5_file is None:
+            data = np.load(self.data_dir / self.files[idx])
+        else:
+            with h5py.File(self.h5_file, "r") as f:  # re-open per worker
+                grp = f[self.files[idx]] 
+                data = {k: grp[k][()] for k in grp} #type:ignore
+
         tensor = torch.tensor(data["data"], dtype=torch.float32)
         params = torch.tensor(data["params"], dtype=torch.float32)
+        perf = None
 
         if self.scalars_in_tensor:
-            # Add params to the end of the tensor as constant channels
-            p = params.unsqueeze(1).expand(-1, tensor.shape[1])
-            assert p.shape == (self.num_params, tensor.shape[1])
-            tensor = torch.cat([tensor, p], dim=0)
+            resolution = tensor.shape[1]
+            # Add params and performance quantitiesto the end of the tensor as constant channels
+            perf = torch.tensor(data["perf"], dtype=torch.float32)
+            param_tens = params.unsqueeze(1).expand(-1, resolution)
+            perf_tens = perf.unsqueeze(1).expand(-1, resolution)
+
+            assert param_tens.shape == (self.num_params, resolution)
+            assert perf_tens.shape == (len(perf), resolution)
+
+            tensor = torch.cat([tensor, param_tens, perf_tens], dim=0)
             params = torch.tensor([])
 
         if self.downsample_res is not None:
@@ -170,103 +260,12 @@ class ThrusterDataset(Dataset):
             assert tensor.shape[1] == 128
 
         if self.fourier_features:
-            fourier_tensor = torch.tensor(data["fourier"], dtype=torch.float32)
-            perf_tensor = torch.tensor(data["perf"], dtype=torch.float32)
-
-            max_freqs, num_fourier_channels = fourier_tensor.shape
-            max_freqs = self.max_freqs if self.max_freqs else max_freqs
-            fourier_tensor = fourier_tensor[:max_freqs, :].reshape((max_freqs * num_fourier_channels,))
-
-            discharge_current, _ = perf_tensor
-            # Append mean discharge current + fourier features (freq, real ampl, imag ampl) to param vec
-            params = torch.concat([params, torch.tensor([discharge_current]), fourier_tensor])
+            time = torch.tensor(data["time"], dtype=torch.float32)
+            t_vals, I_vals = time[:,0], time[:,2]
+            fourier = self._signal_to_vec(t_vals, I_vals)
+            params = torch.concat((params, fourier))
 
         return self.files[idx], params, tensor
-
-    def generate_measurements(self, sim: torch.Tensor, sqrt_weight=True):
-        """Mask whole and partial fields for conditioning, and add noise to unmasked pixels.
-
-        Args:
-            sim: (B, num_fields, resolution) batch of simulations.
-
-        Returns:
-            condition_tensor: (B, 2*num_fields, resolution) log-precision and noisy/masked simulation.
-        """
-        B = sim.shape[0]
-        num_spatial = len(self.fields())
-        num_params = self.num_fields - num_spatial
-        res = self.resolution
-        dev = sim.device
-
-        # Beta(5,1) ~ U^0.2  and  Beta(1,5) ~ 1 - U^0.2  (inverse-CDF trick for Beta(a,1)/Beta(1,b))
-        # This keeps all sampling on-device with no CPU transfers.
-        def beta_hi(shape):  # Beta(5,1): biased toward 1
-            return torch.rand(shape, device=dev) ** 0.2
-
-        def beta_lo(shape):  # Beta(1,5): biased toward 0
-            return 1.0 - torch.rand(shape, device=dev) ** 0.2
-
-        # --- Field masking ---
-        # Sample a mask probability per sample; Beta(5,1) biases toward masking more fields.
-        p_mask = beta_hi((B,))  # (B,)
-        field_masked = torch.rand(B, self.num_fields, device=dev) < p_mask[:, None]  # (B, num_fields)
-
-        # --- Initialize outputs (masked/removed entries keep random noise) ---
-        precision = torch.zeros(B, self.num_fields, res, device=dev)
-        masked_sim = torch.randn(B, self.num_fields, res, device=dev) * 0.5
-
-        # --- Spatial fields ---
-        sf_mask = field_masked[:, :num_spatial]  # (B, num_spatial)
-
-        # Sample a removal probability per (b, f); Beta(5,1) biases toward removing more pixels.
-        p_remove = beta_hi((B, num_spatial))  # (B, num_spatial)
-        pixel_kept = torch.rand(B, num_spatial, res, device=dev) >= p_remove[:, :, None]  # (B, num_spatial, res)
-
-        std_min = 1e-4
-        std_max = 1e0
-        # Sample std deviations uniformly in log space
-        log_stds_s = torch.rand(B, num_spatial, res, device=dev) * (np.log(std_max) - np.log(std_min)) + np.log(std_min)
-
-        stds_s = torch.exp(log_stds_s)  # (B, num_spatial)
-        noise_s = torch.randn(B, num_spatial, res, device=dev) * stds_s
-
-        active_s = (~sf_mask[:, :, None]) & pixel_kept  # unmasked field + kept pixel
-        masked_sim[:, :num_spatial] = torch.where(active_s, sim[:, :num_spatial] + noise_s, masked_sim[:, :num_spatial])
-        precision[:, :num_spatial] = torch.where(active_s, (1.0 / stds_s) ** 2, torch.zeros_like(stds_s))
-
-        # --- Parameter fields (constant across space; single noise draw per field) ---
-        if num_params > 0:
-            pf_mask = field_masked[:, num_spatial:]  # (B, num_params)
-
-            log_stds_p = torch.rand(B, num_params, device=dev) * (np.log(std_max) - np.log(std_min)) + np.log(std_min)
-            stds_p = torch.exp(log_stds_p)  # (B, num_params)
-            noise_p = torch.randn(B, num_params, device=dev) * stds_p
-
-            active_p = ~pf_mask  # (B, num_params)
-            masked_sim[:, num_spatial:] = torch.where(
-                active_p[:, :, None],
-                sim[:, num_spatial:] + noise_p[:, :, None],
-                masked_sim[:, num_spatial:],
-            )
-            precision[:, num_spatial:] = torch.where(
-                active_p[:, :, None], ((1.0 / stds_p) ** 2)[:, :, None], torch.zeros_like(precision[:, num_spatial:])
-            )
-
-        observed = precision > 0
-        frac_observed = observed.float().mean(dim=[1, 2])  # (B,)
-        log_precision = torch.log(precision + 1)
-
-        if sqrt_weight:
-            loss_weight_observed = torch.sqrt(1 + log_precision) / frac_observed[:, None, None]
-        else:
-            loss_weight_observed = (1 + log_precision) / frac_observed[:, None, None]
-
-        loss_weight_unobserved = 1 / (1 - frac_observed[:, None, None] + 1e-8)
-        loss_weight = torch.where(observed, loss_weight_observed, loss_weight_unobserved)
-
-        condition_tensor = torch.cat([log_precision, observed, masked_sim], dim=1)
-        return condition_tensor, loss_weight
-
 
 class ThrusterPlotter1D:
     def __init__(
@@ -380,79 +379,3 @@ class ThrusterPlotter1D:
             axes.append(ax)
 
         return fig, axes
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("data_dir", type=str, default="data/training")
-    args = parser.parse_args()
-
-    dataset = ThrusterDataset(args.data_dir, None, 1, scalars_in_tensor=True)
-    batch_size = 2
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-    files, labels, sims = next(iter(loader))
-
-    names = [k for k in dataset.fields().keys()] + [k for k in dataset.params().keys()]
-    param_names = dataset.params().keys()
-    print(param_names)
-
-    condition_tensor, _ = dataset.generate_measurements(sims)
-    precision = condition_tensor[:, : dataset.num_fields, :]
-    measurements = condition_tensor[:, dataset.num_fields :, :]
-
-    sim = sims[0]
-    precision = precision[0]
-    measurements = measurements[0]
-
-    sim_min, sim_max = -1, 1
-    sim_normalized = (sim - sim_min) / (sim_max - sim_min)
-    sim_rgb = sim_normalized.unsqueeze(2).repeat(1, 1, 3)
-    # Set masked pixels to magenta
-    sim_rgb[precision == 0, :] = torch.tensor([1.0, 0.0, 1.0])  # Magenta color for masked pixels
-
-    fig, axs = plt.subplots(1, 3, figsize=(16, 6), layout="constrained")
-    axs[0].imshow(sim_rgb, aspect="auto")
-    axs[1].imshow(precision, aspect="auto", cmap="gray")
-
-    # Remove green channel for masked pixels
-    masked_sim_rgb = measurements.unsqueeze(2).repeat(1, 1, 3)
-    masked_sim_rgb[precision == 0, 1] = 0.0  # Set green channel to 0 for masked pixels
-    axs[2].imshow(masked_sim_rgb, aspect="auto", cmap="gray")
-
-    for i, ax in enumerate(axs):
-        ax.set(yticks=range(len(names)), yticklabels=names if i == 0 else [], xlabel="Axial index")
-        ax.set_box_aspect(1)
-
-    axs[0].set_title("Sim with masked pixels in magenta")
-    axs[1].set_title("Measurement precision")
-    axs[2].set_title("Resulting data tensor")
-
-    # Need to add colorbar to right of second plot
-    cb = fig.colorbar(axs[1].images[0], ax=axs[1], location="right", shrink=0.5)
-    cb.set_label("log(1 / $\\sigma^2$)")
-
-    plt.show()
-
-    # Make 1D plots of each field showing original tensor and simulated data
-    for name, index in dataset.fields().items():
-        kept_index = precision[index] != 0
-        if sum(kept_index) == 0:
-            continue
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        x = dataset.grid
-        ax.plot(x, sim[index].numpy(), label="Original sim")
-
-        precision_kept = precision[index, kept_index]
-        x_kept = x[kept_index]
-        sim_kept = measurements[index, kept_index].numpy()
-        error_bars = 2 * torch.sqrt(1 / torch.exp(precision_kept)).numpy()
-        ax.scatter(x_kept, sim_kept, label="Simulated data with noise", color="orange", s=20, zorder=5)
-        ax.errorbar(x_kept, sim_kept, yerr=error_bars, fmt="none", ecolor="orange", alpha=0.5, zorder=4)
-        ax.set_title(name)
-        ax.set_xlabel("Axial index")
-        ax.legend()
-        plt.show()
