@@ -230,17 +230,41 @@ class ThrusterDataset(Dataset):
         with h5py.File(self.fourier_cache_file, "a") as f:
             stale = any(f.attrs.get(k) != v for k, v in config.items())
             if stale:
-                for key in list(f.keys()):
-                    del f[key]
+                for key in ("names", "vecs"):
+                    if key in f:
+                        del f[key]
                 for k, v in config.items():
                     f.attrs[k] = v
 
-            missing = [name for name in self.files if name not in f]
+            if "names" in f:
+                index = {name: i for i, name in enumerate(f["names"].asstr()[()])}  # type:ignore
+            else:
+                index = {}
 
-            for name in tqdm(missing, desc="Computing fourier features"):
-                t_vals, I_vals = self._load_raw_signal(name)
-                vec = self._signal_to_vec(t_vals, I_vals)
-                f.create_dataset(name, data=vec.numpy())
+            missing = [name for name in self.files if name not in index]
+
+            if missing:
+                vecs = np.stack([
+                    self._signal_to_vec(*self._load_raw_signal(name)).numpy()
+                    for name in tqdm(missing, desc="Computing fourier features")
+                ])
+
+                old_n, vec_len = len(index), vecs.shape[1]
+                new_n = old_n + len(missing)
+
+                if "vecs" not in f:
+                    f.create_dataset("vecs", shape=(0, vec_len), maxshape=(None, vec_len), dtype=np.float32, chunks=(1024, vec_len))
+                    f.create_dataset("names", shape=(0,), maxshape=(None,), dtype=h5py.string_dtype(encoding="utf-8"), chunks=(1024,))
+
+                f["vecs"].resize((new_n, vec_len))  # type:ignore
+                f["names"].resize((new_n,))  # type:ignore
+                f["vecs"][old_n:new_n] = vecs  # type:ignore
+                f["names"][old_n:new_n] = missing  # type:ignore
+
+                for i, name in enumerate(missing):
+                    index[name] = old_n + i
+
+        self.fourier_index = index
 
     def _signal_to_vec(self, t, signal):
         num_pts = len(t)
@@ -304,8 +328,9 @@ class ThrusterDataset(Dataset):
             assert tensor.shape[1] == 128
 
         if self.fourier_features:
+            cache_idx = self.fourier_index[self.files[idx]]
             with h5py.File(self.fourier_cache_file, "r") as f:  # re-open per worker
-                fourier = torch.tensor(f[self.files[idx]][()], dtype=torch.float32)  # type:ignore
+                fourier = torch.tensor(f["vecs"][cache_idx], dtype=torch.float32)  # type:ignore
             params = torch.concat((params, fourier))
 
         return self.files[idx], params, tensor
