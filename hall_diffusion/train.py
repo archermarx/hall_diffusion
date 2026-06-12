@@ -369,7 +369,7 @@ def train(args):
     logger.info(
         f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}."
     )
-    ema = EMA(ema_factor, step_start=ema_start * batch_size)
+    ema = EMA(ema_factor, step_start=ema_start * len(train_dataset))
     ema_model = copy.deepcopy(model).eval().requires_grad_(False)
 
     # ---------------------------------------------
