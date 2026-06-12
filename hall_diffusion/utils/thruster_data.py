@@ -14,6 +14,7 @@ if __name__ == "__main__":
 else:
     from .normalization import Normalizer
 
+
 def invert_fft_vector(t, fourier_vec):
     if isinstance(fourier_vec, torch.Tensor):
         fourier_vec = fourier_vec.numpy()
@@ -28,24 +29,25 @@ def invert_fft_vector(t, fourier_vec):
     # Convert complex fourier coeffs to amplitudes and phases
     # These coeffs have been normalized by the mean current, so we undo that
     ampls = np.sqrt(reals**2 + imags**2) * mean_current
-    phases = np.atan2(imags, reals) 
+    phases = np.atan2(imags, reals)
 
     signal_mat = np.zeros((num_freqs, len(t)))
-    for (i, (freq, ampl, phase)) in enumerate(zip(freqs, ampls, phases)):
+    for i, (freq, ampl, phase) in enumerate(zip(freqs, ampls, phases)):
         signal_mat[i, :] = ampl * np.cos(2 * np.pi * freq * t + phase)
 
     signal = mean_current + np.sum(signal_mat, axis=0)
     assert signal.shape == (len(t),)
     return signal
 
+
 def compute_fft_vector(t, signal, num_freqs=None):
     n = len(signal)
     mean_current = np.mean(signal)
-    
+
     # FFT of the signal (excluding DC component)
     fft_coeffs = np.fft.rfft(signal) / n
     freqs = np.fft.rfftfreq(n, d=(t[1] - t[0]))
-    
+
     # Skip DC (index 0), take up to num_freqs
     fft_coeffs = fft_coeffs[1:]
     freqs = freqs[1:]
@@ -54,16 +56,17 @@ def compute_fft_vector(t, signal, num_freqs=None):
         freqs = freqs[:num_freqs]
 
     # Normalize by mean, then extract real/imag
-    reals = fft_coeffs.real / mean_current  * 2 #for one-sided spectrum
+    reals = fft_coeffs.real / mean_current * 2  # for one-sided spectrum
     imags = fft_coeffs.imag / mean_current * 2
 
     fourier_tensor = np.stack([freqs, reals, imags], axis=1)
     return np.concatenate([[mean_current], fourier_tensor.flatten()])
 
+
 def binned_psd(t, signal, n_bins=50, fmin=None, fmax=None, pow_min=1e-6):
     fs = 1 / np.mean(np.diff(t))
 
-    freqs = np.fft.rfftfreq(len(signal), d=1/fs)
+    freqs = np.fft.rfftfreq(len(signal), d=1 / fs)
     psd = (np.abs(np.fft.rfft(signal)) ** 2) / (len(signal) * fs)
 
     freqs, psd = freqs[1:], psd[1:]  # drop DC
@@ -86,18 +89,17 @@ def binned_psd(t, signal, n_bins=50, fmin=None, fmax=None, pow_min=1e-6):
     if np.all(np.isnan(bin_power)):
         bin_power[:] = pow_min
     else:
-        with np.errstate(divide='ignore'):
+        with np.errstate(divide="ignore"):
             # Interpolate NaNs in log-space
             valid = ~np.isnan(bin_power)
-            bin_power[~valid] = np.exp(np.interp(
-                np.log(bin_centers[~valid]),
-                np.log(bin_centers[valid]),
-                np.log(bin_power[valid])
-            ))
+            bin_power[~valid] = np.exp(
+                np.interp(np.log(bin_centers[~valid]), np.log(bin_centers[valid]), np.log(bin_power[valid]))
+            )
 
     bin_power = np.maximum(pow_min, bin_power)
 
     return bin_centers, bin_power
+
 
 class ThrusterDataset(Dataset):
     def __init__(
@@ -155,6 +157,9 @@ class ThrusterDataset(Dataset):
         # Factor used to normalize power spectra
         self.power_norm_factor = np.abs(np.log(self.min_pow))
 
+        # h5 file handle
+        self.f = None
+
     def write_metadata(self, path: Path | str):
         path = Path(path)
         self.norm.write_normalization_info(path)
@@ -202,32 +207,34 @@ class ThrusterDataset(Dataset):
 
     def _signal_to_vec(self, t, signal):
         num_pts = len(t)
-        t = t[num_pts//2:]
-        signal = signal[num_pts//2:]
+        t = t[num_pts // 2 :]
+        signal = signal[num_pts // 2 :]
 
         mean = signal.mean()
         rms = torch.maximum(signal.std(), torch.tensor([1e-2]))
         signal_norm = (signal - mean) / rms
         rms_norm = rms / mean
         mean_norm = self.norm.normalize(mean, "discharge_current_A")
-        
+
         _, bin_powers = binned_psd(
-            t, signal_norm,
-            n_bins = self.max_freqs,
-            fmin=self.min_freq, fmax=self.max_freq,
-            pow_min=self.min_pow
+            t, signal_norm, n_bins=self.max_freqs, fmin=self.min_freq, fmax=self.max_freq, pow_min=self.min_pow
         )
         bin_powers = torch.tensor(bin_powers).log() / self.power_norm_factor
 
         return torch.concat([torch.tensor([mean_norm, rms_norm]), bin_powers])
 
+    def _init_file(self):
+        if self.f is None:
+            self.f = h5py.File(self.h5_file, "r", rdcc_nbytes=1024**3)
+
     def __getitem__(self, idx):
         if self.h5_file is None:
             data = np.load(self.data_dir / self.files[idx])
         else:
-            with h5py.File(self.h5_file, "r") as f:  # re-open per worker
-                grp = f[self.files[idx]] 
-                data = {k: grp[k][()] for k in grp} #type:ignore
+            self._init_file()
+            assert self.f is not None
+            grp = self.f[self.files[idx]]
+            data = {k: grp[k][()] for k in grp}  # type:ignore
 
         tensor = torch.tensor(data["data"], dtype=torch.float32)
         params = torch.tensor(data["params"], dtype=torch.float32)
@@ -256,16 +263,17 @@ class ThrusterDataset(Dataset):
             # Should be 128 (TODO: fix this hardcode)
             if tensor.shape[1] == 130:
                 tensor = tensor[:, 1:-1]
-            
+
             assert tensor.shape[1] == 128
 
         if self.fourier_features:
             time = torch.tensor(data["time"], dtype=torch.float32)
-            t_vals, I_vals = time[:,0], time[:,2]
+            t_vals, I_vals = time[:, 0], time[:, 2]
             fourier = self._signal_to_vec(t_vals, I_vals)
             params = torch.concat((params, fourier))
 
         return self.files[idx], params, tensor
+
 
 class ThrusterPlotter1D:
     def __init__(
@@ -379,3 +387,4 @@ class ThrusterPlotter1D:
             axes.append(ax)
 
         return fig, axes
+
