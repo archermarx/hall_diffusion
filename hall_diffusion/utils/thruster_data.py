@@ -7,62 +7,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import math
 import random
-import h5py
-from tqdm import tqdm
 
 if __name__ == "__main__":
     from normalization import Normalizer
 else:
     from .normalization import Normalizer
-
-
-def invert_fft_vector(t, fourier_vec):
-    if isinstance(fourier_vec, torch.Tensor):
-        fourier_vec = fourier_vec.numpy()
-    mean_current = fourier_vec[0]
-    fourier_tensor = fourier_vec[1:].reshape((-1, 3))
-    num_freqs = fourier_tensor.shape[0]
-
-    freqs = fourier_tensor[:, 0]
-    reals = fourier_tensor[:, 1]
-    imags = fourier_tensor[:, 2]
-
-    # Convert complex fourier coeffs to amplitudes and phases
-    # These coeffs have been normalized by the mean current, so we undo that
-    ampls = np.sqrt(reals**2 + imags**2) * mean_current
-    phases = np.atan2(imags, reals)
-
-    signal_mat = np.zeros((num_freqs, len(t)))
-    for i, (freq, ampl, phase) in enumerate(zip(freqs, ampls, phases)):
-        signal_mat[i, :] = ampl * np.cos(2 * np.pi * freq * t + phase)
-
-    signal = mean_current + np.sum(signal_mat, axis=0)
-    assert signal.shape == (len(t),)
-    return signal
-
-
-def compute_fft_vector(t, signal, num_freqs=None):
-    n = len(signal)
-    mean_current = np.mean(signal)
-
-    # FFT of the signal (excluding DC component)
-    fft_coeffs = np.fft.rfft(signal) / n
-    freqs = np.fft.rfftfreq(n, d=(t[1] - t[0]))
-
-    # Skip DC (index 0), take up to num_freqs
-    fft_coeffs = fft_coeffs[1:]
-    freqs = freqs[1:]
-    if num_freqs is not None:
-        fft_coeffs = fft_coeffs[:num_freqs]
-        freqs = freqs[:num_freqs]
-
-    # Normalize by mean, then extract real/imag
-    reals = fft_coeffs.real / mean_current * 2  # for one-sided spectrum
-    imags = fft_coeffs.imag / mean_current * 2
-
-    fourier_tensor = np.stack([freqs, reals, imags], axis=1)
-    return np.concatenate([[mean_current], fourier_tensor.flatten()])
-
 
 def binned_psd(t, signal, n_bins=50, fmin=None, fmax=None, pow_min=1e-6):
     fs = 1 / np.mean(np.diff(t))
@@ -101,7 +50,6 @@ def binned_psd(t, signal, n_bins=50, fmin=None, fmax=None, pow_min=1e-6):
 
     return bin_centers, bin_power
 
-
 class ThrusterDataset(Dataset):
     def __init__(
         self,
@@ -117,16 +65,8 @@ class ThrusterDataset(Dataset):
         super().__init__()
         self.dir = Path(dir)
 
-        self.h5_file = self.dir / "data.h5"
-
-        if os.path.exists(self.h5_file):
-            self.data_dir = None
-            with h5py.File(self.h5_file, "r") as f:
-                self.files = list(f.keys())
-        else:
-            self.h5_file = None
-            self.data_dir = self.dir / "data"
-            self.files = os.listdir(self.data_dir)
+        self.data_dir = self.dir / "data"
+        self.files = os.listdir(self.data_dir)
 
         if files is not None:
             filter_files = set(files)
@@ -157,11 +97,6 @@ class ThrusterDataset(Dataset):
         self.min_pow = 1e-6
         # Factor used to normalize power spectra
         self.power_norm_factor = np.abs(np.log(self.min_pow))
-
-        self.f = None
-        if self.fourier_features:
-            self.fourier_cache_file = self.dir / "fourier_cache.h5"
-            self._build_fourier_cache()
 
     def write_metadata(self, path: Path | str):
         path = Path(path)
@@ -208,68 +143,11 @@ class ThrusterDataset(Dataset):
     def __len__(self):
         return len(self.files)
 
-    def _load_raw_signal(self, name):
-        if self.h5_file is None:
-            data = np.load(self.data_dir / name)
-            time = data["time"]
-        else:
-            with h5py.File(self.h5_file, "r") as f:
-                time = f[name]["time"][()]  # type:ignore
-
-        time = torch.tensor(time, dtype=torch.float32)
-        return time[:, 0], time[:, 2]
-
-    def _build_fourier_cache(self):
-        config = {
-            "max_freqs": self.max_freqs,
-            "min_freq": self.min_freq,
-            "max_freq": self.max_freq,
-            "min_pow": self.min_pow,
-        }
-
-        with h5py.File(self.fourier_cache_file, "a") as f:
-            stale = any(f.attrs.get(k) != v for k, v in config.items())
-            if stale:
-                for key in ("names", "vecs"):
-                    if key in f:
-                        del f[key]
-                for k, v in config.items():
-                    f.attrs[k] = v
-
-            if "names" in f:
-                index = {name: i for i, name in enumerate(f["names"].asstr()[()])}  # type:ignore
-            else:
-                index = {}
-
-            missing = [name for name in self.files if name not in index]
-
-            if missing:
-                vecs = np.stack([
-                    self._signal_to_vec(*self._load_raw_signal(name)).numpy()
-                    for name in tqdm(missing, desc="Computing fourier features")
-                ])
-
-                old_n, vec_len = len(index), vecs.shape[1]
-                new_n = old_n + len(missing)
-
-                if "vecs" not in f:
-                    f.create_dataset("vecs", shape=(0, vec_len), maxshape=(None, vec_len), dtype=np.float32, chunks=(1024, vec_len))
-                    f.create_dataset("names", shape=(0,), maxshape=(None,), dtype=h5py.string_dtype(encoding="utf-8"), chunks=(1024,))
-
-                f["vecs"].resize((new_n, vec_len))  # type:ignore
-                f["names"].resize((new_n,))  # type:ignore
-                f["vecs"][old_n:new_n] = vecs  # type:ignore
-                f["names"][old_n:new_n] = missing  # type:ignore
-
-                for i, name in enumerate(missing):
-                    index[name] = old_n + i
-
-        self.fourier_index = index
-
-    def _signal_to_vec(self, t, signal):
-        num_pts = len(t)
-        t = t[num_pts // 2 :]
-        signal = signal[num_pts // 2 :]
+    def _signal_to_vec(self, t, signal, truncate=True):
+        if truncate:
+            num_pts = len(t)
+            t = t[num_pts // 2 :]
+            signal = signal[num_pts // 2 :]
 
         mean = signal.mean()
         rms = torch.maximum(signal.std(), torch.tensor([1e-2]))
@@ -284,18 +162,9 @@ class ThrusterDataset(Dataset):
 
         return torch.concat([torch.tensor([mean_norm, rms_norm]), bin_powers])
 
-    def _init_file(self):
-        if self.f is None:
-            self.f = h5py.File(self.h5_file, "r", rdcc_nbytes=1024**3)
-
     def __getitem__(self, idx):
-        if self.h5_file is None:
-            data = np.load(self.data_dir / self.files[idx])
-        else:
-            self._init_file()
-            assert self.f is not None
-            grp = self.f[self.files[idx]]
-            data = {k: grp[k][()] for k in grp}  # type:ignore
+        filename = self.data_dir / self.files[idx]
+        data = np.load(filename)
 
         tensor = torch.tensor(data["data"], dtype=torch.float32)
         params = torch.tensor(data["params"], dtype=torch.float32)
@@ -328,9 +197,15 @@ class ThrusterDataset(Dataset):
             assert tensor.shape[1] == 128
 
         if self.fourier_features:
-            cache_idx = self.fourier_index[self.files[idx]]
-            with h5py.File(self.fourier_cache_file, "r") as f:  # re-open per worker
-                fourier = torch.tensor(f["vecs"][cache_idx], dtype=torch.float32)  # type:ignore
+            if "fourier_amplitudes" in data:
+                fourier = torch.tensor(data["fourier_amplitudes"], dtype=torch.float32)
+            else:
+                # Get fourier info and save to file
+                time = torch.tensor(data["time"], dtype=torch.float32)
+                t_vals, I_vals = time[:, 0], time[:, 2]
+                fourier = self._signal_to_vec(t_vals, I_vals)
+                np.savez(filename, **data, fourier_amplitudes=fourier)
+
             params = torch.concat((params, fourier))
 
         return self.files[idx], params, tensor

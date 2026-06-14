@@ -29,6 +29,7 @@ parser.add_argument("--test-dir", type=Path)
 parser.add_argument("--scalars-in-tensor", action="store_true")
 parser.add_argument("--fourier-features", action="store_true")
 
+
 def build_observation(dataset, observations, param_vec=None, default_stddev=1.0, device="cpu", verbose=False):
     _, data_params, data_tensor = dataset[0]
 
@@ -122,6 +123,7 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0,
 
     return obs_A, obs_y, obs_var, param_vec
 
+
 # =====================================================
 # Conditioning on observations and PDEs
 # =====================================================
@@ -132,12 +134,13 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
     var = observation["var"]
     H = observation["operator"]
 
-    #proc_var = 0.1 * t**2 / (t**2 + 1)
-    #proc_var = 0.0
-    f = lambda t: t**2 / (t**2 + 1)
-    t_end = 0.1
-    # proc_var = f(t-t_end) if t > t_end else 0.0
-    proc_var = 0.25 * f(t)
+    if obs_vec is None:
+        return 0.0
+
+    def proc_var_fn(t):
+        return t**2 / (t**2 + 1)
+
+    proc_var = 0.25 * proc_var_fn(t)
 
     # =====================================================
     # Diffusion posterior sampling (get observation loss)
@@ -150,20 +153,28 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
 
     return score
 
-def parse_observation(shape, args, scalars_in_tensor, fourier_features, condition_vec=None, device='cpu', verbose=False):
-    _, _, resolution = shape
+
+def parse_observation(
+    shape, args, scalars_in_tensor, fourier_features, condition_vec=None, device="cpu", verbose=False
+):
+    num_samples, _, resolution = shape
     # Determine if we're doing condional or unconditional sampling
     # If there is an `observation` field, then we're conditioning on a partial observation of that simulation
     # If not, we're sampling unconditionally
     # If we sample unconditonally, we need to get some scalar parameters to condition on
     # These are drawn from the same distributions as the training set
     if (uncond_dir := args.get("unconditional_data_dir", None)) is not None:
-        unconditional_dataset = ThrusterDataset(uncond_dir, downsample_res=resolution, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features)
+        unconditional_dataset = ThrusterDataset(
+            uncond_dir,
+            downsample_res=resolution,
+            scalars_in_tensor=scalars_in_tensor,
+            fourier_features=fourier_features,
+        )
         param_vec = unconditional_dataset.sample_params(num_samples=num_samples, device=device)
     else:
         unconditional_dataset = None
         param_vec = None
-    
+
     if condition_vec is not None:
         param_vec = torch.tensor(condition_vec, device=device)
 
@@ -176,14 +187,14 @@ def parse_observation(shape, args, scalars_in_tensor, fourier_features, conditio
         # Load data for conditioning
         dataset = ThrusterDataset(obs_file, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features)
 
-        if (obs_params:= obs_args.get("params", None)) is not None:
+        if (obs_params := obs_args.get("params", None)) is not None:
             if set(obs_params) != set(dataset.params()) and param_vec is None:
                 # We didn't completely specify the parameter vector and have nothing to fall back on
                 raise RuntimeError("Incomplete parameter specification without data directory. Exiting.")
 
         elif "params" not in obs_args and param_vec is None:
             # Use the parameter vector from the ref simulation
-            param_vec = None # This is redundant, and this entire code must be rewritten
+            param_vec = None  # This is redundant, and this entire code must be rewritten
 
         obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, param_vec, device=device)
         obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
@@ -195,17 +206,24 @@ def parse_observation(shape, args, scalars_in_tensor, fourier_features, conditio
         obs = dict(operator=None, var=None, data=None)
 
     return obs, dataset, param_vec
-    
+
 
 def sample(
-    model, shape,
-    scalars_in_tensor, fourier_features,
-    args, condition_vec=None, save_to_file=True,
-    device="cpu", verbose=False
+    model,
+    shape,
+    scalars_in_tensor,
+    fourier_features,
+    args,
+    condition_vec=None,
+    save_to_file=True,
+    device="cpu",
+    verbose=False,
 ):
-    num_samples, _, resolution = shape
+    num_samples, _, _ = shape
 
-    obs, dataset, param_vec = parse_observation(shape, args, scalars_in_tensor, fourier_features, condition_vec, device, verbose=verbose)
+    obs, dataset, param_vec = parse_observation(
+        shape, args, scalars_in_tensor, fourier_features, condition_vec, device, verbose=verbose
+    )
 
     # Timestep args
     num_steps = args.get("num_steps", 256)
@@ -216,28 +234,23 @@ def sample(
     # Set up sampler
     integrator = RK2Integrator(
         model,
-        guidance_score_fn = ObservationGuidance(
+        guidance_score_fn=ObservationGuidance(
             type="constant",
             obs_score=guidance_score,
             observation=obs,
-            guidance_start_time=args.get("guidance_start_time", float('inf'))
+            guidance_start_time=args.get("guidance_start_time", float("inf")),
         ),
-        method = args.get("method", None),
-        rk_alpha = args.get("rk_alpha", 0.5),
-        S_churn = args.get("S_churn", 0.0) / num_steps,
-        S_tmin = args.get("S_tmin", 0.0),
-        S_tmax = args.get("S_tmax", float('inf')),
-        S_noise = args.get("S_noise", 1.003),
+        method=args.get("method", None),
+        rk_alpha=args.get("rk_alpha", 0.5),
+        S_churn=args.get("S_churn", 0.0) / num_steps,
+        S_tmin=args.get("S_tmin", 0.0),
+        S_tmax=args.get("S_tmax", float("inf")),
+        S_noise=args.get("S_noise", 1.003),
     )
     sampler = EDMSampler(shape, num_steps, noise_min, noise_max, exponent)
 
     # Sample, saving intermediate steps for visualization and debugging
-    output = sampler.sample(
-        integrator,
-        showprogress=True,
-        device=device,
-        model_args=dict(condition_vector=param_vec)
-    )
+    output = sampler.sample(integrator, showprogress=True, device=device, model_args=dict(condition_vector=param_vec))
 
     final = output[-1, ...]
 
@@ -245,15 +258,15 @@ def sample(
         # Save generated samples
         out_dir = Path(args["out_dir"])
         data_dir = out_dir / "data"
-    
+
         if args.get("replace_samples", False) and data_dir.exists():
             shutil.rmtree(data_dir)
-    
+
         # Make folder and write metadata
         os.makedirs(out_dir, exist_ok=True)
-    
+
         dataset.write_metadata(out_dir)
-    
+
         # Write final sample data to independent output dirs
         os.makedirs(data_dir, exist_ok=True)
         params_cpu = param_vec.cpu().numpy()
@@ -261,13 +274,16 @@ def sample(
             file = data_dir / f"{uuid.uuid4()}.npz"
             tens = final[i, :].cpu().numpy()
             np.savez(file, data=tens, params=params_cpu)
-            
+
         # Write samples at all iterations to a single tensor
         np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
 
     return output
 
-def infer(model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None, save_to_file=True, verbose=False):
+
+def infer(
+    model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None, save_to_file=True, verbose=False
+):
     device = utils.get_device()
 
     # Load model and config from checkpoint
@@ -300,7 +316,7 @@ def infer(model, sampling_config, scalars_in_tensor, fourier_features, condition
 
     full_batches = math.floor(num_samples / batch_size)
     remainder = num_samples - full_batches * batch_size
-    batches = [batch_size for i in range(math.floor(num_samples / batch_size))]
+    batches = [batch_size for _ in range(math.floor(num_samples / batch_size))]
     if remainder > 0:
         batches.append(remainder)
 
@@ -313,8 +329,10 @@ def infer(model, sampling_config, scalars_in_tensor, fourier_features, condition
     for i, batch_num_samples in enumerate(batches):
         size = (batch_num_samples, channels, resolution)
         batch_samples = sample(
-            model, size,
-            scalars_in_tensor, fourier_features,
+            model,
+            size,
+            scalars_in_tensor,
+            fourier_features,
             sampling_config,
             condition_vec=condition_vec,
             save_to_file=save_to_file,
@@ -325,11 +343,11 @@ def infer(model, sampling_config, scalars_in_tensor, fourier_features, condition
 
         # Make sure we don't remove old samples
         sampling_config["replace_samples"] = False
-    
+
     # Concatenate along batch dimension
     sample_tensor = torch.concatenate(samples, dim=1)
     return sample_tensor
-    
+
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -351,9 +369,7 @@ if __name__ == "__main__":
     if args.batch_size is not None:
         sampling_config["batch_size"] = args.batch_size
 
-    scalars_in_tensor=args.scalars_in_tensor
-    fourier_features=args.fourier_features
+    scalars_in_tensor = args.scalars_in_tensor
+    fourier_features = args.fourier_features
 
-    infer(args.model, sampling_config, scalars_in_tensor, fourier_features, args.out_dir, args.num_steps, args.num_samples, args.batch_size)
-
-
+    infer(args.model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None)
