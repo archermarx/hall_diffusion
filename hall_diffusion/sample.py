@@ -273,7 +273,7 @@ def sample(
         for i in range(num_samples):
             file = data_dir / f"{uuid.uuid4()}.npz"
             tens = final[i, :].cpu().numpy()
-            np.savez(file, data=tens, params=params_cpu)
+            np.savez(file, data=tens, params=params_cpu[i, :])
 
         # Write samples at all iterations to a single tensor
         np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
