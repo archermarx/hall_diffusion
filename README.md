@@ -58,6 +58,47 @@ First create a virtual environment with
 
 Then, type `pip install .` to install the required dependencies
 
+### Compute device selection
+
+Training and sampling accept `--device auto|cpu|mps|cuda|xpu`. The default,
+`auto`, selects the first available backend in this order: CUDA, MPS, XPU,
+then CPU.
+
+For example, add the explicit MPS selection to a sampling command:
+
+```
+... --device mps
+```
+
+Use `--device cpu` for an explicit CPU run. An explicitly requested
+accelerator exits with an error if it is unavailable rather than silently
+falling back to CPU.
+
+To verify that PyTorch can access MPS:
+
+```
+uv run python -c "import torch; print(torch.backends.mps.is_available())"
+```
+
+The portability suite separates backend-independent checks from tests that
+require a real MPS device:
+
+```
+uv run pytest tests/portability -m "not mps"
+uv run pytest tests/portability -m mps
+```
+
+To include the CUDA-saved checkpoint integration test:
+
+```
+HALL_DIFFUSION_TEST_CHECKPOINT=/path/to/checkpoint.pth.tar \
+uv run pytest tests/portability -m mps
+```
+
+The MPS suite is intended to run without `PYTORCH_ENABLE_MPS_FALLBACK`.
+CUDA control flow is tested locally with mocks; real CUDA sampling and
+training must also be tested on a CUDA machine before merge.
+
 ## Data generation
 
 The data generation has two parts. First, we run `generate_data.jl` to produce a large number of simulations.
