@@ -28,6 +28,12 @@ parser.add_argument("-s", "--num-steps", type=int)
 parser.add_argument("--test-dir", type=Path)
 parser.add_argument("--scalars-in-tensor", action="store_true")
 parser.add_argument("--fourier-features", action="store_true")
+parser.add_argument(
+    "--device",
+    choices=("auto", "cpu", "mps", "cuda", "xpu"),
+    default="auto",
+    help="Compute backend to use (default: auto; priority: cuda, mps, xpu, cpu)",
+)
 
 
 def build_observation(dataset, observations, param_vec=None, default_stddev=1.0, device="cpu", verbose=False):
@@ -282,12 +288,20 @@ def sample(
 
 
 def infer(
-    model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None, save_to_file=True, verbose=False
+    model,
+    sampling_config,
+    scalars_in_tensor,
+    fourier_features,
+    condition_vec=None,
+    save_to_file=True,
+    verbose=False,
+    device="auto",
 ):
-    device = utils.get_device()
+    device = utils.get_device(device) if isinstance(device, str) else device
+    print(f"Selected device: {device}")
 
     # Load model and config from checkpoint
-    model_dict = torch.load(model, weights_only=False)
+    model_dict = utils.load_checkpoint(model, device)
     model_config = model_dict["model_config"]
     if "label_dim" in model_config:
         model_config["condition_dim"] = model_config.pop("label_dim")
@@ -372,4 +386,11 @@ if __name__ == "__main__":
     scalars_in_tensor = args.scalars_in_tensor
     fourier_features = args.fourier_features
 
-    infer(args.model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None)
+    infer(
+        args.model,
+        sampling_config,
+        scalars_in_tensor,
+        fourier_features,
+        condition_vec=None,
+        device=args.device,
+    )
