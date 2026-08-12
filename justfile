@@ -12,7 +12,7 @@ MCMC_DIR := "mcmc_reference/mcmc_3charge/normalized"
 
 # Sample from a provided sampling config
 sample target:
-    uv run hall_diffusion/sample.py {{MODEL}} configs/sample_{{target}}.toml -o samples/{{target}}
+    uv run python -m hall_diffusion.sample {{MODEL}} configs/sample_{{target}}.toml -o samples/{{target}}
 
 # Run experimental data processing using perez-luna or roberts methods
 calc target:

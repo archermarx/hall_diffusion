@@ -56,6 +56,8 @@ def get_device(requested="auto"):
 
 
 def load_checkpoint(path, device):
+    sys.modules.setdefault("utils", sys.modules["hall_diffusion.utils"])
+
     if device.type == "cuda":
         return torch.load(path, weights_only=False)
 
