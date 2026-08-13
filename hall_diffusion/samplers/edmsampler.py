@@ -138,6 +138,8 @@ class EDMSampler():
                 continue
 
             t_prev = timesteps[step_idx - 1]
+            if x.device.type == "mps":
+                t_prev = t_prev.clone()  # Work around pytorch/pytorch#193057.
             pbar.set_description(f"Noise level: {t_prev:.4f}->{t:.4f}")
 
             x = integrator.step_with_guidance(x, t_prev, t, model_args=model_args)

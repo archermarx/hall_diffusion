@@ -36,7 +36,15 @@ parser.add_argument(
 )
 
 
-def build_observation(dataset, observations, param_vec=None, default_stddev=1.0, device="cpu", verbose=False):
+def build_observation(
+    dataset,
+    observations,
+    num_samples,
+    param_vec=None,
+    default_stddev=1.0,
+    device="cpu",
+    verbose=False,
+):
     _, data_params, data_tensor = dataset[0]
 
     (num_channels, resolution) = data_tensor.shape
@@ -120,6 +128,7 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0,
     # If no param vec specified here, we use the one from the reference dataset
     if param_vec is None:
         param_vec = data_params.detach().clone().to(device)
+        param_vec = param_vec.unsqueeze(0).repeat(num_samples, 1)
 
     # Read scalar parameters if present
     if (params := observations.get("params", None)) is not None:
@@ -202,7 +211,9 @@ def parse_observation(
             # Use the parameter vector from the ref simulation
             param_vec = None  # This is redundant, and this entire code must be rewritten
 
-        obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, param_vec, device=device)
+        obs_operator, obs_data, obs_var, param_vec = build_observation(
+            dataset, obs_args, num_samples, param_vec, device=device
+        )
         obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
     else:
         if param_vec is None or unconditional_dataset is None:
