@@ -27,30 +27,46 @@ def paths_to_strings(d: dict):
 def get_script_dir():
     return Path(os.path.dirname(os.path.realpath(sys.argv[0])))
 
-def get_device():
-    # Device setup
-    device = torch.device("cpu")
-    # print("get_device called!")
-    # traceback.print_stack()
+def get_device(requested="auto"):
+    supported = ("auto", "cpu", "mps", "cuda", "xpu")
+    if requested not in supported:
+        raise ValueError(f"Device must be one of: {', '.join(supported)}")
 
-    if torch.backends.mps.is_available():
-        # Apple metal performance shaders
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        # NVIDIA CUDA (or AMD ROCM)
-        device = torch.device("cuda")
+    available = {
+        "cpu": True,
+        "mps": torch.backends.mps.is_available(),
+        "cuda": torch.cuda.is_available(),
+        "xpu": torch.xpu.is_available(),
+    }
+
+    if requested == "auto":
+        requested = next(
+            (name for name in ("cuda", "mps", "xpu") if available[name]),
+            "cpu",
+        )
+    elif not available[requested]:
+        raise RuntimeError(f"Requested device '{requested}' is not available.")
+
+    device = torch.device(requested)
+    if device.type == "cuda":
         print(f"Number of GPUs: {torch.cuda.device_count()}")
         print(f"Current GPU name: {torch.cuda.get_device_name(0)}")
-    elif torch.xpu.is_available():
-        # Intel XPU
-        device = torch.device("xpu")
 
     return device
+
+
+def load_checkpoint(path, device):
+    sys.modules.setdefault("utils", sys.modules["hall_diffusion.utils"])
+
+    if device.type == "cuda":
+        return torch.load(path, weights_only=False)
+
+    return torch.load(path, weights_only=False, map_location="cpu")
 
 def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
     x = obs[field].get("x", "all")
     y = obs[field].get("y", None)
-        
+
     if x == "all":
         x_new = grid
         indices = np.arange(len(x_new))
@@ -62,7 +78,7 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
             j = bisect.bisect_left(grid, _x)
             indices[i] = j
             x_new[i] = grid[j]
-    
+
     assert (y is None) or (len(x) == len(y)) or len(y) == 1
 
     if y is not None:
@@ -99,7 +115,7 @@ def read_observation(obs):
 
     if "extra" in obs_dict:
         obs_dict.update(read_observation(obs_dict["extra"]))
-                        
+
     return obs_dict
 
 def get_logger(name: str, filename: str | None = None, level: int = logging.DEBUG) -> logging.Logger:

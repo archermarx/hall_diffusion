@@ -256,7 +256,23 @@ def save_checkpoint(
     visualization.plot_training_progress(log_file, out_dir, evaluation_iters, state.outlier_inds)
 
 
+def amp_enabled(device, requested):
+    return bool(requested and device.type == "cuda")
+
+
+def create_grad_scaler(device, enabled):
+    if not amp_enabled(device, enabled):
+        return None
+    return torch.amp.GradScaler("cuda", enabled=True)
+
+
 def train(args):
+    global DEVICE
+    requested_device = getattr(args, "device", "auto")
+    if requested_device != "auto":
+        DEVICE = utils.get_device(requested_device)
+    print(f"Selected device: {DEVICE}")
+
     config_file = args.config
     logger = utils.get_logger(__name__, args.log_file)
 
@@ -271,7 +287,7 @@ def train(args):
     batch_size = train_args["batch_size"]
     condition_dropout = train_args.get("condition_dropout", 0.0)  # Condition dropout disabled by default
     evaluation_iters = train_args["eval_freq"]
-    use_amp = train_args.get("use_amp", True)
+    use_amp = amp_enabled(DEVICE, train_args.get("use_amp", True))
     load_workers = train_args.get("load_workers", 2)
     prefetch_factor = train_args.get("prefetch_factor", 4)
 
@@ -387,7 +403,7 @@ def train(args):
     optimizer = optim.AdamW(
         [p for p in model.get_trainable_params()], lr=ref_lr, weight_decay=weight_decay, betas=betas
     )
-    scaler = torch.amp.grad_scaler.GradScaler() if AMP_DTYPE == torch.float16 else None
+    scaler = create_grad_scaler(DEVICE, use_amp and AMP_DTYPE == torch.float16)
     logger.info(f"AMP dtype: {AMP_DTYPE}, grad scaler: {'enabled' if scaler is not None else 'disabled'}")
 
     # ---------------------------------------------
@@ -401,7 +417,7 @@ def train(args):
     # Load checkpoint if found
     if load_checkpoint and os.path.exists(checkpoint_file):
         # Load checkpoint
-        ckpt = torch.load(checkpoint_file, weights_only=False)
+        ckpt = utils.load_checkpoint(checkpoint_file, DEVICE)
         model.load_state_dict(ckpt["model"], strict=False)
 
         logger.info("Model loaded from checkpoint")
@@ -633,6 +649,12 @@ if __name__ == "__main__":
         default=None,
     )
     parser.add_argument("--log-file", type=str, help="File to which logging info should be written", default=None)
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "mps", "cuda", "xpu"),
+        default="auto",
+        help="Compute backend to use (default: auto; priority: cuda, mps, xpu, cpu)",
+    )
     args = parser.parse_args()
 
     train(args)

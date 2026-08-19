@@ -28,9 +28,23 @@ parser.add_argument("-s", "--num-steps", type=int)
 parser.add_argument("--test-dir", type=Path)
 parser.add_argument("--scalars-in-tensor", action="store_true")
 parser.add_argument("--fourier-features", action="store_true")
+parser.add_argument(
+    "--device",
+    choices=("auto", "cpu", "mps", "cuda", "xpu"),
+    default="auto",
+    help="Compute backend to use (default: auto; priority: cuda, mps, xpu, cpu)",
+)
 
 
-def build_observation(dataset, observations, param_vec=None, default_stddev=1.0, device="cpu", verbose=False):
+def build_observation(
+    dataset,
+    observations,
+    num_samples,
+    param_vec=None,
+    default_stddev=1.0,
+    device="cpu",
+    verbose=False,
+):
     _, data_params, data_tensor = dataset[0]
 
     (num_channels, resolution) = data_tensor.shape
@@ -114,6 +128,7 @@ def build_observation(dataset, observations, param_vec=None, default_stddev=1.0,
     # If no param vec specified here, we use the one from the reference dataset
     if param_vec is None:
         param_vec = data_params.detach().clone().to(device)
+        param_vec = param_vec.unsqueeze(0).repeat(num_samples, 1)
 
     # Read scalar parameters if present
     if (params := observations.get("params", None)) is not None:
@@ -199,7 +214,9 @@ def parse_observation(
             # Use the parameter vector from the ref simulation
             param_vec = None  # This is redundant, and this entire code must be rewritten
 
-        obs_operator, obs_data, obs_var, param_vec = build_observation(dataset, obs_args, param_vec, device=device)
+        obs_operator, obs_data, obs_var, param_vec = build_observation(
+            dataset, obs_args, num_samples, param_vec, device=device
+        )
         obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
     else:
         if param_vec is None or unconditional_dataset is None:
@@ -288,12 +305,20 @@ def sample(
 
 
 def infer(
-    model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None, save_to_file=True, verbose=False
+    model,
+    sampling_config,
+    scalars_in_tensor,
+    fourier_features,
+    condition_vec=None,
+    save_to_file=True,
+    verbose=False,
+    device="auto",
 ):
-    device = utils.get_device()
+    device = utils.get_device(device) if isinstance(device, str) else device
+    print(f"Selected device: {device}")
 
     # Load model and config from checkpoint
-    model_dict = torch.load(model, weights_only=False)
+    model_dict = utils.load_checkpoint(model, device)
     model_config = model_dict["model_config"]
     if "label_dim" in model_config:
         model_config["condition_dim"] = model_config.pop("label_dim")
@@ -378,4 +403,11 @@ if __name__ == "__main__":
     scalars_in_tensor = args.scalars_in_tensor
     fourier_features = args.fourier_features
 
-    infer(args.model, sampling_config, scalars_in_tensor, fourier_features, condition_vec=None)
+    infer(
+        args.model,
+        sampling_config,
+        scalars_in_tensor,
+        fourier_features,
+        condition_vec=None,
+        device=args.device,
+    )
