@@ -176,7 +176,10 @@ def parse_observation(
         param_vec = None
 
     if condition_vec is not None:
-        param_vec = torch.tensor(condition_vec, device=device)
+        if not isinstance(condition_vec, torch.Tensor):
+            param_vec = torch.tensor(condition_vec, device=device)
+        else:
+            param_vec = condition_vec.to(device)
 
     if verbose:
         print("sampling args: ", args)
@@ -273,7 +276,10 @@ def sample(
         for i in range(num_samples):
             file = data_dir / f"{uuid.uuid4()}.npz"
             tens = final[i, :].cpu().numpy()
-            np.savez(file, data=tens, params=params_cpu[i, :])
+            if len(params_cpu.shape) == 1:
+                np.savez(file, data=tens, params=params_cpu)
+            else:
+                np.savez(file, data=tens, params=params_cpu[:, i])
 
         # Write samples at all iterations to a single tensor
         np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
