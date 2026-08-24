@@ -10,17 +10,18 @@
 
 # Model modified from above to use 1D convolutions.
 
-import torch
-import torch.nn as nn
-import numpy as np
-import tomllib
 import argparse
+
+import numpy as np
+import torch
+from torch import nn
 
 # ----------------------------------------------------------------------------
 # Cached construction of constant tensors. Avoids CPU=>GPU copy when the
 # same constant is used multiple times.
 
 _constant_cache = dict()
+
 
 def constant(value, shape=None, dtype=None, device=None, memory_format=None):
     value = np.asarray(value)
@@ -57,9 +58,7 @@ def const_like(ref, value, shape=None, dtype=None, device=None, memory_format=No
         dtype = ref.dtype
     if device is None:
         device = ref.device
-    return constant(
-        value, shape=shape, dtype=dtype, device=device, memory_format=memory_format
-    )
+    return constant(value, shape=shape, dtype=dtype, device=device, memory_format=memory_format)
 
 
 # ----------------------------------------------------------------------------
@@ -92,13 +91,9 @@ def resample1d(x, f=[1, 1], mode="keep"):
     f = const_like(x, f)
     c = x.shape[1]
     if mode == "down":
-        return nn.functional.conv1d(
-            x, f.tile([c, 1, 1]), groups=c, stride=2, padding=(pad,)
-        )
+        return nn.functional.conv1d(x, f.tile([c, 1, 1]), groups=c, stride=2, padding=(pad,))
     assert mode == "up"
-    return nn.functional.conv_transpose1d(
-        x, (f * 4).tile([c, 1, 1]), groups=c, stride=2, padding=(pad,)
-    )
+    return nn.functional.conv_transpose1d(x, (f * 4).tile([c, 1, 1]), groups=c, stride=2, padding=(pad,))
 
 
 # ----------------------------------------------------------------------------
@@ -157,9 +152,7 @@ class MPConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel):
         super().__init__()
         self.out_channels = out_channels
-        self.weight = nn.Parameter(
-            torch.randn(out_channels, in_channels, *kernel)
-        )
+        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, *kernel))
 
     def forward(self, x, gain=1):
         w = self.weight.to(torch.float32)
@@ -189,7 +182,7 @@ class Block(nn.Module):
         resample_mode="keep",  # Resampling: 'keep', 'up', or 'down'.
         resample_filter=[1, 1],  # Resampling filter.
         attention=False,  # Include self-attention?
-        channels_per_head=64,  # Number of channels per attention head.
+        channels_per_head=32,  # Number of channels per attention head.
         res_balance=0.3,  # Balance between main branch (0) and residual branch (1).
         attn_balance=0.3,  # Balance between main branch (0) and self-attention (1).
         clip_act=256,  # Clip output activations. None = do not clip.
@@ -212,21 +205,9 @@ class Block(nn.Module):
         )
         self.emb_linear = MPConv(emb_channels, out_channels, kernel=[])
         self.conv_res1 = MPConv(out_channels, out_channels, kernel=[kernel_width])
-        self.conv_skip = (
-            MPConv(in_channels, out_channels, kernel=[1])
-            if in_channels != out_channels
-            else None
-        )
-        self.attn_qkv = (
-            MPConv(out_channels, out_channels * 3, kernel=[1])
-            if self.num_heads != 0
-            else None
-        )
-        self.attn_proj = (
-            MPConv(out_channels, out_channels, kernel=[1])
-            if self.num_heads != 0
-            else None
-        )
+        self.conv_skip = MPConv(in_channels, out_channels, kernel=[1]) if in_channels != out_channels else None
+        self.attn_qkv = MPConv(out_channels, out_channels * 3, kernel=[1]) if self.num_heads != 0 else None
+        self.attn_proj = MPConv(out_channels, out_channels, kernel=[1]) if self.num_heads != 0 else None
 
     def forward(self, x, emb):
         # Main branch.
@@ -270,6 +251,7 @@ class Block(nn.Module):
 # ----------------------------------------------------------------------------
 # Shared encoder construction helpers.
 # Used by both UNet and ControlNet to avoid duplicated architecture code.
+
 
 def _encoder_channel_dims(base_channels, channel_mult, channel_mult_noise, channel_mult_emb):
     """Compute (cblock, cnoise, cemb) from the standard multiplier args."""
@@ -318,7 +300,7 @@ def _encoder_blocks(resolution, in_channels, cblock, cemb, num_blocks, attn_reso
             # Increases number of channels from in_channels + 1 to channels
             cin, cout = cout, channels
             enc[f"{res}x{res}_conv"] = MPConv(cin, cout, kernel=[3])
-            #yield f"{res}x{res}_conv", MPConv(cin, cout, kernel=[3]), cout
+            # yield f"{res}x{res}_conv", MPConv(cin, cout, kernel=[3]), cout
         else:
             # [EncD]
             # Encoder block that downsamples
@@ -328,7 +310,9 @@ def _encoder_blocks(resolution, in_channels, cblock, cemb, num_blocks, attn_reso
             # [Enc(A)]
             # Encoder block (with or without attention)
             cin, cout = cout, channels
-            enc[f"{res}x{res}_block{idx}"] = Block(cin, cout, cemb, flavor="enc", attention=(res in attn_resolutions), **block_kwargs)
+            enc[f"{res}x{res}_block{idx}"] = Block(
+                cin, cout, cemb, flavor="enc", attention=(res in attn_resolutions), **block_kwargs
+            )
             # yield (
             #     f"{res}x{res}_block{idx}",
             #     Block(cin, cout, cemb, flavor="enc", attention=(res in attn_resolutions), **block_kwargs),
@@ -345,6 +329,7 @@ def _encoder_blocks(resolution, in_channels, cblock, cemb, num_blocks, attn_reso
 # ----------------------------------------------------------------------------
 # EDM2 U-Net model (Figure 21).
 
+
 class UNet(nn.Module):
     def __init__(
         self,
@@ -359,13 +344,11 @@ class UNet(nn.Module):
         attn_resolutions=[16, 8],  # List of resolutions with self-attention.
         label_balance=0.5,  # Balance between noise embedding (0) and class embedding (1).
         concat_balance=0.5,  # Balance between skip connections (0) and main path (1).
-        include_decoder=True, # Whether to include the decoder block (useful for ControlNets)
+        include_decoder=True,  # Whether to include the decoder block (useful for ControlNets)
         **block_kwargs,  # Arguments for Block.
     ):
         super().__init__()
-        cblock, cnoise, cemb = _encoder_channel_dims(
-            base_channels, channel_mult, channel_mult_noise, channel_mult_emb
-        )
+        cblock, cnoise, cemb = _encoder_channel_dims(base_channels, channel_mult, channel_mult_noise, channel_mult_emb)
         self.resolution = resolution
         self.in_channels = in_channels
         self.base_channels = base_channels
@@ -383,7 +366,9 @@ class UNet(nn.Module):
         self.emb_fourier, self.emb_noise, self.emb_label = _build_embeddings(cnoise, cemb, condition_dim)
 
         # Construct encoder stage
-        self.enc, cout = _encoder_blocks(resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs)
+        self.enc, cout = _encoder_blocks(
+            resolution, in_channels, cblock, cemb, num_blocks, attn_resolutions, block_kwargs
+        )
 
         if include_decoder:
             # Decoder.
@@ -395,11 +380,15 @@ class UNet(nn.Module):
                     self.dec[f"{res}x{res}_in0"] = Block(cout, cout, cemb, flavor="dec", attention=True, **block_kwargs)
                     self.dec[f"{res}x{res}_in1"] = Block(cout, cout, cemb, flavor="dec", **block_kwargs)
                 else:
-                    self.dec[f"{res}x{res}_up"] = Block(cout, cout, cemb, flavor="dec", resample_mode="up", **block_kwargs)
+                    self.dec[f"{res}x{res}_up"] = Block(
+                        cout, cout, cemb, flavor="dec", resample_mode="up", **block_kwargs
+                    )
                 for idx in range(num_blocks + 1):
                     cin = cout + skips.pop()
                     cout = channels
-                    self.dec[f"{res}x{res}_block{idx}"] = Block(cin, cout, cemb, flavor="dec", attention=(res in attn_resolutions), **block_kwargs)
+                    self.dec[f"{res}x{res}_block{idx}"] = Block(
+                        cin, cout, cemb, flavor="dec", attention=(res in attn_resolutions), **block_kwargs
+                    )
 
             # Output convolution
             self.out_conv = MPConv(cout, in_channels, kernel=[3])
@@ -408,7 +397,11 @@ class UNet(nn.Module):
         # Embedding.
         emb = self.emb_noise(self.emb_fourier(noise_labels))
         if self.emb_label is not None:
-            emb = mp_sum(emb, self.emb_label(class_labels * np.sqrt(class_labels.shape[1])), t=self.label_balance,)
+            emb = mp_sum(
+                emb,
+                self.emb_label(class_labels * np.sqrt(class_labels.shape[1])),
+                t=self.label_balance,
+            )
         emb = mp_silu(emb)
         return emb
 
@@ -450,6 +443,7 @@ class UNet(nn.Module):
 # ----------------------------------------------------------------------------
 # Preconditioning and uncertainty estimation.
 
+
 def get_precondition_factors(noise_std, data_std):
     c_skip = data_std**2 / (noise_std**2 + data_std**2)
     c_out = noise_std * data_std / (noise_std**2 + data_std**2).sqrt()
@@ -483,9 +477,7 @@ class EDM2Denoiser(nn.Module):
     def get_trainable_params(self):
         return self.parameters()
 
-    def forward(
-        self, x, noise_std, condition_vector=None, **unet_kwargs
-    ):
+    def forward(self, x, noise_std, condition_vector=None, **unet_kwargs):
         x = x.to(torch.float32)
         noise_std = noise_std.to(torch.float32).reshape(-1, 1, 1)
         condition_vector = (
@@ -498,7 +490,6 @@ class EDM2Denoiser(nn.Module):
 
         # Preconditioning weights.
         c_in, c_out, c_skip, c_noise = get_precondition_factors(noise_std, self.data_std)
-
 
         # Run the model.
         x_in = c_in * x
@@ -526,6 +517,7 @@ class EDM2Denoiser(nn.Module):
             out = model(x, noise_std, condition_vector=cond_vec)
             print(f"{dim}D: input = {x.shape=}, output = {out.shape=}")
             assert x.shape == out.shape
+
 
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
