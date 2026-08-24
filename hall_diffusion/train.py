@@ -318,8 +318,10 @@ def train(args):
 
     # Decide whether to include fourier features in tensor
     # TODO: remove scalars_in_tensor and fourier_features from this, put in data instead
-    fourier_features = data_cfg.get("fourier_features", False)
-    data_cfg.pop("fourier_features")
+    if "fourier_features" in data_cfg:
+        fourier_features = data_cfg.pop("fourier_features")
+    else:
+        fourier_features = False
 
     if "downsample_res" in data_cfg:
         downsample_res = data_cfg["downsample_res"]

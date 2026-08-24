@@ -5,15 +5,13 @@ import logging
 import torch
 import numpy as np
 import bisect
-import pandas as pd
 import tomllib
-from contextlib import contextmanager
 import pathlib
-from datetime import timedelta
+
 
 def paths_to_strings(d: dict):
     out = {}
-    for (k, v) in d.items():
+    for k, v in d.items():
         if isinstance(v, pathlib.Path) or isinstance(v, pathlib.WindowsPath) or isinstance(v, pathlib.PosixPath):
             out[k] = str(v)
             print(f"Converted path {v} to string.")
@@ -24,8 +22,10 @@ def paths_to_strings(d: dict):
 
     return out
 
+
 def get_script_dir():
     return Path(os.path.dirname(os.path.realpath(sys.argv[0])))
+
 
 def get_device(requested="auto"):
     supported = ("auto", "cpu", "mps", "cuda", "xpu")
@@ -56,12 +56,13 @@ def get_device(requested="auto"):
 
 
 def load_checkpoint(path, device):
-    sys.modules.setdefault("utils", sys.modules["hall_diffusion.utils"])
+    # sys.modules.setdefault("utils", sys.modules["hall_diffusion.utils"])
 
     if device.type == "cuda":
         return torch.load(path, weights_only=False)
 
     return torch.load(path, weights_only=False, map_location="cpu")
+
 
 def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
     x = obs[field].get("x", "all")
@@ -74,7 +75,7 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
         x = np.array(x)
         x_new = np.zeros_like(x)
         indices = np.zeros_like(x, dtype=int)
-        for (i, _x) in enumerate(x):
+        for i, _x in enumerate(x):
             j = bisect.bisect_left(grid, _x)
             indices[i] = j
             x_new[i] = grid[j]
@@ -104,6 +105,7 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
 
     return indices, x_new, y
 
+
 def read_observation(obs):
     if isinstance(obs, str):
         with open(obs, "rb") as fp:
@@ -117,6 +119,7 @@ def read_observation(obs):
         obs_dict.update(read_observation(obs_dict["extra"]))
 
     return obs_dict
+
 
 def get_logger(name: str, filename: str | None = None, level: int = logging.DEBUG) -> logging.Logger:
     logger = logging.getLogger(name)
