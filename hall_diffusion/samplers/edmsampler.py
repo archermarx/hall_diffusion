@@ -31,14 +31,18 @@ class RK2Integrator:
             S_churn: float = 0.0,
             S_tmin: float = 0.0,
             S_tmax: float = float('inf'),
-            S_noise: float = 1.003
+            S_noise: float = 1.003,
+            guidance_second_order_below: float = float('inf'),
         ):
         if method is not None:
             rk_alpha = RK_METHODS[method]
+        if guidance_second_order_below < 0:
+            raise ValueError("guidance_second_order_below must be nonnegative")
 
         self.model = model
         self.guidance_score_fn = guidance_score_fn
         self.rk_alpha = rk_alpha
+        self.guidance_second_order_below = guidance_second_order_below
 
         # Stochasticity parameters
         self.S_churn = S_churn
@@ -47,19 +51,27 @@ class RK2Integrator:
         self.S_tmax = S_tmax
         self.S_noise = S_noise
 
-    def eval_deriv(self, x, t, model_args={}):
+    def eval_deriv(self, x, t, model_args=None, guidance_override=None, compute_guidance=True):
+        model_args = {} if model_args is None else model_args
         ones = torch.ones((x.shape[0], 1, 1), device=x.device)
         x0 = self.model(x, t * ones, **model_args)
         score = (x0 - x) / t**2
+        guidance_score = None
         if self.guidance_score_fn is not None and \
             self.guidance_score_fn.type == "dps" and \
             t < self.guidance_score_fn.guidance_start_time:
-            
-            score += self.guidance_score_fn(x, x0, t)
-        deriv = -score * t
-        return x0, deriv
 
-    def step(self, x, t1, t2, model_args={}):
+            if compute_guidance:
+                guidance_score = self.guidance_score_fn(x, x0, t)
+            else:
+                if guidance_override is None:
+                    raise ValueError("guidance_override is required when compute_guidance is false")
+                guidance_score = guidance_override
+            score += guidance_score
+        deriv = -score * t
+        return x0, deriv, guidance_score
+
+    def step(self, x, t1, t2, model_args=None):
         alpha = self.rk_alpha
         c = 1 / (2 * alpha)
 
@@ -67,30 +79,36 @@ class RK2Integrator:
         h = t2 - t1
 
         # Evaluate denoiser prediction
-        x0, d1 = self.eval_deriv(x, t1, model_args=model_args)
+        x0, d1, guidance1 = self.eval_deriv(x, t1, model_args=model_args)
 
         # Take first step to midpoint
         x_mid, t_mid = x + alpha * h * d1, t1 + alpha * h
 
         # Take second step
         if t_mid != 0:
-            x0_mid, d_mid = self.eval_deriv(x_mid, t_mid, model_args=model_args)
+            recompute_guidance = guidance1 is None or t_mid <= self.guidance_second_order_below
+            _, d_mid, _ = self.eval_deriv(
+                x_mid,
+                t_mid,
+                model_args=model_args,
+                guidance_override=guidance1,
+                compute_guidance=recompute_guidance,
+            )
             x2 = x + h * ((1 - c) * d1 + c * d_mid)
         else:
             x2 = x + h * d1
 
         return x2, x0
 
-    def step_with_guidance(self, x, t1, t2, model_args={}):
+    def step_with_guidance(self, x, t1, t2, model_args=None):
         x = x.detach()
         x.requires_grad = True
-        self.model.zero_grad()
 
         # Add stochasticity if required
         if self.S_churn > 0 and self.S_tmin <= t1 <= self.S_tmax:
             t1, t1_old = (1 + self.gamma) * t1 , t1
             noise_std = (t1**2 - t1_old**2).sqrt() * self.S_noise
-            eps = torch.randn_like(x) * self.S_noise
+            eps = torch.randn_like(x)
             x = x + noise_std * eps
 
         x_pred, x_denoised = self.step(x, t1, t2, model_args=model_args)
@@ -122,16 +140,20 @@ class EDMSampler():
         timesteps[-1] = 0
         return timesteps
 
-    def sample(self, integrator, showprogress=True, device=None, model_args={}):
+    def sample(self, integrator, showprogress=True, device=None, model_args=None, record_trajectory=False):
+        model_args = {} if model_args is None else model_args
         # Generate initial noise and timesteps
         x = self.noise_max * torch.randn(self.shape, device=device)
-        timesteps = self.get_noise_steps()
+        # Move the schedule once instead of repeatedly copying CPU scalars into
+        # CUDA kernels throughout the denoiser and integration arithmetic.
+        timesteps = self.noise_steps.to(device)
 
         (b, c, w) = x.shape
         num_steps = len(timesteps)
 
-        output = torch.zeros((num_steps, b, c, w))
-        output[0, ...] = x
+        output = torch.empty((num_steps, b, c, w)) if record_trajectory else None
+        if record_trajectory:
+            output[0] = x
 
         for step_idx, t in enumerate(pbar := tqdm(timesteps, disable=(not showprogress))):
             if step_idx == 0:
@@ -149,7 +171,10 @@ class EDMSampler():
                 print("NaN/Inf detected during sampling. Exiting")
                 exit(1)
 
-            output[step_idx, ...] = x
+            if record_trajectory:
+                output[step_idx] = x
 
-        output[-1, ...] = x
-        return output
+        if record_trajectory:
+            output[-1] = x
+            return output
+        return x.detach().cpu().unsqueeze(0)

@@ -1,9 +1,9 @@
 # Number of independent sample traces to generate
-num_samples = 32
+num_samples = 128
 # Batch size of sample generation. If not provided, we do a single batch
 batch_size = 256
 # Number of sampling steps to take
-num_steps = 512
+num_steps = 128
 
 # Which model to load (ema, best, last) 
 model_type = "ema"
@@ -11,10 +11,11 @@ model_type = "ema"
 out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to
 replace_samples = true
-# Step scale
-step_scale = 1.00
 # ODE method
 method = "midpoint"
+
+# Set true to average the empirical per-cell variances within each channel.
+process_variance_channel_average = false
 
 observation = "experimental_methods/perez_luna/observation.toml"
 unconditional_data_dir = "data/batch_3/normalized_test_large"

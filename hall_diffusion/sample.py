@@ -5,7 +5,6 @@ from pathlib import Path
 import os
 import shutil
 import uuid
-import math
 
 # Third-party deps
 import torch
@@ -14,6 +13,7 @@ import numpy as np
 # Local deps
 from hall_diffusion import models
 from hall_diffusion.models.controlnet import ControlNet
+from hall_diffusion.guidance import guidance_score, legacy_guidance_score, load_variance_model
 from hall_diffusion.utils import utils
 from hall_diffusion.utils.thruster_data import ThrusterDataset
 from hall_diffusion.samplers.edmsampler import EDMSampler, RK2Integrator, ObservationGuidance
@@ -35,30 +35,32 @@ parser.add_argument(
     help="Compute backend to use (default: auto; priority: cuda, mps, xpu, cpu)",
 )
 
+LEGACY_MEASUREMENT_NOISE_SCALE = 40.0
+
 
 def build_observation(
     dataset,
     observations,
     num_samples,
     param_vec=None,
-    default_stddev=1.0,
+    sampling_mode="dps",
     device="cpu",
     verbose=False,
 ):
     _, data_params, data_tensor = dataset[0]
+    data_tensor = data_tensor.to(device)
+
+    noise_std_scale = LEGACY_MEASUREMENT_NOISE_SCALE if sampling_mode == "constant" else 1.0
 
     (num_channels, resolution) = data_tensor.shape
 
-    obs_matrix_loc = torch.zeros(num_channels, resolution, device=device)
-    obs_matrix_dat = torch.zeros(num_channels, resolution, device=device)
-    obs_matrix_var = torch.zeros(num_channels, resolution, device=device)
+    observed = torch.zeros(num_channels, resolution, dtype=torch.bool, device=device)
+    values = torch.zeros(num_channels, resolution, device=device)
+    variances = torch.zeros(num_channels, resolution, device=device)
 
     default_stddev = observations.get("stddev", observations.get("std_dev", 1.0))
 
     grid = dataset.grid
-
-    m = num_channels * resolution
-    n = 0
 
     obs_fields = observations["fields"]
 
@@ -68,7 +70,7 @@ def build_observation(
 
         # Get stddev (TODO: read from file to allow more values, but this needs to wait for improved stddev handling)
         obs_dict = obs_fields[obs_field]
-        stddev = obs_dict.get("stddev", obs_dict.get("std_dev", default_stddev))
+        stddev = noise_std_scale * obs_dict.get("stddev", obs_dict.get("std_dev", default_stddev))
 
         # Get observation from file
         x_inds, x_data, y_data = utils.get_observation_locs(
@@ -81,49 +83,35 @@ def build_observation(
             # If x_data == grid, then we're observing an entire row
             if verbose:
                 print(obs_field + ":\tobserving entire row.")
-            obs_matrix_loc[row_index, :] = 1.0
+            observed[row_index, :] = True
 
             if y_data is None:
-                obs_matrix_dat[row_index, :] = data_tensor[row_index, :]
+                values[row_index, :] = data_tensor[row_index, :]
             else:
-                obs_matrix_dat[row_index, :] = torch.tensor(y_data, device=device)
+                values[row_index, :] = torch.as_tensor(y_data, device=device)
 
-            obs_matrix_var[row_index, :] = stddev**2
-            n += resolution
+            variances[row_index, :] = stddev**2
         else:
             # Partial/sparse observation of the row
             # If y not provided, we use the underlying data matrix from the dataset
             # Otherwise we use the y found in the file
             # TODO: stddevs that vary point-to-point
-            obs_matrix_loc[row_index, x_inds] = 1.0
-            obs_matrix_var[row_index, x_inds] = stddev**2
-            n += len(x_inds)
+            observed[row_index, x_inds] = True
+            variances[row_index, x_inds] = stddev**2
 
             if y_data is None:
                 if verbose:
                     print(obs_field + ":\tusing data from ref sim at selected axial locs.")
-                obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
+                values[row_index, x_inds] = data_tensor[row_index, x_inds]
             else:
                 if verbose:
                     print(obs_field + ":\tusing data from file.")
-                obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32, device=device)
+                values[row_index, x_inds] = torch.as_tensor(y_data, dtype=torch.float32, device=device)
 
-    # Dimensions
-    # m = num_channels * resolution
-    # n = num_observations
-    # A (linear observation operator) = (n, m)
-    # y (observed data) = (n,)
-    obs_matrix_loc = obs_matrix_loc.reshape(-1)
-    obs_A = torch.zeros(n, m, device=device)
-
-    j = 0
-    for i in range(m):
-        if obs_matrix_loc[i] == 1.0:
-            obs_A[j, i] = 1.0
-            j += 1
-
-    obs_y = obs_A @ obs_matrix_dat.reshape(-1)
-    obs_var = obs_A @ obs_matrix_var.reshape(-1)
+    flat_indices = observed.flatten().nonzero(as_tuple=True)[0]
+    operator = torch.eye(observed.numel(), device=device)[flat_indices]
+    obs_y = values.flatten()[flat_indices]
+    obs_var = variances.flatten()[flat_indices]
 
     # If no param vec specified here, we use the one from the reference dataset
     if param_vec is None:
@@ -136,41 +124,18 @@ def build_observation(
             if p in params:
                 param_vec[:, i] = dataset.norm.normalize(params[p], p)
 
-    return obs_A, obs_y, obs_var, param_vec
-
-
-# =====================================================
-# Conditioning on observations and PDEs
-# =====================================================
-def guidance_score(x_t, x_0, t, observation, retain_graph=False):
-    (batch_size, _, _) = x_0.shape
-
-    obs_vec = observation["data"]
-    var = observation["var"]
-    H = observation["operator"]
-
-    if obs_vec is None:
-        return 0.0
-
-    def proc_var_fn(t):
-        return t**2 / (t**2 + 1)
-
-    proc_var = 0.25 * proc_var_fn(t)
-
-    # =====================================================
-    # Diffusion posterior sampling (get observation loss)
-    # =====================================================
-    x_vec = x_0.reshape(batch_size, -1)
-    measurement = torch.matmul(H, x_vec.T).T
-    total_var = var + proc_var
-    obs_loss = torch.sum((measurement - obs_vec[None, ...]) ** 2 / total_var)
-    score = -torch.autograd.grad(obs_loss, x_t, retain_graph=retain_graph)[0]
-
-    return score
+    return operator, obs_y, obs_var, param_vec
 
 
 def parse_observation(
-    shape, args, scalars_in_tensor, fourier_features, condition_vec=None, device="cpu", verbose=False
+    shape,
+    args,
+    scalars_in_tensor,
+    fourier_features,
+    variance_model=None,
+    condition_vec=None,
+    device="cpu",
+    verbose=False,
 ):
     num_samples, _, resolution = shape
     # Determine if we're doing condional or unconditional sampling
@@ -210,14 +175,21 @@ def parse_observation(
                 # We didn't completely specify the parameter vector and have nothing to fall back on
                 raise RuntimeError("Incomplete parameter specification without data directory. Exiting.")
 
-        elif "params" not in obs_args and param_vec is None:
-            # Use the parameter vector from the ref simulation
-            param_vec = None  # This is redundant, and this entire code must be rewritten
-
         obs_operator, obs_data, obs_var, param_vec = build_observation(
-            dataset, obs_args, num_samples, param_vec, device=device
+            dataset,
+            obs_args,
+            num_samples,
+            param_vec,
+            sampling_mode=args.get("sampling_mode", "dps"),
+            device=device,
         )
-        obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
+        obs = dict(
+            operator=obs_operator,
+            data=obs_data,
+            var=obs_var,
+            covariance_jitter=args.get("covariance_jitter", 1e-6),
+            variance_model=variance_model,
+        )
     else:
         if param_vec is None or unconditional_dataset is None:
             raise RuntimeError("No observation specified and no data directory given. Exiting")
@@ -234,6 +206,7 @@ def sample(
     scalars_in_tensor,
     fourier_features,
     args,
+    variance_model=None,
     condition_vec=None,
     save_to_file=True,
     device="cpu",
@@ -242,7 +215,14 @@ def sample(
     num_samples, _, _ = shape
 
     obs, dataset, param_vec = parse_observation(
-        shape, args, scalars_in_tensor, fourier_features, condition_vec, device, verbose=verbose
+        shape,
+        args,
+        scalars_in_tensor,
+        fourier_features,
+        variance_model,
+        condition_vec,
+        device,
+        verbose=verbose,
     )
 
     # Timestep args
@@ -250,13 +230,17 @@ def sample(
     noise_max = args.get("noise_max", 80.0)
     noise_min = args.get("noise_min", 0.002)
     exponent = args.get("step_exponent", 7.0)
+    sampling_mode = args.get("sampling_mode", "dps")
+    if sampling_mode not in {"dps", "constant"}:
+        raise ValueError("sampling_mode must be 'dps' or 'constant'")
+    score_function = legacy_guidance_score if sampling_mode == "constant" else guidance_score
 
     # Set up sampler
     integrator = RK2Integrator(
         model,
         guidance_score_fn=ObservationGuidance(
-            type="constant",
-            obs_score=guidance_score,
+            type=sampling_mode,
+            obs_score=score_function,
             observation=obs,
             guidance_start_time=args.get("guidance_start_time", float("inf")),
         ),
@@ -266,11 +250,18 @@ def sample(
         S_tmin=args.get("S_tmin", 0.0),
         S_tmax=args.get("S_tmax", float("inf")),
         S_noise=args.get("S_noise", 1.003),
+        guidance_second_order_below=args.get("guidance_second_order_below", 0.1),
     )
     sampler = EDMSampler(shape, num_steps, noise_min, noise_max, exponent)
 
-    # Sample, saving intermediate steps for visualization and debugging
-    output = sampler.sample(integrator, showprogress=True, device=device, model_args=dict(condition_vector=param_vec))
+    record_trajectory = args.get("record_trajectory", False)
+    output = sampler.sample(
+        integrator,
+        showprogress=True,
+        device=device,
+        model_args=dict(condition_vector=param_vec),
+        record_trajectory=record_trajectory,
+    )
 
     final = output[-1, ...]
 
@@ -296,10 +287,15 @@ def sample(
             if len(params_cpu.shape) == 1:
                 np.savez(file, data=tens, params=params_cpu)
             else:
-                np.savez(file, data=tens, params=params_cpu[:, i])
+                np.savez(file, data=tens, params=params_cpu[i, :])
 
-        # Write samples at all iterations to a single tensor
-        np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
+        if record_trajectory:
+            np.savez(
+                out_dir / "data_allsteps.npz",
+                steps=sampler.noise_steps,
+                data=output.cpu().numpy(),
+                params=params_cpu,
+            )
 
     return output
 
@@ -318,7 +314,8 @@ def infer(
     print(f"Selected device: {device}")
 
     # Load model and config from checkpoint
-    model_dict = utils.load_checkpoint(model, device)
+    checkpoint_path = Path(model)
+    model_dict = utils.load_checkpoint(checkpoint_path, device)
     model_config = model_dict["model_config"]
     if "label_dim" in model_config:
         model_config["condition_dim"] = model_config.pop("label_dim")
@@ -334,6 +331,7 @@ def infer(
     model_type = "model" if model_type == "last" else model_type
 
     model.load_state_dict(model_dict[model_type], strict=False)
+    model.requires_grad_(False)
     if isinstance(model, ControlNet):
         base_model = model.trained_unet
     else:
@@ -345,35 +343,48 @@ def infer(
     num_samples = sampling_config.get("num_samples", 64)
     batch_size = sampling_config.get("batch_size", num_samples)
 
-    full_batches = math.floor(num_samples / batch_size)
-    remainder = num_samples - full_batches * batch_size
-    batches = [batch_size for _ in range(math.floor(num_samples / batch_size))]
+    full_batches, remainder = divmod(num_samples, batch_size)
+    batches = [batch_size] * full_batches
     if remainder > 0:
         batches.append(remainder)
 
     channels = base_model.img_channels
     resolution = base_model.img_resolution
 
+    variance_model = None
+    sampling_mode = sampling_config.get("sampling_mode", "dps")
+    if sampling_mode not in {"dps", "constant"}:
+        raise ValueError("sampling_mode must be 'dps' or 'constant'")
+    if "observation" in sampling_config and sampling_mode == "dps":
+        variance_file = Path(
+            sampling_config.get("process_variance_file", checkpoint_path.parent / "process_variance.npz")
+        )
+        variance_model = load_variance_model(
+            variance_file, sampling_config, (channels, resolution), device
+        )
+
     samples = []
 
     # Sample in batches
-    for i, batch_num_samples in enumerate(batches):
+    for batch_index, batch_num_samples in enumerate(batches):
         size = (batch_num_samples, channels, resolution)
+        batch_config = {
+            **sampling_config,
+            "replace_samples": sampling_config.get("replace_samples", False) and batch_index == 0,
+        }
         batch_samples = sample(
             model,
             size,
             scalars_in_tensor,
             fourier_features,
-            sampling_config,
+            batch_config,
+            variance_model=variance_model,
             condition_vec=condition_vec,
             save_to_file=save_to_file,
             device=device,
             verbose=verbose,
         )
         samples.append(batch_samples)
-
-        # Make sure we don't remove old samples
-        sampling_config["replace_samples"] = False
 
     # Concatenate along batch dimension
     sample_tensor = torch.concatenate(samples, dim=1)

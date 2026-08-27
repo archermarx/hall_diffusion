@@ -1,135 +1,194 @@
-"""
-Estimate the per-field diffusion model variance as a function of noise, qc(t)
-"""
-# Stdlibs
-import argparse
-import tomllib
-from pathlib import Path
-import os
-import shutil
-import uuid
-import math
-from collections.abc import Callable
+"""Estimate diagonal denoiser-error statistics as a function of noise."""
 
-# Third-party deps
+import argparse
+import math
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
-from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-# Local deps
 from hall_diffusion import models
-from hall_diffusion.models.controlnet import ControlNet
 from hall_diffusion.utils import utils
 from hall_diffusion.utils.thruster_data import ThrusterDataset
 
-def main(model_dir, data_dir):
-    device = utils.get_device()
 
-    # Load model from file
-    model_dir = Path(model_dir)
-    model_dict = utils.load_checkpoint(model_dir / "checkpoint.pth.tar", device)
-    model_config = model_dict["model_config"]
+def estimate_moments(residual_sum, residual_square_sum, count):
+    """Return E[e], E[e^2], and Var[e] for e = denoised - clean."""
+    mean = residual_sum / count
+    mean_square = residual_square_sum / count
+    variance = (mean_square - mean.square()).clamp_min(0)
+    return mean, mean_square, variance
+
+
+def plot_process_std(process_variance, noise_levels, channel_names, output_dir):
+    """Plot the spatially averaged centered standard deviation per field."""
+    field_std = np.sqrt(np.maximum(process_variance.mean(axis=-1), 0))
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for channel, name in enumerate(channel_names):
+        ax.plot(noise_levels, field_std[:, channel], label=name)
+    ax.set(xlabel="Noise std", ylabel="Average process std", xscale="log", yscale="log")
+    ax.grid(alpha=0.25)
+    ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+    fig.savefig(output_dir / "process_variance.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_spatial_variance(process_variance, noise_levels, grid, channel_names, output_dir):
+    """Plot the spatial structure of the centered process standard deviation."""
+    process_std = np.sqrt(np.maximum(process_variance, 0))
+    positive = process_std[process_std > 0]
+    floor = positive.min() if positive.size else np.finfo(float).tiny
+    log_std = np.log10(np.maximum(process_std, floor))
+    rows = math.ceil(len(channel_names) / min(3, len(channel_names)))
+    columns = min(3, len(channel_names))
+    fig, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
+    image = None
+    for channel, ax in enumerate(axes.flat):
+        if channel >= len(channel_names):
+            ax.axis("off")
+            continue
+        image = ax.pcolormesh(grid, noise_levels, log_std[:, channel], shading="auto")
+        ax.set(title=channel_names[channel], xlabel="Axial position", ylabel="Noise std", yscale="log")
+    if image is not None:
+        fig.colorbar(image, ax=axes.ravel().tolist(), label=r"$\log_{10}$ process std")
+    fig.savefig(output_dir / "process_std_heatmaps.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_bias_subsets(subset_bias, overall_bias, noise_levels, channel_names, output_dir):
+    """Show whether each field's signed bias is stable across data subsets."""
+    subset_mean = subset_bias.mean(axis=-1)
+    overall_mean = overall_bias.mean(axis=-1)
+    columns = min(3, len(channel_names))
+    rows = math.ceil(len(channel_names) / columns)
+    fig, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
+    for channel, ax in enumerate(axes.flat):
+        if channel >= len(channel_names):
+            ax.axis("off")
+            continue
+        for subset in range(subset_mean.shape[0]):
+            ax.plot(noise_levels, subset_mean[subset, :, channel], alpha=0.65)
+        ax.plot(noise_levels, overall_mean[:, channel], color="black", linewidth=2.5, label="Overall")
+        ax.set(
+            title=channel_names[channel],
+            xlabel="Noise std",
+            ylabel="Spatially averaged signed bias",
+            xscale="log",
+        )
+        ax.axhline(0, color="gray", linewidth=0.8)
+        ax.legend()
+    fig.savefig(output_dir / "bias_subset_field_mean.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_results(
+    output_dir,
+    residual_sum,
+    residual_square_sum,
+    subset_residual_sum,
+    subset_counts,
+    count,
+    state_shape,
+    noise_levels,
+    grid,
+    channel_names,
+):
+    """Finalize, save, and plot the sufficient residual statistics."""
+    mean, mean_square, variance = estimate_moments(residual_sum, residual_square_sum, count)
+    mean = mean.reshape(len(noise_levels), *state_shape).cpu().numpy()
+    mean_square = mean_square.reshape(len(noise_levels), *state_shape).cpu().numpy()
+    variance = variance.reshape(len(noise_levels), *state_shape).cpu().numpy()
+    subset_bias = (subset_residual_sum / subset_counts[:, None, None]).reshape(
+        len(subset_counts), len(noise_levels), *state_shape
+    ).cpu().numpy()
+
+    np.savez(
+        output_dir / "process_variance.npz",
+        process_variance=mean_square,
+        centered_variance=variance,
+        mean_residual=mean,
+        bias_subset_mean=subset_bias,
+        bias_subset_count=subset_counts.cpu().numpy(),
+        residual_convention=np.array("denoised_minus_clean"),
+        variance_convention=np.array("uncentered_mse"),
+        noise_levels=noise_levels,
+    )
+    plot_process_std(variance, noise_levels, channel_names, output_dir)
+    plot_spatial_variance(variance, noise_levels, grid, channel_names, output_dir)
+    plot_bias_subsets(subset_bias, mean, noise_levels, channel_names, output_dir)
+
+
+def main(model_dir, data_dir, seed=0, bias_subsets=4):
+    device = utils.get_device()
+    output_dir = Path(model_dir)
+    checkpoint = utils.load_checkpoint(output_dir / "checkpoint.pth.tar", device)
+    model_config = checkpoint["model_config"]
     if "label_dim" in model_config:
         model_config["condition_dim"] = model_config.pop("label_dim")
     model = models.from_config(model_config, device=device)
-    model.load_state_dict(model_dict["ema"], strict=False)
-    del model_dict
+    model.load_state_dict(checkpoint["ema"], strict=False)
+    model.eval()
+    del checkpoint
 
-    # Load training dataset
     dataset = ThrusterDataset(data_dir, scalars_in_tensor=False, fourier_features=False)
-    batch_size = 512
+    generator = torch.Generator().manual_seed(seed)
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=512,
         shuffle=True,
-        pin_memory=device.type=='cuda',
+        generator=generator,
+        pin_memory=device.type == "cuda",
         num_workers=2,
         prefetch_factor=2,
     )
-
-    # Set up grid of noise levels, logarithmically-spaced
-    num_noise_levels = 26
-    noise_levels = np.geomspace(1e-3, 100, num_noise_levels)
-
-    prev_proc_var = noise_levels**2 / (1 + noise_levels**2)
-
-    num_channels, num_cells = dataset[0][2].shape
+    noise_levels = np.geomspace(1e-3, 100, 26)
+    state_shape = dataset[0][2].shape
+    state_size = math.prod(state_shape)
+    bias_subsets = min(max(int(bias_subsets), 1), len(dataset))
     channel_names = [name for name, _ in sorted(dataset.fields().items(), key=lambda item: item[1])]
-    proc_var = torch.zeros((num_noise_levels, num_channels), device=device)
 
-    model.eval()
+    residual_sum = torch.zeros((len(noise_levels), state_size), device=device)
+    residual_square_sum = torch.zeros_like(residual_sum)
+    subset_residual_sum = torch.zeros((bias_subsets, len(noise_levels), state_size), device=device)
+    subset_counts = torch.zeros(bias_subsets, dtype=torch.long, device=device)
+    count = 0
 
-    n = 0
-
-    plot_interval = 20
     with torch.inference_mode():
-        for i_batch, data in enumerate(tqdm(loader)):
-            # add noise to samples
-            # data: (b,c,n)
-            params, x0 = data[1].to(device), data[2].to(device)
-            n += x0.shape[0]
-            for i, sigma in enumerate(noise_levels):
-                # noised data: (b,c,n)
-                # denoised data: (b,c,n)
-                x = x0 + sigma * torch.randn_like(x0, device=device)
-                sigma = torch.tensor(sigma, device=device)
-                denoised = model(x, sigma, params)
+        for batch_index, data in enumerate(tqdm(loader)):
+            params, clean = data[1].to(device), data[2].to(device)
+            subset_indices = (count + torch.arange(clean.shape[0], device=device)) % bias_subsets
+            count += clean.shape[0]
+            subset_counts += torch.bincount(subset_indices, minlength=bias_subsets)
 
-                # compute residual: (b,c,n)
-                residual = (denoised-x0)**2
+            for noise_index, sigma in enumerate(noise_levels):
+                noisy = clean + sigma * torch.randn_like(clean)
+                denoised = model(noisy, torch.as_tensor(sigma, device=device), params)
+                residual = (denoised - clean).flatten(start_dim=1)
+                residual_sum[noise_index] += residual.sum(dim=0)
+                residual_square_sum[noise_index] += residual.square().sum(dim=0)
+                for subset in range(bias_subsets):
+                    subset_residual_sum[subset, noise_index] += residual[subset_indices == subset].sum(dim=0)
 
-                # average over cell dimension: (b,c)
-                # sum over batch dimension: (c,)
-                residual = residual.mean(axis=2).sum(axis=0)
-
-                # accumulate into proc_var
-                proc_var[i, :] += residual[:]
-
-            # plot current results
-            if i_batch % plot_interval == 0:
-                fig, (ax, legend_ax) = plt.subplots(
-                    1,
-                    2,
-                    gridspec_kw={"width_ratios": [4, 1]},
+            if (batch_index + 1) % 20 == 0:
+                save_results(
+                    output_dir, residual_sum, residual_square_sum, subset_residual_sum,
+                    subset_counts, count, state_shape, noise_levels, dataset.grid, channel_names,
                 )
-                ax.set(xlabel = "Noise std", ylabel = "Process std", xscale='log', yscale='log')
-                ax.plot(noise_levels, np.sqrt(prev_proc_var), color='black', linewidth=2, label="Previous")
-                ax.plot(noise_levels, noise_levels, color='black', linewidth=2, label="q(t) $\\propto$ t", linestyle='--')
-                for i in range(num_channels):
-                    proc_vars = proc_var[:, i].cpu().numpy() / n
-                    proc_stds = np.sqrt(proc_vars)
-                    line, = ax.plot(noise_levels, proc_stds, label = channel_names[i])
 
-                # Match the legend's top-to-bottom order to the lines' vertical
-                # order at the right edge of the plot.
-                handles, labels = ax.get_legend_handles_labels()
-                ordered = sorted(
-                    zip(handles, labels),
-                    key=lambda item: item[0].get_ydata()[-1],
-                    reverse=True,
-                )
-                legend_ax.axis("off")
-                legend_ax.legend(
-                    [handle for handle, _ in ordered],
-                    [label for _, label in ordered],
-                    loc="center left",
-                )
-                fig.savefig(model_dir / "process_variance.png", dpi=150, bbox_inches="tight")
-                plt.close(fig)
-        
-                np.savez(model_dir / "process_variance.npz", proc_var.cpu().numpy() / n, noise_levels)
-
-    np.savez(model_dir / "process_variance.npz", proc_var.cpu().numpy() / n, noise_levels)
-
+    save_results(
+        output_dir, residual_sum, residual_square_sum, subset_residual_sum,
+        subset_counts, count, state_shape, noise_levels, dataset.grid, channel_names,
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("model_dir", type=str, help="Path to model")
-    parser.add_argument("--data-dir", type=str, help="Path to data")
+    parser.add_argument("model_dir", help="Path to model directory")
+    parser.add_argument("--data-dir", required=True, help="Path to evaluation data")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--bias-subsets", type=int, default=4)
     args = parser.parse_args()
-
-    main(args.model_dir, args.data_dir)
-
+    main(args.model_dir, args.data_dir, args.seed, args.bias_subsets)

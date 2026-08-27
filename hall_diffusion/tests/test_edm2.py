@@ -7,7 +7,7 @@ import pytest
 import torch
 import numpy as np
 
-from models.edm2 import EDM2Denoiser, UNet
+from hall_diffusion.models.edm2 import EDM2Denoiser, UNet
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
