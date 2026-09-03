@@ -1,6 +1,8 @@
+import numpy as np
+import pytest
 import torch
 
-from hall_diffusion.guidance import _corrected_mean, _interpolate, guidance_score
+from hall_diffusion.guidance import _corrected_mean, _interpolate, guidance_score, load_variance_model
 
 
 def variance_model(num_channels, variance=0.3):
@@ -122,3 +124,20 @@ def test_bias_correction_subtracts_interpolated_denoiser_residual():
     expected_bias = torch.tensor([[[0.3, 0.1]]])
 
     torch.testing.assert_close(corrected, x_0 - 0.5 * expected_bias)
+
+
+def test_process_variance_shape_must_match_checkpoint_derived_state_shape(tmp_path):
+    path = tmp_path / "process_variance.npz"
+    shape = (2, 3, 4)
+    np.savez(
+        path,
+        process_variance=np.ones(shape),
+        centered_variance=np.ones(shape),
+        mean_residual=np.zeros(shape),
+        noise_levels=np.array([0.1, 1.0]),
+        residual_convention=np.array("denoised_minus_clean"),
+        variance_convention=np.array("uncentered_mse"),
+    )
+
+    with pytest.raises(ValueError, match=r"expected \(2, 4, 4\)"):
+        load_variance_model(path, {}, state_shape=(4, 4), device="cpu")

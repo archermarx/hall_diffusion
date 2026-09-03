@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import shutil
 import uuid
+import warnings
 
 # Third-party deps
 import torch
@@ -26,8 +27,6 @@ parser.add_argument("-n", "--num-samples", type=int)
 parser.add_argument("-b", "--batch-size", type=int)
 parser.add_argument("-s", "--num-steps", type=int)
 parser.add_argument("--test-dir", type=Path)
-parser.add_argument("--scalars-in-tensor", action="store_true")
-parser.add_argument("--fourier-features", action="store_true")
 parser.add_argument(
     "--device",
     choices=("auto", "cpu", "mps", "cuda", "xpu"),
@@ -40,26 +39,54 @@ ERROR_TYPES = {"absolute", "relative"}
 ERROR_SPACES = {"normalized", "unnormalized"}
 
 
-def _error_spec(observations, field_observation):
-    """Resolve an observation-level error specification and field overrides."""
-    # Accept the old flat keys when reading existing observations. New configs
-    # should use the nested ``error`` table.
-    error = {}
-    for source in (observations, field_observation):
-        if "stddev" in source:
-            error["stddev"] = source["stddev"]
-        elif "std_dev" in source:
-            error["stddev"] = source["std_dev"]
-        if "error_type" in source:
-            error["type"] = source["error_type"]
-        if "error_space" in source:
-            error["space"] = source["error_space"]
-        error.update(source.get("error", {}))
+LEGACY_OBSERVATION_KEYS = {"fields", "params"}
+LEGACY_MEASUREMENT_KEYS = {"x", "y", "locs", "normalized", "error_type", "error_space", "stddev", "std_dev"}
 
-    error.setdefault("stddev", 1.0)
-    error.setdefault("type", "absolute")
-    error.setdefault("space", "normalized")
 
+def _validate_observation_interface(observations):
+    if legacy := LEGACY_OBSERVATION_KEYS.intersection(observations):
+        names = ", ".join(sorted(legacy))
+        raise ValueError(
+            f"Legacy observation key(s) {names} are no longer supported; "
+            "move all fields and parameters under 'measurements'."
+        )
+    if legacy := LEGACY_MEASUREMENT_KEYS.intersection(observations):
+        names = ", ".join(sorted(legacy))
+        raise ValueError(f"Observation uses retired flat error key(s) {names}; use the nested 'error' table.")
+    if "measurements" not in observations:
+        raise ValueError("Observation configuration requires a 'measurements' table.")
+    if not isinstance(observations["measurements"], dict):
+        raise ValueError("observation.measurements must be a table.")
+
+
+def _validate_measurement_keys(name, measurement, allowed):
+    if legacy := LEGACY_MEASUREMENT_KEYS.intersection(measurement):
+        names = ", ".join(sorted(legacy))
+        raise ValueError(f"Measurement '{name}' uses retired key(s) {names}; use the unified measurement schema.")
+    if unexpected := set(measurement).difference(allowed):
+        names = ", ".join(sorted(unexpected))
+        raise ValueError(f"Measurement '{name}' has unsupported key(s): {names}.")
+
+
+def _error_spec(observations, measurement, name, required):
+    """Resolve and validate observation-level error defaults and overrides."""
+    global_error = observations.get("error")
+    local_error = measurement.get("error")
+    if global_error is None and local_error is None:
+        if required:
+            raise ValueError(
+                f"Tensor measurement '{name}' requires an error specification; use stddev = 0 for an exact value."
+            )
+        return None
+    if global_error is not None and not isinstance(global_error, dict):
+        raise ValueError("observation.error must be a table.")
+    if local_error is not None and not isinstance(local_error, dict):
+        raise ValueError(f"Measurement '{name}' error must be a table.")
+
+    error = dict(global_error or {})
+    error.update(local_error or {})
+    if missing := {"type", "space", "stddev"}.difference(error):
+        raise ValueError(f"Error for measurement '{name}' is missing {sorted(missing)}.")
     if error["type"] not in ERROR_TYPES:
         raise ValueError(f"error.type must be one of {sorted(ERROR_TYPES)}, got {error['type']!r}")
     if error["space"] not in ERROR_SPACES:
@@ -72,8 +99,8 @@ def _normalized_error_stddev(error, normalized_values, field, normalizer):
     stddev = torch.as_tensor(error["stddev"], dtype=normalized_values.dtype, device=normalized_values.device)
     if stddev.ndim > 1 or (stddev.ndim == 1 and stddev.numel() not in {1, normalized_values.numel()}):
         raise ValueError("error.stddev must be a scalar or have one value per observation")
-    if torch.any(stddev < 0):
-        raise ValueError("error.stddev cannot be negative")
+    if not torch.all(torch.isfinite(stddev)) or torch.any(stddev < 0):
+        raise ValueError("error.stddev must be finite and nonnegative")
 
     if error["space"] == "normalized":
         reference = normalized_values
@@ -89,6 +116,44 @@ def _normalized_error_stddev(error, normalized_values, field, normalizer):
     return stddev
 
 
+def _batch_condition_vector(values, num_samples, device):
+    values = torch.as_tensor(values, dtype=torch.float32, device=device)
+    if values.ndim == 1:
+        values = values.unsqueeze(0)
+    if values.ndim != 2:
+        raise ValueError("condition_vec must be one- or two-dimensional")
+    if values.shape[0] == 1:
+        values = values.expand(num_samples, -1).clone()
+    elif values.shape[0] != num_samples:
+        raise ValueError(f"condition_vec has {values.shape[0]} rows, expected 1 or {num_samples}")
+    return values
+
+
+def _explicit_normalized_value(measurement, name, normalizer, device):
+    if "value_space" not in measurement:
+        raise ValueError(f"Measurement '{name}' provides a value but does not specify value_space.")
+    value_space = measurement["value_space"]
+    if value_space not in ERROR_SPACES:
+        raise ValueError(f"Measurement '{name}' value_space must be 'normalized' or 'unnormalized'.")
+    value = torch.as_tensor(measurement["value"], dtype=torch.float32, device=device)
+    if value.ndim != 0:
+        raise ValueError(f"Scalar measurement '{name}' requires a scalar value.")
+    return normalizer.normalize(value, name) if value_space == "unnormalized" else value
+
+
+def _validate_scalar_measurement(name, measurement):
+    _validate_measurement_keys(name, measurement, {"value", "value_space", "error"})
+    if "value_space" in measurement and "value" not in measurement:
+        raise ValueError(f"Scalar measurement '{name}' has value_space but no value.")
+    if "value" in measurement and isinstance(measurement["value"], (list, tuple)):
+        raise ValueError(f"Scalar measurement '{name}' requires one value, not per-cell values.")
+
+
+def _validate_scalar_error(name, error):
+    if error is not None and torch.as_tensor(error["stddev"]).ndim != 0:
+        raise ValueError(f"Scalar measurement '{name}' requires one error.stddev, not per-cell uncertainties.")
+
+
 def build_observation(
     dataset,
     observations,
@@ -98,6 +163,7 @@ def build_observation(
     device="cpu",
     verbose=False,
 ):
+    _validate_observation_interface(observations)
     _, data_params, data_tensor = dataset[0]
     data_tensor = data_tensor.to(device)
 
@@ -105,78 +171,113 @@ def build_observation(
 
     (num_channels, resolution) = data_tensor.shape
 
-    observed = torch.zeros(num_channels, resolution, dtype=torch.bool, device=device)
-    values = torch.zeros(num_channels, resolution, device=device)
-    variances = torch.zeros(num_channels, resolution, device=device)
+    spatial_fields = dataset.spatial_fields()
+    input_params = dataset.input_params()
+    performance_scalars = dataset.performance_scalars()
+    tensor_channels = dataset.tensor_channels()
 
-    grid = dataset.grid
+    if param_vec is None:
+        param_vec = data_params.detach().clone()
+    param_vec = _batch_condition_vector(param_vec, num_samples, device)
 
-    obs_fields = observations["fields"]
+    operator_rows = []
+    observed_values = []
+    observed_variances = []
+    ignored_param_errors = []
+    measurements = observations["measurements"]
 
-    for obs_field in obs_fields:
-        # Get tensor row index
-        row_index = dataset.fields()[obs_field]
+    for name, measurement in measurements.items():
+        if not isinstance(measurement, dict):
+            raise ValueError(f"Measurement '{name}' must be a table.")
 
-        obs_dict = obs_fields[obs_field]
-        error = _error_spec(observations, obs_dict)
+        if name in input_params and not dataset.scalars_in_tensor:
+            _validate_scalar_measurement(name, measurement)
+            error = _error_spec(observations, measurement, name, required=False)
+            _validate_scalar_error(name, error)
+            if error is not None:
+                ignored_param_errors.append(name)
+            if "value" in measurement:
+                param_vec[:, input_params[name]] = _explicit_normalized_value(
+                    measurement, name, dataset.norm, device
+                )
+            continue
 
-        # Get observation from file
-        x_inds, x_data, y_data = utils.get_observation_locs(
-            obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized"
+        if name in performance_scalars and not dataset.scalars_in_tensor:
+            raise ValueError(
+                f"Performance scalar '{name}' cannot be measured when scalars_in_tensor is false."
+            )
+
+        if name in input_params or name in performance_scalars:
+            _validate_scalar_measurement(name, measurement)
+            error = _error_spec(observations, measurement, name, required=True)
+            _validate_scalar_error(name, error)
+            row_index = tensor_channels[name]
+            if "value" in measurement:
+                normalized_value = _explicit_normalized_value(measurement, name, dataset.norm, device)
+            else:
+                normalized_value = data_tensor[row_index].mean()
+
+            row = torch.zeros(num_channels * resolution, dtype=data_tensor.dtype, device=device)
+            row[row_index * resolution : (row_index + 1) * resolution] = 1.0 / resolution
+            stddev = noise_std_scale * _normalized_error_stddev(
+                error, normalized_value, name, dataset.norm
+            )
+            operator_rows.append(row)
+            observed_values.append(normalized_value.reshape(1))
+            observed_variances.append(stddev.square().reshape(1))
+            continue
+
+        if name not in spatial_fields:
+            raise ValueError(f"Unknown measurement '{name}'.")
+
+        _validate_measurement_keys(name, measurement, {"locations", "values", "value_space", "error"})
+        if "value_space" in measurement and "values" not in measurement:
+            raise ValueError(f"Spatial measurement '{name}' has value_space but no values.")
+        if "values" in measurement and not isinstance(measurement["values"], (list, tuple)):
+            raise ValueError(f"Spatial measurement '{name}' requires an array of values.")
+        if "values" in measurement and "value_space" not in measurement:
+            raise ValueError(f"Measurement '{name}' provides values but does not specify value_space.")
+        error = _error_spec(observations, measurement, name, required=True)
+        x_inds, _, y_data = utils.get_observation_locs(
+            measurements, name, dataset.grid, normalizer=dataset.norm, form="normalized"
         )
-
         x_inds = np.asarray(x_inds)
         unique_inds, first_occurrences = np.unique(x_inds, return_index=True)
         x_inds = unique_inds.tolist()
         if y_data is None:
-            normalized_values = data_tensor[row_index, x_inds]
+            normalized_values = data_tensor[tensor_channels[name], x_inds]
         else:
             normalized_values = torch.as_tensor(y_data, dtype=data_tensor.dtype, device=device).flatten()
             normalized_values = normalized_values[torch.as_tensor(first_occurrences, device=device)]
 
-        stddev = noise_std_scale * _normalized_error_stddev(
-            error, normalized_values, obs_field, dataset.norm
+        stddev = noise_std_scale * _normalized_error_stddev(error, normalized_values, name, dataset.norm)
+        if stddev.ndim == 0:
+            stddev = stddev.expand(normalized_values.numel())
+        for cell_index in x_inds:
+            row = torch.zeros(num_channels * resolution, dtype=data_tensor.dtype, device=device)
+            row[tensor_channels[name] * resolution + cell_index] = 1.0
+            operator_rows.append(row)
+        observed_values.append(normalized_values)
+        observed_variances.append(stddev.square())
+        if verbose:
+            print(f"{name}:\tobserving {len(x_inds)} location(s).")
+
+    if ignored_param_errors:
+        names = ", ".join(sorted(ignored_param_errors))
+        warnings.warn(
+            f"Ignoring uncertainty for non-tensorized parameter(s): {names}; their values are exact conditions.",
+            UserWarning,
+            stacklevel=2,
         )
 
-        if (len(x_data) == resolution) and np.all(x_inds == np.arange(resolution)):
-            # If x_data == grid, then we're observing an entire row
-            if verbose:
-                print(obs_field + ":\tobserving entire row.")
-            observed[row_index, :] = True
-
-            values[row_index, :] = normalized_values
-            variances[row_index, :] = stddev**2
-        else:
-            # Partial/sparse observation of the row
-            # If y not provided, we use the underlying data matrix from the dataset
-            # Otherwise we use the y found in the file
-            observed[row_index, x_inds] = True
-            variances[row_index, x_inds] = stddev**2
-
-            if y_data is None:
-                if verbose:
-                    print(obs_field + ":\tusing data from ref sim at selected axial locs.")
-                values[row_index, x_inds] = normalized_values
-            else:
-                if verbose:
-                    print(obs_field + ":\tusing data from file.")
-                values[row_index, x_inds] = normalized_values
-
-    flat_indices = observed.flatten().nonzero(as_tuple=True)[0]
-    operator = torch.eye(observed.numel(), device=device)[flat_indices]
-    obs_y = values.flatten()[flat_indices]
-    obs_var = variances.flatten()[flat_indices]
-
-    # If no param vec specified here, we use the one from the reference dataset
-    if param_vec is None:
-        param_vec = data_params.detach().clone().to(device)
-        param_vec = param_vec.unsqueeze(0).repeat(num_samples, 1)
-
-    # Read scalar parameters if present
-    if (params := observations.get("params", None)) is not None:
-        for p, i in dataset.params().items():
-            if p in params:
-                param_vec[:, i] = dataset.norm.normalize(params[p], p)
+    if operator_rows:
+        operator = torch.stack(operator_rows)
+        obs_y = torch.cat(observed_values)
+        obs_var = torch.cat(observed_variances)
+    else:
+        operator = None
+        obs_y = None
+        obs_var = None
 
     return operator, obs_y, obs_var, param_vec
 
@@ -222,12 +323,12 @@ def parse_observation(
         obs_file = Path(obs_args["base_sim"])
 
         # Load data for conditioning
-        dataset = ThrusterDataset(obs_file, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features)
-
-        if (obs_params := obs_args.get("params", None)) is not None:
-            if set(obs_params) != set(dataset.params()) and param_vec is None:
-                # We didn't completely specify the parameter vector and have nothing to fall back on
-                raise RuntimeError("Incomplete parameter specification without data directory. Exiting.")
+        dataset = ThrusterDataset(
+            obs_file,
+            downsample_res=resolution,
+            scalars_in_tensor=scalars_in_tensor,
+            fourier_features=fourier_features,
+        )
 
         obs_operator, obs_data, obs_var, param_vec = build_observation(
             dataset,
@@ -357,8 +458,6 @@ def sample(
 def infer(
     model,
     sampling_config,
-    scalars_in_tensor,
-    fourier_features,
     condition_vec=None,
     save_to_file=True,
     verbose=False,
@@ -373,11 +472,14 @@ def infer(
     model_config = model_dict["model_config"]
     if "label_dim" in model_config:
         model_config["condition_dim"] = model_config.pop("label_dim")
+    dataset_settings = models.dataset_settings(model_config)
+    scalars_in_tensor = dataset_settings["scalars_in_tensor"]
+    fourier_features = dataset_settings["fourier_features"]
 
     if verbose:
         print(f"{model_config=}")
 
-    model = models.from_config(model_config, device=device)
+    model = models.from_config(model_config.copy(), device=device)
 
     # Determine which weights to load
     model_type = sampling_config.get("model_type", "ema")
@@ -465,14 +567,9 @@ if __name__ == "__main__":
     if args.batch_size is not None:
         sampling_config["batch_size"] = args.batch_size
 
-    scalars_in_tensor = args.scalars_in_tensor
-    fourier_features = args.fourier_features
-
     infer(
         args.model,
         sampling_config,
-        scalars_in_tensor,
-        fourier_features,
         condition_vec=None,
         device=args.device,
     )

@@ -20,10 +20,22 @@ def dataset_config(config: dict) -> dict:
         ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
         config = ckpt["model_config"]
 
-    return config
+    return config.copy()
+
+
+def dataset_settings(config: dict) -> dict:
+    """Derive dataset construction settings from a stored model config."""
+    data_config = dataset_config(config)
+    scalars_in_tensor = data_config.get("scalars_in_tensor", data_config.get("condition_dim") == 0)
+    return {
+        "scalars_in_tensor": scalars_in_tensor,
+        "fourier_features": data_config.get("fourier_features", False),
+        "downsample_res": data_config.get("downsample_res", data_config.get("resolution")),
+    }
 
 
 def from_config(config: dict, device: torch.device):
+    config = config.copy()
     arch = config.get("architecture", "edm2")
     assert arch in {"edm2", "controlnet"}
 
@@ -32,11 +44,14 @@ def from_config(config: dict, device: torch.device):
             config.pop("architecture", None)
             config.pop("scalars_in_tensor", None)
             config.pop("downsample_res", None)
+            config.pop("fourier_features", None)
             model = edm2.EDM2Denoiser(**config).to(device)
         case "controlnet":
             base_path = Path(config["base_model"]) / "checkpoint.pth.tar"
             base_ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
             base_cfg = dataset_config(config)
+            for key in ("architecture", "scalars_in_tensor", "downsample_res", "fourier_features"):
+                base_cfg.pop(key, None)
             model = controlnet_mod.ControlNet(
                 model_ckpt=base_ckpt["model"], control_channels=config["control_channels"], **base_cfg
             ).to(device)
