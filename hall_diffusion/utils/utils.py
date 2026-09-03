@@ -59,7 +59,7 @@ def load_checkpoint(path, device):
     # sys.modules.setdefault("utils", sys.modules["hall_diffusion.utils"])
 
     if device.type == "cuda":
-        return torch.load(path, weights_only=False)
+        return torch.load(path, weights_only=False, map_location=device)
 
     return torch.load(path, weights_only=False, map_location="cpu")
 

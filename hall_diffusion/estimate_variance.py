@@ -101,9 +101,12 @@ def save_results(
     mean = mean.reshape(len(noise_levels), *state_shape).cpu().numpy()
     mean_square = mean_square.reshape(len(noise_levels), *state_shape).cpu().numpy()
     variance = variance.reshape(len(noise_levels), *state_shape).cpu().numpy()
-    subset_bias = (subset_residual_sum / subset_counts[:, None, None]).reshape(
-        len(subset_counts), len(noise_levels), *state_shape
-    ).cpu().numpy()
+    subset_bias = (
+        (subset_residual_sum / subset_counts[:, None, None])
+        .reshape(len(subset_counts), len(noise_levels), *state_shape)
+        .cpu()
+        .numpy()
+    )
 
     np.savez(
         output_dir / "process_variance.npz",
@@ -121,7 +124,7 @@ def save_results(
     plot_bias_subsets(subset_bias, mean, noise_levels, channel_names, output_dir)
 
 
-def main(model_dir, data_dir, seed=0, bias_subsets=4):
+def main(model_dir, data_dir, seed=0, bias_subsets=4, scalars_in_tensor=False, fourier_features=False):
     device = utils.get_device()
     output_dir = Path(model_dir)
     checkpoint = utils.load_checkpoint(output_dir / "checkpoint.pth.tar", device)
@@ -133,7 +136,7 @@ def main(model_dir, data_dir, seed=0, bias_subsets=4):
     model.eval()
     del checkpoint
 
-    dataset = ThrusterDataset(data_dir, scalars_in_tensor=False, fourier_features=False)
+    dataset = ThrusterDataset(data_dir, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features)
     generator = torch.Generator().manual_seed(seed)
     loader = DataLoader(
         dataset,
@@ -174,13 +177,29 @@ def main(model_dir, data_dir, seed=0, bias_subsets=4):
 
             if (batch_index + 1) % 20 == 0:
                 save_results(
-                    output_dir, residual_sum, residual_square_sum, subset_residual_sum,
-                    subset_counts, count, state_shape, noise_levels, dataset.grid, channel_names,
+                    output_dir,
+                    residual_sum,
+                    residual_square_sum,
+                    subset_residual_sum,
+                    subset_counts,
+                    count,
+                    state_shape,
+                    noise_levels,
+                    dataset.grid,
+                    channel_names,
                 )
 
     save_results(
-        output_dir, residual_sum, residual_square_sum, subset_residual_sum,
-        subset_counts, count, state_shape, noise_levels, dataset.grid, channel_names,
+        output_dir,
+        residual_sum,
+        residual_square_sum,
+        subset_residual_sum,
+        subset_counts,
+        count,
+        state_shape,
+        noise_levels,
+        dataset.grid,
+        channel_names,
     )
 
 
@@ -190,5 +209,7 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", required=True, help="Path to evaluation data")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--bias-subsets", type=int, default=4)
+    parser.add_argument("--scalars-in-tensor", action="store_true")
+    parser.add_argument("--fourier-features", action="store_true")
     args = parser.parse_args()
-    main(args.model_dir, args.data_dir, args.seed, args.bias_subsets)
+    main(args.model_dir, args.data_dir, args.seed, args.bias_subsets, args.scalars_in_tensor, args.fourier_features)
