@@ -66,15 +66,19 @@ def load_checkpoint(path, device):
 
 def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
     field_obs = obs[field]
-    x = field_obs.get("locations", field_obs.get("x", field_obs.get("locs", "all")))
-    y = field_obs.get("values", field_obs.get("y", None))
+    x = field_obs.get("locations", "all")
+    y = field_obs.get("values")
     grid_values = grid.detach().cpu().numpy() if isinstance(grid, torch.Tensor) else np.asarray(grid)
 
-    if isinstance(x, str) and x == "all":
+    if isinstance(x, str):
+        if x != "all":
+            raise ValueError(f"Measurement locations must be an array or 'all', got {x!r}")
         x_new = grid
         indices = np.arange(len(x_new))
     else:
         x = np.array(x)
+        if x.ndim != 1 or x.size == 0:
+            raise ValueError(f"Measurement '{field}' locations must be a nonempty one-dimensional array")
         x_new = np.zeros_like(x)
         indices = np.zeros_like(x, dtype=int)
         for i, _x in enumerate(x):
@@ -84,7 +88,8 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
             indices[i] = j
             x_new[i] = grid_values[j]
 
-    assert (y is None) or (len(x_new) == len(y)) or len(y) == 1
+    if y is not None and len(x_new) != len(y) and len(y) != 1:
+        raise ValueError(f"Measurement '{field}' must provide one value or one value per location")
 
     if y is not None:
         if len(y) == 1:
@@ -92,10 +97,7 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
         else:
             y = np.array(y)
 
-        value_space = field_obs.get("value_space")
-        if value_space is None:
-            # Compatibility with the former boolean spelling.
-            value_space = "normalized" if field_obs.get("normalized", False) else "unnormalized"
+        value_space = field_obs["value_space"]
         if value_space not in {"normalized", "unnormalized"}:
             raise ValueError("value_space must be 'normalized' or 'unnormalized'")
 

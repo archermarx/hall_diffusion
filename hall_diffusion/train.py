@@ -304,31 +304,11 @@ def train(args):
     # For controlnet, dataset settings (scalars_in_tensor, downsample_res) are
     # inherited from the base model's stored config so they don't need to be
     # re-specified in the controlnet toml.
-    data_cfg = models.dataset_config(config["model"])
-    print(data_cfg)
-
-    # Decide whether to include scalar params in tensor
-    if "scalars_in_tensor" in data_cfg:
-        scalars_in_tensor = data_cfg["scalars_in_tensor"]
-    else:
-        if "condition_dim" in data_cfg and data_cfg["condition_dim"] == 0:
-            scalars_in_tensor = True
-        else:
-            scalars_in_tensor = False
-
-    # Decide whether to include fourier features in tensor
-    # TODO: remove scalars_in_tensor and fourier_features from this, put in data instead
-    if "fourier_features" in data_cfg:
-        fourier_features = data_cfg.pop("fourier_features")
-    else:
-        fourier_features = False
-
-    if "downsample_res" in data_cfg:
-        downsample_res = data_cfg["downsample_res"]
-    elif "resolution" in data_cfg:
-        downsample_res = data_cfg["resolution"]
-    else:
-        downsample_res = None
+    dataset_settings = models.dataset_settings(config["model"])
+    print(dataset_settings)
+    scalars_in_tensor = dataset_settings["scalars_in_tensor"]
+    fourier_features = dataset_settings["fourier_features"]
+    downsample_res = dataset_settings["downsample_res"]
 
     train_dataset = thruster_data.ThrusterDataset(
         train_data_dir,

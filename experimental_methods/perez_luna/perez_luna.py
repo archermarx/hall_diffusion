@@ -154,22 +154,27 @@ with open(SCRIPT_DIR / filename, "w") as fp:
     print(f'base_sim = "{directory}"', file=fp)
     print('error = {type = "absolute", space = "normalized", stddev = 1.0}', file=fp)
 
-    print("\n[params]", file=fp)
-    print("anode_mass_flow_rate_kg_s = 5.16e-6", file=fp)
-    print("discharge_voltage_v = 270.0", file=fp)
-    print("magnetic_field_scale = 1.0", file=fp)
-    print("cathode_coupling_voltage_v = 0.0", file=fp)
+    params = {
+        "anode_mass_flow_rate_kg_s": 5.16e-6,
+        "discharge_voltage_v": 270.0,
+        "magnetic_field_scale": 1.0,
+        "cathode_coupling_voltage_v": 0.0,
+    }
+    for name, value in params.items():
+        print(f"\n[measurements.{name}]", file=fp)
+        print(f"value = {value}", file=fp)
+        print('value_space = "unnormalized"', file=fp)
 
-    print(f"\n[fields.ui_1]", file=fp)
-    print(f"x = {z_abs.tolist()}", file=fp)
-    print(f"y = {u_mp.tolist()}", file=fp)
+    print("\n[measurements.ui_1]", file=fp)
+    print(f"locations = {z_abs.tolist()}", file=fp)
+    print(f"values = {u_mp.tolist()}", file=fp)
     print('value_space = "unnormalized"', file=fp)
     print('error = {type = "relative", space = "unnormalized", stddev = 0.025}', file=fp)
 
     if include_efield:
-        print(f"\n[fields.E]", file=fp)
-        print(f"x = {z_abs.tolist()}", file=fp)
-        print(f"y = {E_mid.tolist()}", file=fp)
+        print("\n[measurements.E]", file=fp)
+        print(f"locations = {z_abs.tolist()}", file=fp)
+        print(f"values = {E_mid.tolist()}", file=fp)
         print('value_space = "unnormalized"', file=fp)
 
 # %%

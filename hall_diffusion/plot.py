@@ -352,8 +352,8 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
         else:
             raise FileNotFoundError(ref["file"])
 
-    if observation is not None and "nu_an" in observation["fields"]:
-        observation["fields"]["inv_hall"] = observation["fields"]["nu_an"]
+    if observation is not None and "nu_an" in observation["measurements"]:
+        observation["measurements"]["inv_hall"] = observation["measurements"]["nu_an"]
 
     for ax, field in zip(axes, fields):
         # Load data from tensor and plot
@@ -392,13 +392,13 @@ def plot_multifield(axes, x, samples, fields, field_names, vline_loc=None, ref=N
 
             # Plot observations
             # TODO: treat observations as another ref simulaiton
-            if observation is not None and subfield in observation["fields"]:
+            if observation is not None and subfield in observation["measurements"]:
                 y_ref_obs = (
                     get_field(subfield, field_names, observation["ref"])[subfield][0, :] * scale_factor
                 )
 
                 _, x_data, y_data = utils.get_observation_locs(
-                    observation["fields"],
+                    observation["measurements"],
                     subfield,
                     x * CHANNEL_LENGTH,
                     normalizer=observation["data"].norm,
@@ -690,7 +690,7 @@ if __name__ == "__main__":
             obs_dict = utils.read_observation(tomllib.load(fp)["observation"])
             base_data, samples_ref = load_samples(obs_dict["base_sim"])
             observation = dict(
-                fields=obs_dict["fields"], data=base_data, ref=samples_ref
+                measurements=obs_dict["measurements"], data=base_data, ref=samples_ref
             )
 
     common_args = dict(

@@ -377,27 +377,32 @@ def write_toml_file(filename, obs_fields):
         Vd = config["discharge_voltage"]
         fb = 1.0
 
-        print("\n[params]", file=fp)
-        print(f"anode_mass_flow_rate_kg_s = {mdot}", file=fp)
-        print(f"discharge_voltage_v = {Vd}", file=fp)
-        print(f"magnetic_field_scale = {fb}", file=fp)
-        print(f"cathode_coupling_voltage = {Vcc}", file=fp)
-        print(f"neutral_velocity_m_s = {un}", file=fp)
+        params = {
+            "anode_mass_flow_rate_kg_s": mdot,
+            "discharge_voltage_v": Vd,
+            "magnetic_field_scale": fb,
+            "cathode_coupling_voltage_v": Vcc,
+            "neutral_velocity_m_s": un,
+        }
+        for name, value in params.items():
+            print(f"\n[measurements.{name}]", file=fp)
+            print(f"value = {value}", file=fp)
+            print('value_space = "unnormalized"', file=fp)
 
         for field in obs_fields:
             print(file=fp)
-            print(f"[fields.{field}]", file=fp)
+            print(f"[measurements.{field}]", file=fp)
             print('value_space = "unnormalized"', file=fp)
 
             if field == "nn":
-                print(f"x = {[float(z_coarse[-1])]}", file=fp)
-                print(f"y = {[float(results_coarse["nn"][-1])]}", file=fp)
+                print(f"locations = {[float(z_coarse[-1])]}", file=fp)
+                print(f"values = {[float(results_coarse["nn"][-1])]}", file=fp)
             elif field == "ue":
-                print(f"x = {[float(z_coarse[-1])]}", file=fp)
-                print(f"y = {[float(results_coarse["ue_end"])]}", file=fp)
+                print(f"locations = {[float(z_coarse[-1])]}", file=fp)
+                print(f"values = {[float(results_coarse["ue_end"])]}", file=fp)
             else:
-                print(f"x = {z_coarse.tolist()}", file=fp)
-                print(f"y = {results_coarse[field].tolist()}", file=fp)
+                print(f"locations = {z_coarse.tolist()}", file=fp)
+                print(f"values = {results_coarse[field].tolist()}", file=fp)
 
 write_toml_file("observation.toml", obs_fields)
 write_toml_file("observation_lif_only.toml", ["ui_1", "E"])
