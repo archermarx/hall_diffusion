@@ -26,7 +26,7 @@ def estimate_moments(residual_sum, residual_square_sum, count):
 def plot_process_std(process_variance, noise_levels, channel_names, output_dir):
     """Plot the spatially averaged centered standard deviation per field."""
     field_std = np.sqrt(np.maximum(process_variance.mean(axis=-1), 0))
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    fig, ax = plt.subplots(figsize=(7, 4.5), layout='constrained')
     for channel, name in enumerate(channel_names):
         ax.plot(noise_levels, field_std[:, channel], label=name)
     ax.set(xlabel="Noise std", ylabel="Average process std", xscale="log", yscale="log")
@@ -44,7 +44,7 @@ def plot_spatial_variance(process_variance, noise_levels, grid, channel_names, o
     log_std = np.log10(np.maximum(process_std, floor))
     rows = math.ceil(len(channel_names) / min(3, len(channel_names)))
     columns = min(3, len(channel_names))
-    fig, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
+    fig, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False, layout='constrained')
     image = None
     for channel, ax in enumerate(axes.flat):
         if channel >= len(channel_names):
@@ -64,7 +64,7 @@ def plot_bias_subsets(subset_bias, overall_bias, noise_levels, channel_names, ou
     overall_mean = overall_bias.mean(axis=-1)
     columns = min(3, len(channel_names))
     rows = math.ceil(len(channel_names) / columns)
-    fig, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
+    fig, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False, layout='constrained')
     for channel, ax in enumerate(axes.flat):
         if channel >= len(channel_names):
             ax.axis("off")
