@@ -98,6 +98,27 @@ class Normalizer:
 
         return val
 
+    def normalize_stddev(self, stddev, name: str, reference=None):
+        """Map a standard deviation in physical units into normalized units.
+
+        For log-normalized quantities this uses first-order uncertainty
+        propagation about ``reference``. A reference is therefore required and
+        must be strictly positive for those quantities.
+        """
+        index, norm = self.find_name(name)
+        scale = norm["std"][index]
+
+        if not norm["log"][index]:
+            return stddev / scale
+
+        if reference is None:
+            raise ValueError(f"A reference value is required to scale uncertainty for log-normalized field '{name}'.")
+
+        mod = torch if isinstance(reference, torch.Tensor) else np
+        if bool(mod.any(reference <= 0)):
+            raise ValueError(f"Reference values must be positive for log-normalized field '{name}'.")
+        return stddev / (reference * scale)
+
     def normalize_params(self, param_vec):
         normed = np.zeros_like(param_vec)
         for (name, i) in self.params().items():

@@ -65,10 +65,12 @@ def load_checkpoint(path, device):
 
 
 def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
-    x = obs[field].get("x", "all")
-    y = obs[field].get("y", None)
+    field_obs = obs[field]
+    x = field_obs.get("locations", field_obs.get("x", field_obs.get("locs", "all")))
+    y = field_obs.get("values", field_obs.get("y", None))
+    grid_values = grid.detach().cpu().numpy() if isinstance(grid, torch.Tensor) else np.asarray(grid)
 
-    if x == "all":
+    if isinstance(x, str) and x == "all":
         x_new = grid
         indices = np.arange(len(x_new))
     else:
@@ -76,11 +78,13 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
         x_new = np.zeros_like(x)
         indices = np.zeros_like(x, dtype=int)
         for i, _x in enumerate(x):
-            j = bisect.bisect_left(grid, _x)
+            j = bisect.bisect_left(grid_values, _x)
+            if j == len(grid_values):
+                raise ValueError(f"Observation location {_x} lies beyond the simulation grid")
             indices[i] = j
-            x_new[i] = grid[j]
+            x_new[i] = grid_values[j]
 
-    assert (y is None) or (len(x) == len(y)) or len(y) == 1
+    assert (y is None) or (len(x_new) == len(y)) or len(y) == 1
 
     if y is not None:
         if len(y) == 1:
@@ -88,14 +92,19 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
         else:
             y = np.array(y)
 
-        normalized = obs[field].get("normalized", False)
+        value_space = field_obs.get("value_space")
+        if value_space is None:
+            # Compatibility with the former boolean spelling.
+            value_space = "normalized" if field_obs.get("normalized", False) else "unnormalized"
+        if value_space not in {"normalized", "unnormalized"}:
+            raise ValueError("value_space must be 'normalized' or 'unnormalized'")
 
-        if form == "normalized" and not normalized:
+        if form == "normalized" and value_space == "unnormalized":
             if normalizer is None:
                 raise RuntimeError("Normalized data requested but no normalizer provided.")
 
             y = normalizer.normalize(y, field)
-        elif form == "denormalized" and normalized:
+        elif form == "denormalized" and value_space == "normalized":
             if normalizer is None:
                 raise RuntimeError("De-normalized data requested but no normalizer provided.")
 

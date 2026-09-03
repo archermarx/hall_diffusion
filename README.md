@@ -156,6 +156,33 @@ The configs also have options for sampling/generating from the model.
 To run the sampler, just run `python/sampler.py`.
 The results will be placed in the config's specified output dirs.
 
+Conditional sampling uses an explicit error model. An error can be defined once
+for the observation and partially or completely overridden for an individual
+field:
+
+```toml
+[observation]
+base_sim = "data/reference/normalized"
+error = {type = "relative", space = "unnormalized", stddev = 0.05}
+
+[observation.fields.B]
+locations = "all"
+
+[observation.fields.ui_1]
+locations = [0.01, 0.02]
+values = [1000.0, 5000.0]
+value_space = "unnormalized"
+error = {type = "absolute", stddev = [50.0, 100.0]}
+```
+
+`error.type` is `absolute` or `relative`, and `error.space` is `normalized` or
+`unnormalized`. Absolute standard deviations have units of the selected space;
+relative standard deviations are fractions of the observed value in that
+space. All four combinations are converted to normalized model-space variance
+before guidance. For log-normalized fields, unnormalized errors use local
+first-order uncertainty propagation. `stddev` may be a scalar or one value per
+location.
+
 ## Evaluating model quality
 We use the maximum mean discrepancy to evaluate the distance between two distributions, i.e. generated samples and a test set. We apply it here by first compressing the data into a latent representation using the Hierarchical Tucker method. This can be done in `compress.py`. Once the data have been compressed, we use `mmd.py` to compute the discrepancy.
 

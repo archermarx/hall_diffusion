@@ -36,6 +36,57 @@ parser.add_argument(
 )
 
 LEGACY_MEASUREMENT_NOISE_SCALE = 40.0
+ERROR_TYPES = {"absolute", "relative"}
+ERROR_SPACES = {"normalized", "unnormalized"}
+
+
+def _error_spec(observations, field_observation):
+    """Resolve an observation-level error specification and field overrides."""
+    # Accept the old flat keys when reading existing observations. New configs
+    # should use the nested ``error`` table.
+    error = {}
+    for source in (observations, field_observation):
+        if "stddev" in source:
+            error["stddev"] = source["stddev"]
+        elif "std_dev" in source:
+            error["stddev"] = source["std_dev"]
+        if "error_type" in source:
+            error["type"] = source["error_type"]
+        if "error_space" in source:
+            error["space"] = source["error_space"]
+        error.update(source.get("error", {}))
+
+    error.setdefault("stddev", 1.0)
+    error.setdefault("type", "absolute")
+    error.setdefault("space", "normalized")
+
+    if error["type"] not in ERROR_TYPES:
+        raise ValueError(f"error.type must be one of {sorted(ERROR_TYPES)}, got {error['type']!r}")
+    if error["space"] not in ERROR_SPACES:
+        raise ValueError(f"error.space must be one of {sorted(ERROR_SPACES)}, got {error['space']!r}")
+    return error
+
+
+def _normalized_error_stddev(error, normalized_values, field, normalizer):
+    """Convert absolute/relative uncertainty in either space to model space."""
+    stddev = torch.as_tensor(error["stddev"], dtype=normalized_values.dtype, device=normalized_values.device)
+    if stddev.ndim > 1 or (stddev.ndim == 1 and stddev.numel() not in {1, normalized_values.numel()}):
+        raise ValueError("error.stddev must be a scalar or have one value per observation")
+    if torch.any(stddev < 0):
+        raise ValueError("error.stddev cannot be negative")
+
+    if error["space"] == "normalized":
+        reference = normalized_values
+    else:
+        reference = normalizer.denormalize(normalized_values, field)
+
+    if error["type"] == "relative":
+        stddev = stddev * reference.abs()
+
+    if error["space"] == "unnormalized":
+        stddev = normalizer.normalize_stddev(stddev, field, reference=reference)
+
+    return stddev
 
 
 def build_observation(
@@ -58,8 +109,6 @@ def build_observation(
     values = torch.zeros(num_channels, resolution, device=device)
     variances = torch.zeros(num_channels, resolution, device=device)
 
-    default_stddev = observations.get("stddev", observations.get("std_dev", 1.0))
-
     grid = dataset.grid
 
     obs_fields = observations["fields"]
@@ -68,16 +117,26 @@ def build_observation(
         # Get tensor row index
         row_index = dataset.fields()[obs_field]
 
-        # Get stddev (TODO: read from file to allow more values, but this needs to wait for improved stddev handling)
         obs_dict = obs_fields[obs_field]
-        stddev = noise_std_scale * obs_dict.get("stddev", obs_dict.get("std_dev", default_stddev))
+        error = _error_spec(observations, obs_dict)
 
         # Get observation from file
         x_inds, x_data, y_data = utils.get_observation_locs(
             obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized"
         )
 
-        x_inds = np.unique(np.array(x_inds)).tolist()
+        x_inds = np.asarray(x_inds)
+        unique_inds, first_occurrences = np.unique(x_inds, return_index=True)
+        x_inds = unique_inds.tolist()
+        if y_data is None:
+            normalized_values = data_tensor[row_index, x_inds]
+        else:
+            normalized_values = torch.as_tensor(y_data, dtype=data_tensor.dtype, device=device).flatten()
+            normalized_values = normalized_values[torch.as_tensor(first_occurrences, device=device)]
+
+        stddev = noise_std_scale * _normalized_error_stddev(
+            error, normalized_values, obs_field, dataset.norm
+        )
 
         if (len(x_data) == resolution) and np.all(x_inds == np.arange(resolution)):
             # If x_data == grid, then we're observing an entire row
@@ -85,28 +144,23 @@ def build_observation(
                 print(obs_field + ":\tobserving entire row.")
             observed[row_index, :] = True
 
-            if y_data is None:
-                values[row_index, :] = data_tensor[row_index, :]
-            else:
-                values[row_index, :] = torch.as_tensor(y_data, device=device)
-
+            values[row_index, :] = normalized_values
             variances[row_index, :] = stddev**2
         else:
             # Partial/sparse observation of the row
             # If y not provided, we use the underlying data matrix from the dataset
             # Otherwise we use the y found in the file
-            # TODO: stddevs that vary point-to-point
             observed[row_index, x_inds] = True
             variances[row_index, x_inds] = stddev**2
 
             if y_data is None:
                 if verbose:
                     print(obs_field + ":\tusing data from ref sim at selected axial locs.")
-                values[row_index, x_inds] = data_tensor[row_index, x_inds]
+                values[row_index, x_inds] = normalized_values
             else:
                 if verbose:
                     print(obs_field + ":\tusing data from file.")
-                values[row_index, x_inds] = torch.as_tensor(y_data, dtype=torch.float32, device=device)
+                values[row_index, x_inds] = normalized_values
 
     flat_indices = observed.flatten().nonzero(as_tuple=True)[0]
     operator = torch.eye(observed.numel(), device=device)[flat_indices]

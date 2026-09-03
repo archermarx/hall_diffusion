@@ -36,8 +36,8 @@ guidance_second_order_below = inf
 
 [observation]
 base_sim = "mcmc_reference/ref_3charge/normalized"
-stddev = 0.025
+error = {type = "relative", space = "unnormalized", stddev = 0.025}
 
 [observation.fields]
-B = {locs = "all", error_type = "relative"}
-ui_1 = {locs = "all", error_type = "relative"}
+B = {locations = "all"}
+ui_1 = {locations = "all"}
