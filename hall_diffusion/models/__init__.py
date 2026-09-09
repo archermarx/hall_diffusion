@@ -4,6 +4,11 @@ import torch
 from . import edm2
 from . import controlnet as controlnet_mod
 
+try:
+    from hall_diffusion.configuration import resolve_model_config
+except ModuleNotFoundError:  # Support running hall_diffusion/train.py directly.
+    from configuration import resolve_model_config
+
 
 def dataset_config(config: dict) -> dict:
     """Return the model config that governs dataset construction
@@ -16,11 +21,14 @@ def dataset_config(config: dict) -> dict:
     controlnet config.
     """
     if config.get("architecture") == "controlnet":
-        base_path = Path(config["base_model"]) / "checkpoint.pth.tar"
-        ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
-        config = ckpt["model_config"]
+        if "base_model_config" in config:
+            config = config["base_model_config"]
+        else:
+            base_path = Path(config["base_model"]) / "checkpoint.pth.tar"
+            ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
+            config = ckpt["model_config"]
 
-    return config.copy()
+    return resolve_model_config(config)
 
 
 def dataset_settings(config: dict) -> dict:
@@ -35,7 +43,8 @@ def dataset_settings(config: dict) -> dict:
 
 
 def from_config(config: dict, device: torch.device):
-    config = config.copy()
+    # Resolving here keeps sparse model configs from older checkpoints valid.
+    config = resolve_model_config(config)
     arch = config.get("architecture", "edm2")
     assert arch in {"edm2", "controlnet"}
 

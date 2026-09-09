@@ -128,9 +128,7 @@ def main(model_dir, data_dir, seed=0, bias_subsets=4):
     device = utils.get_device()
     output_dir = Path(model_dir)
     checkpoint = utils.load_checkpoint(output_dir / "checkpoint.pth.tar", device)
-    model_config = checkpoint["model_config"]
-    if "label_dim" in model_config:
-        model_config["condition_dim"] = model_config.pop("label_dim")
+    model_config = models.resolve_model_config(checkpoint["model_config"])
     dataset_settings = models.dataset_settings(model_config)
     model = models.from_config(model_config.copy(), device=device)
     model.load_state_dict(checkpoint["ema"], strict=False)

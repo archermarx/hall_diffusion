@@ -16,6 +16,11 @@ import numpy as np
 import torch
 from torch import nn
 
+try:
+    from hall_diffusion.configuration import EDM2_DEFAULTS
+except ModuleNotFoundError:  # Support running hall_diffusion/train.py directly.
+    from configuration import EDM2_DEFAULTS
+
 # ----------------------------------------------------------------------------
 # Cached construction of constant tensors. Avoids CPU=>GPU copy when the
 # same constant is used multiple times.
@@ -180,13 +185,13 @@ class Block(nn.Module):
         emb_channels,  # Number of embedding channels.
         flavor="enc",  # Flavor: 'enc' or 'dec'.
         resample_mode="keep",  # Resampling: 'keep', 'up', or 'down'.
-        resample_filter=[1, 1],  # Resampling filter.
+        resample_filter=EDM2_DEFAULTS["resample_filter"],  # Resampling filter.
         attention=False,  # Include self-attention?
-        channels_per_head=32,  # Number of channels per attention head.
-        res_balance=0.3,  # Balance between main branch (0) and residual branch (1).
-        attn_balance=0.3,  # Balance between main branch (0) and self-attention (1).
-        clip_act=256,  # Clip output activations. None = do not clip.
-        kernel_width=3,
+        channels_per_head=EDM2_DEFAULTS["channels_per_head"],  # Number of channels per attention head.
+        res_balance=EDM2_DEFAULTS["res_balance"],  # Main/residual branch balance.
+        attn_balance=EDM2_DEFAULTS["attn_balance"],  # Main/self-attention balance.
+        clip_act=EDM2_DEFAULTS["clip_act"],  # None disables activation clipping.
+        kernel_width=EDM2_DEFAULTS["kernel_width"],
     ):
         super().__init__()
         self.out_channels = out_channels
@@ -336,14 +341,14 @@ class UNet(nn.Module):
         resolution,  # Image resolution.
         in_channels,  # Image channels.
         condition_dim,  # Class label dimensionality. 0 = unconditional.
-        base_channels=192,  # Base multiplier for the number of channels.
-        channel_mult=[1, 2, 3, 4, 5],  # Per-resolution multipliers for the number of channels.
-        channel_mult_noise=None,  # Multiplier for noise embedding dimensionality. None = select based on channel_mult.
-        channel_mult_emb=None,  # Multiplier for final embedding dimensionality. None = select based on channel_mult.
-        num_blocks=3,  # Number of residual blocks per resolution.
-        attn_resolutions=[16, 8],  # List of resolutions with self-attention.
-        label_balance=0.5,  # Balance between noise embedding (0) and class embedding (1).
-        concat_balance=0.5,  # Balance between skip connections (0) and main path (1).
+        base_channels=EDM2_DEFAULTS["base_channels"],  # Base multiplier for the number of channels.
+        channel_mult=EDM2_DEFAULTS["channel_mult"],  # Per-resolution channel multipliers.
+        channel_mult_noise=EDM2_DEFAULTS["channel_mult_noise"],
+        channel_mult_emb=EDM2_DEFAULTS["channel_mult_emb"],
+        num_blocks=EDM2_DEFAULTS["num_blocks"],  # Residual blocks per resolution.
+        attn_resolutions=EDM2_DEFAULTS["attn_resolutions"],
+        label_balance=EDM2_DEFAULTS["label_balance"],
+        concat_balance=EDM2_DEFAULTS["concat_balance"],
         include_decoder=True,  # Whether to include the decoder block (useful for ControlNets)
         **block_kwargs,  # Arguments for Block.
     ):
@@ -459,7 +464,7 @@ class EDM2Denoiser(nn.Module):
         resolution,  # Image resolution.
         in_channels,  # Image channels.
         condition_dim,  # Class label dimensionality. 0 = unconditional.
-        data_std=0.5,  # Expected standard deviation of the training data.
+        data_std=EDM2_DEFAULTS["data_std"],  # Expected standard deviation of the training data.
         **unet_kwargs,  # Keyword arguments for UNet.
     ):
         super().__init__()

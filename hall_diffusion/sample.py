@@ -469,9 +469,7 @@ def infer(
     # Load model and config from checkpoint
     checkpoint_path = Path(model)
     model_dict = utils.load_checkpoint(checkpoint_path, device)
-    model_config = model_dict["model_config"]
-    if "label_dim" in model_config:
-        model_config["condition_dim"] = model_config.pop("label_dim")
+    model_config = models.resolve_model_config(model_dict["model_config"])
     dataset_settings = models.dataset_settings(model_config)
     scalars_in_tensor = dataset_settings["scalars_in_tensor"]
     fourier_features = dataset_settings["fourier_features"]
