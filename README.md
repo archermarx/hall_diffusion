@@ -156,6 +156,52 @@ The configs also have options for sampling/generating from the model.
 To run the sampler, just run `python/sampler.py`.
 The results will be placed in the config's specified output dirs.
 
+Conditional sampling uses an explicit error model. An error can be defined once
+for the observation and partially or completely overridden for an individual
+measurement:
+
+```toml
+[observation]
+base_sim = "data/reference/normalized"
+error = {type = "relative", space = "unnormalized", stddev = 0.05}
+
+[observation.measurements.B]
+locations = "all"
+
+[observation.measurements.ui_1]
+locations = [0.01, 0.02]
+values = [1000.0, 5000.0]
+value_space = "unnormalized"
+error = {type = "absolute", stddev = [50.0, 100.0]}
+
+[observation.measurements.discharge_voltage_v]
+value = 300.0
+value_space = "unnormalized"
+error = {type = "absolute", space = "unnormalized", stddev = 10.0}
+```
+
+`error.type` is `absolute` or `relative`, and `error.space` is `normalized` or
+`unnormalized`. Absolute standard deviations have units of the selected space;
+relative standard deviations are fractions of the observed value in that
+space. All four combinations are converted to normalized model-space variance
+before guidance. For log-normalized fields, unnormalized errors use local
+first-order uncertainty propagation. `stddev` may be a scalar or one value per
+location. Every tensor measurement must have an error, either inherited from
+the observation or defined locally; use `stddev = 0` to request an exact
+measurement.
+
+Scalar parameters use the same namespace but accept only one `value` and one
+scalar error. With tensorized scalars they are measured once using the spatial
+mean of their generated channel. Without tensorized scalars they are exact
+conditioning values; configured uncertainty is ignored with a warning. The
+legacy `constant` sampling mode additionally multiplies every configured
+measurement standard deviation by 40.
+
+Parameter measurements reject spatial `locations`, array-valued `values`, and
+array-valued errors. The former `[observation.fields]` and `[params]` tables and
+the `x`, `y`, `normalized`, and flat error keys are intentionally unsupported.
+Sampling derives scalar and Fourier layout settings from the model checkpoint.
+
 ## Evaluating model quality
 We use the maximum mean discrepancy to evaluate the distance between two distributions, i.e. generated samples and a test set. We apply it here by first compressing the data into a latent representation using the Hierarchical Tucker method. This can be done in `compress.py`. Once the data have been compressed, we use `mmd.py` to compute the discrepancy.
 

@@ -16,6 +16,11 @@ import torch
 import torch.nn as nn
 from typing import TypedDict
 
+try:
+    from hall_diffusion.configuration import EDM2_DEFAULTS
+except ModuleNotFoundError:  # Support running hall_diffusion/train.py directly.
+    from configuration import EDM2_DEFAULTS
+
 from .edm2 import (
     get_precondition_factors,
     UNet, MPConv, EDM2Denoiser, mp_silu,
@@ -62,7 +67,7 @@ class ControlNet(torch.nn.Module):
         resolution: int,             # Must match UNet resolution.
         in_channels: int,            # Must match UNet in_channels.
         condition_dim: int,          # Must match UNet condition_dim. 0 = unconditional.
-        data_std=0.5,
+        data_std=EDM2_DEFAULTS["data_std"],
         **unet_kwargs,
     ):
         super().__init__()

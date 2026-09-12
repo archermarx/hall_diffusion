@@ -2,16 +2,21 @@ import torch
 import numpy as np
 from models.controlnet import ControlNet
 
+try:
+    from hall_diffusion.configuration import LOSS_DEFAULTS
+except ModuleNotFoundError:  # Support running hall_diffusion/train.py directly.
+    from configuration import LOSS_DEFAULTS
+
 # ----------------------------------------------------------------------------
 # Loss function for EDM2 model
 # Modified to include first- and second-deriviative losses to hopefully reduce noise
 class EDM2Loss:
     def __init__(
         self,
-        P_mean=-0.4,
-        P_std=1.0,
-        sigma_data=0.5,
-        deriv_h=1.0,
+        P_mean=LOSS_DEFAULTS["P_mean"],
+        P_std=LOSS_DEFAULTS["P_std"],
+        sigma_data=LOSS_DEFAULTS["sigma_data"],
+        deriv_h=LOSS_DEFAULTS["deriv_h"],
     ):
         self.P_mean = P_mean
         self.P_std = P_std

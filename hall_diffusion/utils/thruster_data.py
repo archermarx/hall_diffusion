@@ -105,10 +105,22 @@ class ThrusterDataset(Dataset):
         df_grid.to_csv(path / "grid.csv", index=False)
 
     def fields(self):
-        return self.norm.fields()
+        return self.norm.tensor_channels()
 
     def params(self):
-        return self.norm.params()
+        return self.norm.input_params()
+
+    def spatial_fields(self):
+        return self.norm.spatial_fields()
+
+    def input_params(self):
+        return self.norm.input_params()
+
+    def performance_scalars(self):
+        return self.norm.performance_scalars()
+
+    def tensor_channels(self):
+        return self.norm.tensor_channels()
 
     def get_field(self, tens, name, action=None):
         row = tens[:, self.fields()[name], :]

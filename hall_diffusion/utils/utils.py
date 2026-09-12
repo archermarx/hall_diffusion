@@ -59,28 +59,37 @@ def load_checkpoint(path, device):
     # sys.modules.setdefault("utils", sys.modules["hall_diffusion.utils"])
 
     if device.type == "cuda":
-        return torch.load(path, weights_only=False)
+        return torch.load(path, weights_only=False, map_location=device)
 
     return torch.load(path, weights_only=False, map_location="cpu")
 
 
 def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
-    x = obs[field].get("x", "all")
-    y = obs[field].get("y", None)
+    field_obs = obs[field]
+    x = field_obs.get("locations", "all")
+    y = field_obs.get("values")
+    grid_values = grid.detach().cpu().numpy() if isinstance(grid, torch.Tensor) else np.asarray(grid)
 
-    if x == "all":
+    if isinstance(x, str):
+        if x != "all":
+            raise ValueError(f"Measurement locations must be an array or 'all', got {x!r}")
         x_new = grid
         indices = np.arange(len(x_new))
     else:
         x = np.array(x)
+        if x.ndim != 1 or x.size == 0:
+            raise ValueError(f"Measurement '{field}' locations must be a nonempty one-dimensional array")
         x_new = np.zeros_like(x)
         indices = np.zeros_like(x, dtype=int)
         for i, _x in enumerate(x):
-            j = bisect.bisect_left(grid, _x)
+            j = bisect.bisect_left(grid_values, _x)
+            if j == len(grid_values):
+                raise ValueError(f"Observation location {_x} lies beyond the simulation grid")
             indices[i] = j
-            x_new[i] = grid[j]
+            x_new[i] = grid_values[j]
 
-    assert (y is None) or (len(x) == len(y)) or len(y) == 1
+    if y is not None and len(x_new) != len(y) and len(y) != 1:
+        raise ValueError(f"Measurement '{field}' must provide one value or one value per location")
 
     if y is not None:
         if len(y) == 1:
@@ -88,14 +97,16 @@ def get_observation_locs(obs, field, grid, form="normalized", normalizer=None):
         else:
             y = np.array(y)
 
-        normalized = obs[field].get("normalized", False)
+        value_space = field_obs["value_space"]
+        if value_space not in {"normalized", "unnormalized"}:
+            raise ValueError("value_space must be 'normalized' or 'unnormalized'")
 
-        if form == "normalized" and not normalized:
+        if form == "normalized" and value_space == "unnormalized":
             if normalizer is None:
                 raise RuntimeError("Normalized data requested but no normalizer provided.")
 
             y = normalizer.normalize(y, field)
-        elif form == "denormalized" and normalized:
+        elif form == "denormalized" and value_space == "normalized":
             if normalizer is None:
                 raise RuntimeError("De-normalized data requested but no normalizer provided.")
 

@@ -5,7 +5,7 @@ from pathlib import Path
 import os
 import shutil
 import uuid
-import math
+import warnings
 
 # Third-party deps
 import torch
@@ -14,6 +14,7 @@ import numpy as np
 # Local deps
 from hall_diffusion import models
 from hall_diffusion.models.controlnet import ControlNet
+from hall_diffusion.guidance import guidance_score, legacy_guidance_score, load_variance_model
 from hall_diffusion.utils import utils
 from hall_diffusion.utils.thruster_data import ThrusterDataset
 from hall_diffusion.samplers.edmsampler import EDMSampler, RK2Integrator, ObservationGuidance
@@ -26,8 +27,6 @@ parser.add_argument("-n", "--num-samples", type=int)
 parser.add_argument("-b", "--batch-size", type=int)
 parser.add_argument("-s", "--num-steps", type=int)
 parser.add_argument("--test-dir", type=Path)
-parser.add_argument("--scalars-in-tensor", action="store_true")
-parser.add_argument("--fourier-features", action="store_true")
 parser.add_argument(
     "--device",
     choices=("auto", "cpu", "mps", "cuda", "xpu"),
@@ -35,142 +34,263 @@ parser.add_argument(
     help="Compute backend to use (default: auto; priority: cuda, mps, xpu, cpu)",
 )
 
+LEGACY_MEASUREMENT_NOISE_SCALE = 40.0
+ERROR_TYPES = {"absolute", "relative"}
+ERROR_SPACES = {"normalized", "unnormalized"}
+
+
+LEGACY_OBSERVATION_KEYS = {"fields", "params"}
+LEGACY_MEASUREMENT_KEYS = {"x", "y", "locs", "normalized", "error_type", "error_space", "stddev", "std_dev"}
+
+
+def _validate_observation_interface(observations):
+    if legacy := LEGACY_OBSERVATION_KEYS.intersection(observations):
+        names = ", ".join(sorted(legacy))
+        raise ValueError(
+            f"Legacy observation key(s) {names} are no longer supported; "
+            "move all fields and parameters under 'measurements'."
+        )
+    if legacy := LEGACY_MEASUREMENT_KEYS.intersection(observations):
+        names = ", ".join(sorted(legacy))
+        raise ValueError(f"Observation uses retired flat error key(s) {names}; use the nested 'error' table.")
+    if "measurements" not in observations:
+        raise ValueError("Observation configuration requires a 'measurements' table.")
+    if not isinstance(observations["measurements"], dict):
+        raise ValueError("observation.measurements must be a table.")
+
+
+def _validate_measurement_keys(name, measurement, allowed):
+    if legacy := LEGACY_MEASUREMENT_KEYS.intersection(measurement):
+        names = ", ".join(sorted(legacy))
+        raise ValueError(f"Measurement '{name}' uses retired key(s) {names}; use the unified measurement schema.")
+    if unexpected := set(measurement).difference(allowed):
+        names = ", ".join(sorted(unexpected))
+        raise ValueError(f"Measurement '{name}' has unsupported key(s): {names}.")
+
+
+def _error_spec(observations, measurement, name, required):
+    """Resolve and validate observation-level error defaults and overrides."""
+    global_error = observations.get("error")
+    local_error = measurement.get("error")
+    if global_error is None and local_error is None:
+        if required:
+            raise ValueError(
+                f"Tensor measurement '{name}' requires an error specification; use stddev = 0 for an exact value."
+            )
+        return None
+    if global_error is not None and not isinstance(global_error, dict):
+        raise ValueError("observation.error must be a table.")
+    if local_error is not None and not isinstance(local_error, dict):
+        raise ValueError(f"Measurement '{name}' error must be a table.")
+
+    error = dict(global_error or {})
+    error.update(local_error or {})
+    if missing := {"type", "space", "stddev"}.difference(error):
+        raise ValueError(f"Error for measurement '{name}' is missing {sorted(missing)}.")
+    if error["type"] not in ERROR_TYPES:
+        raise ValueError(f"error.type must be one of {sorted(ERROR_TYPES)}, got {error['type']!r}")
+    if error["space"] not in ERROR_SPACES:
+        raise ValueError(f"error.space must be one of {sorted(ERROR_SPACES)}, got {error['space']!r}")
+    return error
+
+
+def _normalized_error_stddev(error, normalized_values, field, normalizer):
+    """Convert absolute/relative uncertainty in either space to model space."""
+    stddev = torch.as_tensor(error["stddev"], dtype=normalized_values.dtype, device=normalized_values.device)
+    if stddev.ndim > 1 or (stddev.ndim == 1 and stddev.numel() not in {1, normalized_values.numel()}):
+        raise ValueError("error.stddev must be a scalar or have one value per observation")
+    if not torch.all(torch.isfinite(stddev)) or torch.any(stddev < 0):
+        raise ValueError("error.stddev must be finite and nonnegative")
+
+    if error["space"] == "normalized":
+        reference = normalized_values
+    else:
+        reference = normalizer.denormalize(normalized_values, field)
+
+    if error["type"] == "relative":
+        stddev = stddev * reference.abs()
+
+    if error["space"] == "unnormalized":
+        stddev = normalizer.normalize_stddev(stddev, field, reference=reference)
+
+    return stddev
+
+
+def _batch_condition_vector(values, num_samples, device):
+    values = torch.as_tensor(values, dtype=torch.float32, device=device)
+    if values.ndim == 1:
+        values = values.unsqueeze(0)
+    if values.ndim != 2:
+        raise ValueError("condition_vec must be one- or two-dimensional")
+    if values.shape[0] == 1:
+        values = values.expand(num_samples, -1).clone()
+    elif values.shape[0] != num_samples:
+        raise ValueError(f"condition_vec has {values.shape[0]} rows, expected 1 or {num_samples}")
+    return values
+
+
+def _explicit_normalized_value(measurement, name, normalizer, device):
+    if "value_space" not in measurement:
+        raise ValueError(f"Measurement '{name}' provides a value but does not specify value_space.")
+    value_space = measurement["value_space"]
+    if value_space not in ERROR_SPACES:
+        raise ValueError(f"Measurement '{name}' value_space must be 'normalized' or 'unnormalized'.")
+    value = torch.as_tensor(measurement["value"], dtype=torch.float32, device=device)
+    if value.ndim != 0:
+        raise ValueError(f"Scalar measurement '{name}' requires a scalar value.")
+    return normalizer.normalize(value, name) if value_space == "unnormalized" else value
+
+
+def _validate_scalar_measurement(name, measurement):
+    _validate_measurement_keys(name, measurement, {"value", "value_space", "error"})
+    if "value_space" in measurement and "value" not in measurement:
+        raise ValueError(f"Scalar measurement '{name}' has value_space but no value.")
+    if "value" in measurement and isinstance(measurement["value"], (list, tuple)):
+        raise ValueError(f"Scalar measurement '{name}' requires one value, not per-cell values.")
+
+
+def _validate_scalar_error(name, error):
+    if error is not None and torch.as_tensor(error["stddev"]).ndim != 0:
+        raise ValueError(f"Scalar measurement '{name}' requires one error.stddev, not per-cell uncertainties.")
+
 
 def build_observation(
     dataset,
     observations,
     num_samples,
     param_vec=None,
-    default_stddev=1.0,
+    sampling_mode="dps",
     device="cpu",
     verbose=False,
 ):
+    _validate_observation_interface(observations)
     _, data_params, data_tensor = dataset[0]
+    data_tensor = data_tensor.to(device)
+
+    noise_std_scale = LEGACY_MEASUREMENT_NOISE_SCALE if sampling_mode == "constant" else 1.0
 
     (num_channels, resolution) = data_tensor.shape
 
-    obs_matrix_loc = torch.zeros(num_channels, resolution, device=device)
-    obs_matrix_dat = torch.zeros(num_channels, resolution, device=device)
-    obs_matrix_var = torch.zeros(num_channels, resolution, device=device)
+    spatial_fields = dataset.spatial_fields()
+    input_params = dataset.input_params()
+    performance_scalars = dataset.performance_scalars()
+    tensor_channels = dataset.tensor_channels()
 
-    default_stddev = observations.get("stddev", observations.get("std_dev", 1.0))
+    if param_vec is None:
+        param_vec = data_params.detach().clone()
+    param_vec = _batch_condition_vector(param_vec, num_samples, device)
 
-    grid = dataset.grid
+    operator_rows = []
+    observed_values = []
+    observed_variances = []
+    ignored_param_errors = []
+    measurements = observations["measurements"]
 
-    m = num_channels * resolution
-    n = 0
+    for name, measurement in measurements.items():
+        if not isinstance(measurement, dict):
+            raise ValueError(f"Measurement '{name}' must be a table.")
 
-    obs_fields = observations["fields"]
+        if name in input_params and not dataset.scalars_in_tensor:
+            _validate_scalar_measurement(name, measurement)
+            error = _error_spec(observations, measurement, name, required=False)
+            _validate_scalar_error(name, error)
+            if error is not None:
+                ignored_param_errors.append(name)
+            if "value" in measurement:
+                param_vec[:, input_params[name]] = _explicit_normalized_value(
+                    measurement, name, dataset.norm, device
+                )
+            continue
 
-    for obs_field in obs_fields:
-        # Get tensor row index
-        row_index = dataset.fields()[obs_field]
+        if name in performance_scalars and not dataset.scalars_in_tensor:
+            raise ValueError(
+                f"Performance scalar '{name}' cannot be measured when scalars_in_tensor is false."
+            )
 
-        # Get stddev (TODO: read from file to allow more values, but this needs to wait for improved stddev handling)
-        obs_dict = obs_fields[obs_field]
-        stddev = obs_dict.get("stddev", obs_dict.get("std_dev", default_stddev))
+        if name in input_params or name in performance_scalars:
+            _validate_scalar_measurement(name, measurement)
+            error = _error_spec(observations, measurement, name, required=True)
+            _validate_scalar_error(name, error)
+            row_index = tensor_channels[name]
+            if "value" in measurement:
+                normalized_value = _explicit_normalized_value(measurement, name, dataset.norm, device)
+            else:
+                normalized_value = data_tensor[row_index].mean()
 
-        # Get observation from file
-        x_inds, x_data, y_data = utils.get_observation_locs(
-            obs_fields, obs_field, grid, normalizer=dataset.norm, form="normalized"
+            row = torch.zeros(num_channels * resolution, dtype=data_tensor.dtype, device=device)
+            row[row_index * resolution : (row_index + 1) * resolution] = 1.0 / resolution
+            stddev = noise_std_scale * _normalized_error_stddev(
+                error, normalized_value, name, dataset.norm
+            )
+            operator_rows.append(row)
+            observed_values.append(normalized_value.reshape(1))
+            observed_variances.append(stddev.square().reshape(1))
+            continue
+
+        if name not in spatial_fields:
+            raise ValueError(f"Unknown measurement '{name}'.")
+
+        _validate_measurement_keys(name, measurement, {"locations", "values", "value_space", "error"})
+        if "value_space" in measurement and "values" not in measurement:
+            raise ValueError(f"Spatial measurement '{name}' has value_space but no values.")
+        if "values" in measurement and not isinstance(measurement["values"], (list, tuple)):
+            raise ValueError(f"Spatial measurement '{name}' requires an array of values.")
+        if "values" in measurement and "value_space" not in measurement:
+            raise ValueError(f"Measurement '{name}' provides values but does not specify value_space.")
+        error = _error_spec(observations, measurement, name, required=True)
+        x_inds, _, y_data = utils.get_observation_locs(
+            measurements, name, dataset.grid, normalizer=dataset.norm, form="normalized"
+        )
+        x_inds = np.asarray(x_inds)
+        unique_inds, first_occurrences = np.unique(x_inds, return_index=True)
+        x_inds = unique_inds.tolist()
+        if y_data is None:
+            normalized_values = data_tensor[tensor_channels[name], x_inds]
+        else:
+            normalized_values = torch.as_tensor(y_data, dtype=data_tensor.dtype, device=device).flatten()
+            normalized_values = normalized_values[torch.as_tensor(first_occurrences, device=device)]
+
+        stddev = noise_std_scale * _normalized_error_stddev(error, normalized_values, name, dataset.norm)
+        if stddev.ndim == 0:
+            stddev = stddev.expand(normalized_values.numel())
+        for cell_index in x_inds:
+            row = torch.zeros(num_channels * resolution, dtype=data_tensor.dtype, device=device)
+            row[tensor_channels[name] * resolution + cell_index] = 1.0
+            operator_rows.append(row)
+        observed_values.append(normalized_values)
+        observed_variances.append(stddev.square())
+        if verbose:
+            print(f"{name}:\tobserving {len(x_inds)} location(s).")
+
+    if ignored_param_errors:
+        names = ", ".join(sorted(ignored_param_errors))
+        warnings.warn(
+            f"Ignoring uncertainty for non-tensorized parameter(s): {names}; their values are exact conditions.",
+            UserWarning,
+            stacklevel=2,
         )
 
-        x_inds = np.unique(np.array(x_inds)).tolist()
+    if operator_rows:
+        operator = torch.stack(operator_rows)
+        obs_y = torch.cat(observed_values)
+        obs_var = torch.cat(observed_variances)
+    else:
+        operator = None
+        obs_y = None
+        obs_var = None
 
-        if (len(x_data) == resolution) and np.all(x_inds == np.arange(resolution)):
-            # If x_data == grid, then we're observing an entire row
-            if verbose:
-                print(obs_field + ":\tobserving entire row.")
-            obs_matrix_loc[row_index, :] = 1.0
-
-            if y_data is None:
-                obs_matrix_dat[row_index, :] = data_tensor[row_index, :]
-            else:
-                obs_matrix_dat[row_index, :] = torch.tensor(y_data, device=device)
-
-            obs_matrix_var[row_index, :] = stddev**2
-            n += resolution
-        else:
-            # Partial/sparse observation of the row
-            # If y not provided, we use the underlying data matrix from the dataset
-            # Otherwise we use the y found in the file
-            # TODO: stddevs that vary point-to-point
-            obs_matrix_loc[row_index, x_inds] = 1.0
-            obs_matrix_var[row_index, x_inds] = stddev**2
-            n += len(x_inds)
-
-            if y_data is None:
-                if verbose:
-                    print(obs_field + ":\tusing data from ref sim at selected axial locs.")
-                obs_matrix_dat[row_index, x_inds] = data_tensor[row_index, x_inds]
-            else:
-                if verbose:
-                    print(obs_field + ":\tusing data from file.")
-                obs_matrix_dat[row_index, x_inds] = torch.tensor(y_data, dtype=torch.float32, device=device)
-
-    # Dimensions
-    # m = num_channels * resolution
-    # n = num_observations
-    # A (linear observation operator) = (n, m)
-    # y (observed data) = (n,)
-    obs_matrix_loc = obs_matrix_loc.reshape(-1)
-    obs_A = torch.zeros(n, m, device=device)
-
-    j = 0
-    for i in range(m):
-        if obs_matrix_loc[i] == 1.0:
-            obs_A[j, i] = 1.0
-            j += 1
-
-    obs_y = obs_A @ obs_matrix_dat.reshape(-1)
-    obs_var = obs_A @ obs_matrix_var.reshape(-1)
-
-    # If no param vec specified here, we use the one from the reference dataset
-    if param_vec is None:
-        param_vec = data_params.detach().clone().to(device)
-        param_vec = param_vec.unsqueeze(0).repeat(num_samples, 1)
-
-    # Read scalar parameters if present
-    if (params := observations.get("params", None)) is not None:
-        for p, i in dataset.params().items():
-            if p in params:
-                param_vec[:, i] = dataset.norm.normalize(params[p], p)
-
-    return obs_A, obs_y, obs_var, param_vec
-
-
-# =====================================================
-# Conditioning on observations and PDEs
-# =====================================================
-def guidance_score(x_t, x_0, t, observation, retain_graph=False):
-    (batch_size, _, _) = x_0.shape
-
-    obs_vec = observation["data"]
-    var = observation["var"]
-    H = observation["operator"]
-
-    if obs_vec is None:
-        return 0.0
-
-    def proc_var_fn(t):
-        return t**2 / (t**2 + 1)
-
-    proc_var = 0.25 * proc_var_fn(t)
-
-    # =====================================================
-    # Diffusion posterior sampling (get observation loss)
-    # =====================================================
-    x_vec = x_0.reshape(batch_size, -1)
-    measurement = torch.matmul(H, x_vec.T).T
-    total_var = var + proc_var
-    obs_loss = torch.sum((measurement - obs_vec[None, ...]) ** 2 / total_var)
-    score = -torch.autograd.grad(obs_loss, x_t, retain_graph=retain_graph)[0]
-
-    return score
+    return operator, obs_y, obs_var, param_vec
 
 
 def parse_observation(
-    shape, args, scalars_in_tensor, fourier_features, condition_vec=None, device="cpu", verbose=False
+    shape,
+    args,
+    scalars_in_tensor,
+    fourier_features,
+    variance_model=None,
+    condition_vec=None,
+    device="cpu",
+    verbose=False,
 ):
     num_samples, _, resolution = shape
     # Determine if we're doing condional or unconditional sampling
@@ -203,21 +323,28 @@ def parse_observation(
         obs_file = Path(obs_args["base_sim"])
 
         # Load data for conditioning
-        dataset = ThrusterDataset(obs_file, scalars_in_tensor=scalars_in_tensor, fourier_features=fourier_features)
-
-        if (obs_params := obs_args.get("params", None)) is not None:
-            if set(obs_params) != set(dataset.params()) and param_vec is None:
-                # We didn't completely specify the parameter vector and have nothing to fall back on
-                raise RuntimeError("Incomplete parameter specification without data directory. Exiting.")
-
-        elif "params" not in obs_args and param_vec is None:
-            # Use the parameter vector from the ref simulation
-            param_vec = None  # This is redundant, and this entire code must be rewritten
+        dataset = ThrusterDataset(
+            obs_file,
+            downsample_res=resolution,
+            scalars_in_tensor=scalars_in_tensor,
+            fourier_features=fourier_features,
+        )
 
         obs_operator, obs_data, obs_var, param_vec = build_observation(
-            dataset, obs_args, num_samples, param_vec, device=device
+            dataset,
+            obs_args,
+            num_samples,
+            param_vec,
+            sampling_mode=args.get("sampling_mode", "dps"),
+            device=device,
         )
-        obs = dict(operator=obs_operator, data=obs_data, var=obs_var)
+        obs = dict(
+            operator=obs_operator,
+            data=obs_data,
+            var=obs_var,
+            covariance_jitter=args.get("covariance_jitter", 1e-6),
+            variance_model=variance_model,
+        )
     else:
         if param_vec is None or unconditional_dataset is None:
             raise RuntimeError("No observation specified and no data directory given. Exiting")
@@ -234,6 +361,7 @@ def sample(
     scalars_in_tensor,
     fourier_features,
     args,
+    variance_model=None,
     condition_vec=None,
     save_to_file=True,
     device="cpu",
@@ -242,7 +370,14 @@ def sample(
     num_samples, _, _ = shape
 
     obs, dataset, param_vec = parse_observation(
-        shape, args, scalars_in_tensor, fourier_features, condition_vec, device, verbose=verbose
+        shape,
+        args,
+        scalars_in_tensor,
+        fourier_features,
+        variance_model,
+        condition_vec,
+        device,
+        verbose=verbose,
     )
 
     # Timestep args
@@ -250,13 +385,17 @@ def sample(
     noise_max = args.get("noise_max", 80.0)
     noise_min = args.get("noise_min", 0.002)
     exponent = args.get("step_exponent", 7.0)
+    sampling_mode = args.get("sampling_mode", "dps")
+    if sampling_mode not in {"dps", "constant"}:
+        raise ValueError("sampling_mode must be 'dps' or 'constant'")
+    score_function = legacy_guidance_score if sampling_mode == "constant" else guidance_score
 
     # Set up sampler
     integrator = RK2Integrator(
         model,
         guidance_score_fn=ObservationGuidance(
-            type="constant",
-            obs_score=guidance_score,
+            type=sampling_mode,
+            obs_score=score_function,
             observation=obs,
             guidance_start_time=args.get("guidance_start_time", float("inf")),
         ),
@@ -266,11 +405,18 @@ def sample(
         S_tmin=args.get("S_tmin", 0.0),
         S_tmax=args.get("S_tmax", float("inf")),
         S_noise=args.get("S_noise", 1.003),
+        guidance_second_order_below=args.get("guidance_second_order_below", 0.1),
     )
     sampler = EDMSampler(shape, num_steps, noise_min, noise_max, exponent)
 
-    # Sample, saving intermediate steps for visualization and debugging
-    output = sampler.sample(integrator, showprogress=True, device=device, model_args=dict(condition_vector=param_vec))
+    record_trajectory = args.get("record_trajectory", False)
+    output = sampler.sample(
+        integrator,
+        showprogress=True,
+        device=device,
+        model_args=dict(condition_vector=param_vec),
+        record_trajectory=record_trajectory,
+    )
 
     final = output[-1, ...]
 
@@ -296,10 +442,15 @@ def sample(
             if len(params_cpu.shape) == 1:
                 np.savez(file, data=tens, params=params_cpu)
             else:
-                np.savez(file, data=tens, params=params_cpu[:, i])
+                np.savez(file, data=tens, params=params_cpu[i, :])
 
-        # Write samples at all iterations to a single tensor
-        np.savez(out_dir / "data_allsteps.npz", steps=sampler.noise_steps, data=output.cpu().numpy(), params=params_cpu)
+        if record_trajectory:
+            np.savez(
+                out_dir / "data_allsteps.npz",
+                steps=sampler.noise_steps,
+                data=output.cpu().numpy(),
+                params=params_cpu,
+            )
 
     return output
 
@@ -307,8 +458,6 @@ def sample(
 def infer(
     model,
     sampling_config,
-    scalars_in_tensor,
-    fourier_features,
     condition_vec=None,
     save_to_file=True,
     verbose=False,
@@ -318,15 +467,17 @@ def infer(
     print(f"Selected device: {device}")
 
     # Load model and config from checkpoint
-    model_dict = utils.load_checkpoint(model, device)
-    model_config = model_dict["model_config"]
-    if "label_dim" in model_config:
-        model_config["condition_dim"] = model_config.pop("label_dim")
+    checkpoint_path = Path(model)
+    model_dict = utils.load_checkpoint(checkpoint_path, device)
+    model_config = models.resolve_model_config(model_dict["model_config"])
+    dataset_settings = models.dataset_settings(model_config)
+    scalars_in_tensor = dataset_settings["scalars_in_tensor"]
+    fourier_features = dataset_settings["fourier_features"]
 
     if verbose:
         print(f"{model_config=}")
 
-    model = models.from_config(model_config, device=device)
+    model = models.from_config(model_config.copy(), device=device)
 
     # Determine which weights to load
     model_type = sampling_config.get("model_type", "ema")
@@ -334,6 +485,7 @@ def infer(
     model_type = "model" if model_type == "last" else model_type
 
     model.load_state_dict(model_dict[model_type], strict=False)
+    model.requires_grad_(False)
     if isinstance(model, ControlNet):
         base_model = model.trained_unet
     else:
@@ -345,35 +497,48 @@ def infer(
     num_samples = sampling_config.get("num_samples", 64)
     batch_size = sampling_config.get("batch_size", num_samples)
 
-    full_batches = math.floor(num_samples / batch_size)
-    remainder = num_samples - full_batches * batch_size
-    batches = [batch_size for _ in range(math.floor(num_samples / batch_size))]
+    full_batches, remainder = divmod(num_samples, batch_size)
+    batches = [batch_size] * full_batches
     if remainder > 0:
         batches.append(remainder)
 
     channels = base_model.img_channels
     resolution = base_model.img_resolution
 
+    variance_model = None
+    sampling_mode = sampling_config.get("sampling_mode", "dps")
+    if sampling_mode not in {"dps", "constant"}:
+        raise ValueError("sampling_mode must be 'dps' or 'constant'")
+    if "observation" in sampling_config and sampling_mode == "dps":
+        variance_file = Path(
+            sampling_config.get("process_variance_file", checkpoint_path.parent / "process_variance.npz")
+        )
+        variance_model = load_variance_model(
+            variance_file, sampling_config, (channels, resolution), device
+        )
+
     samples = []
 
     # Sample in batches
-    for i, batch_num_samples in enumerate(batches):
+    for batch_index, batch_num_samples in enumerate(batches):
         size = (batch_num_samples, channels, resolution)
+        batch_config = {
+            **sampling_config,
+            "replace_samples": sampling_config.get("replace_samples", False) and batch_index == 0,
+        }
         batch_samples = sample(
             model,
             size,
             scalars_in_tensor,
             fourier_features,
-            sampling_config,
+            batch_config,
+            variance_model=variance_model,
             condition_vec=condition_vec,
             save_to_file=save_to_file,
             device=device,
             verbose=verbose,
         )
         samples.append(batch_samples)
-
-        # Make sure we don't remove old samples
-        sampling_config["replace_samples"] = False
 
     # Concatenate along batch dimension
     sample_tensor = torch.concatenate(samples, dim=1)
@@ -400,14 +565,9 @@ if __name__ == "__main__":
     if args.batch_size is not None:
         sampling_config["batch_size"] = args.batch_size
 
-    scalars_in_tensor = args.scalars_in_tensor
-    fourier_features = args.fourier_features
-
     infer(
         args.model,
         sampling_config,
-        scalars_in_tensor,
-        fourier_features,
         condition_vec=None,
         device=args.device,
     )

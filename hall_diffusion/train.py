@@ -30,6 +30,7 @@ from models.ema import EMA
 from loss import EDM2Loss
 from utils import utils, thruster_data, visualization
 from utils.timing import StepTimer, format_timedelta
+from configuration import resolve_config, resolve_model_config
 
 DEVICE = utils.get_device()
 AMP_DTYPE = (
@@ -278,18 +279,18 @@ def train(args):
 
     # Load config file
     with open(config_file, "rb") as fp:
-        config = tomllib.load(fp)
+        config = resolve_config(tomllib.load(fp))
 
     # ---------------------------------------------
     # Training configuration
     train_args = config["training"]
     max_epochs = train_args["epochs"]
     batch_size = train_args["batch_size"]
-    condition_dropout = train_args.get("condition_dropout", 0.0)  # Condition dropout disabled by default
+    condition_dropout = train_args["condition_dropout"]
     evaluation_iters = train_args["eval_freq"]
-    use_amp = amp_enabled(DEVICE, train_args.get("use_amp", True))
-    load_workers = train_args.get("load_workers", 2)
-    prefetch_factor = train_args.get("prefetch_factor", 4)
+    use_amp = amp_enabled(DEVICE, train_args["use_amp"])
+    load_workers = train_args["load_workers"]
+    prefetch_factor = train_args["prefetch_factor"]
 
     # ---------------------------------------------
     # Directory configuration
@@ -304,31 +305,11 @@ def train(args):
     # For controlnet, dataset settings (scalars_in_tensor, downsample_res) are
     # inherited from the base model's stored config so they don't need to be
     # re-specified in the controlnet toml.
-    data_cfg = models.dataset_config(config["model"])
-    print(data_cfg)
-
-    # Decide whether to include scalar params in tensor
-    if "scalars_in_tensor" in data_cfg:
-        scalars_in_tensor = data_cfg["scalars_in_tensor"]
-    else:
-        if "condition_dim" in data_cfg and data_cfg["condition_dim"] == 0:
-            scalars_in_tensor = True
-        else:
-            scalars_in_tensor = False
-
-    # Decide whether to include fourier features in tensor
-    # TODO: remove scalars_in_tensor and fourier_features from this, put in data instead
-    if "fourier_features" in data_cfg:
-        fourier_features = data_cfg.pop("fourier_features")
-    else:
-        fourier_features = False
-
-    if "downsample_res" in data_cfg:
-        downsample_res = data_cfg["downsample_res"]
-    elif "resolution" in data_cfg:
-        downsample_res = data_cfg["resolution"]
-    else:
-        downsample_res = None
+    dataset_settings = models.dataset_settings(config["model"])
+    print(dataset_settings)
+    scalars_in_tensor = dataset_settings["scalars_in_tensor"]
+    fourier_features = dataset_settings["fourier_features"]
+    downsample_res = dataset_settings["downsample_res"]
 
     train_dataset = thruster_data.ThrusterDataset(
         train_data_dir,
@@ -375,14 +356,22 @@ def train(args):
         config["model"]["condition_dim"] = train_dataset.num_params
 
     config["model"]["resolution"] = len(train_dataset.grid)
+    if config["model"].get("architecture") == "controlnet":
+        # Snapshot the fully resolved base architecture in the new checkpoint.
+        # Old ControlNet checkpoints without this field continue to load it from
+        # base_model through models.dataset_config().
+        config["model"]["base_model_config"] = models.dataset_config(config["model"])
+    # Dataset-derived values are now available, so finalize the exact model
+    # configuration that will be constructed and stored in checkpoints.
+    config["model"] = resolve_model_config(config["model"])
 
     model = models.from_config(config["model"], device=DEVICE)
     logger.info(f"Number of parameters = {sum(p.numel() for p in model.get_trainable_params())}")
 
     # ---------------------------------------------
     # Set up the exponential moving average model
-    ema_epochs = train_args.get("ema_epochs", None)
-    ema_start = train_args.get("ema_start_epochs", 128)
+    ema_epochs = train_args["ema_epochs"]
+    ema_start = train_args["ema_start_epochs"]
     ema_factor = EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, ema_epochs)
     logger.info(
         f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}."
@@ -393,13 +382,13 @@ def train(args):
     # ---------------------------------------------
     # Optimizer configuration
     opt_args = train_args["optimizer"]
-    betas = tuple(opt_args.get("adam_betas", [0.9, 0.999]))
+    betas = tuple(opt_args["adam_betas"])
     ref_lr = opt_args["lr"]
     min_lr = opt_args["min_lr"]
     lr_decay_epochs = opt_args["lr_decay_start_epochs"]
     lr_decay_batches = lr_decay_epochs * len(train_dataset) // batch_size
 
-    weight_decay_epochs = opt_args.get("weight_decay_epochs", None)
+    weight_decay_epochs = opt_args["weight_decay_epochs"]
     weight_decay = 1 - EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, weight_decay_epochs)
 
     optimizer = optim.AdamW(
@@ -479,7 +468,7 @@ def train(args):
 
     # ---------------------------------------------
     # Loss function
-    loss_fn = EDM2Loss(**train_args.get("loss", {}))
+    loss_fn = EDM2Loss(**train_args["loss"])
 
     # ---------------------------------------------
     # Profiling setup
