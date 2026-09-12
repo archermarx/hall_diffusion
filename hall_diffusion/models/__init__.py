@@ -1,8 +1,5 @@
-from pathlib import Path
-
-import torch
 from . import edm2
-from . import controlnet as controlnet_mod
+from .conditioning import ConditionAdapter, ConditionedEDM2, build_condition_encoder
 
 try:
     from hall_diffusion.configuration import resolve_model_config
@@ -14,20 +11,10 @@ def dataset_config(config: dict) -> dict:
     """Return the model config that governs dataset construction
     as well as the parameters of that base model.
 
-    For a plain edm2 model this is just ``config`` itself.  For a controlnet
-    the dataset must be built to match the *base* model's format (e.g.
-    ``scalars_in_tensor``, ``downsample_res``), so we load those values from
-    the base checkpoint rather than requiring them to be re-specified in the
-    controlnet config.
+    The current model family has one base architecture: EDM2.  This helper is
+    retained because sampling and datasets share the checkpoint-derived
+    settings.
     """
-    if config.get("architecture") == "controlnet":
-        if "base_model_config" in config:
-            config = config["base_model_config"]
-        else:
-            base_path = Path(config["base_model"]) / "checkpoint.pth.tar"
-            ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
-            config = ckpt["model_config"]
-
     return resolve_model_config(config)
 
 
@@ -42,29 +29,26 @@ def dataset_settings(config: dict) -> dict:
     }
 
 
-def from_config(config: dict, device: torch.device):
+def from_config(config: dict, device):
     # Resolving here keeps sparse model configs from older checkpoints valid.
     config = resolve_model_config(config)
     arch = config.get("architecture", "edm2")
-    assert arch in {"edm2", "controlnet"}
+    assert arch == "edm2"
 
-    match arch:
-        case "edm2":
-            config.pop("architecture", None)
-            config.pop("scalars_in_tensor", None)
-            config.pop("downsample_res", None)
-            config.pop("fourier_features", None)
-            model = edm2.EDM2Denoiser(**config).to(device)
-        case "controlnet":
-            base_path = Path(config["base_model"]) / "checkpoint.pth.tar"
-            base_ckpt = torch.load(base_path, weights_only=False, map_location="cpu")
-            base_cfg = dataset_config(config)
-            for key in ("architecture", "scalars_in_tensor", "downsample_res", "fourier_features"):
-                base_cfg.pop(key, None)
-            model = controlnet_mod.ControlNet(
-                model_ckpt=base_ckpt["model"], control_channels=config["control_channels"], **base_cfg
-            ).to(device)
-        case _:
-            raise NotImplementedError()
+    config.pop("architecture", None)
+    config.pop("scalars_in_tensor", None)
+    config.pop("downsample_res", None)
+    config.pop("fourier_features", None)
+    config.pop("base_conditioning", None)
+    model = edm2.EDM2Denoiser(**config).to(device)
 
     return model
+
+
+def make_conditioned_model(base, adapter_configs: dict[str, dict], device):
+    """Attach new, zero-initialized adapters to an already-loaded EDM2 base."""
+    adapters = {
+        name: ConditionAdapter(base, build_condition_encoder(config), config.get("channels_per_head"))
+        for name, config in adapter_configs.items()
+    }
+    return ConditionedEDM2(base, adapters).to(device)

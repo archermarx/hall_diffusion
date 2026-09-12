@@ -13,7 +13,8 @@ import numpy as np
 
 # Local deps
 from hall_diffusion import models
-from hall_diffusion.models.controlnet import ControlNet
+from hall_diffusion.models.adapter_io import load_adapter
+from hall_diffusion.models.conditioning import ConditionedEDM2
 from hall_diffusion.guidance import guidance_score, legacy_guidance_score, load_variance_model
 from hall_diffusion.utils import utils
 from hall_diffusion.utils.thruster_data import ThrusterDataset
@@ -366,6 +367,8 @@ def sample(
     save_to_file=True,
     device="cpu",
     verbose=False,
+    adapter_contexts=None,
+    adapter_scales=None,
 ):
     num_samples, _, _ = shape
 
@@ -410,11 +413,15 @@ def sample(
     sampler = EDMSampler(shape, num_steps, noise_min, noise_max, exponent)
 
     record_trajectory = args.get("record_trajectory", False)
+    model_args = dict(condition_vector=param_vec)
+    if adapter_contexts is not None:
+        model_args["contexts"] = adapter_contexts
+        model_args["adapter_scales"] = adapter_scales
     output = sampler.sample(
         integrator,
         showprogress=True,
         device=device,
-        model_args=dict(condition_vector=param_vec),
+        model_args=model_args,
         record_trajectory=record_trajectory,
     )
 
@@ -455,6 +462,22 @@ def sample(
     return output
 
 
+def _adapter_condition(path, encoder_type, batch_size, device):
+    """Load a preprocessed condition file and broadcast a singleton batch."""
+    with np.load(path, allow_pickle=False) as data:
+        if "condition" not in data:
+            raise KeyError(f"adapter condition file {path} must contain 'condition'")
+        value = torch.as_tensor(np.array(data["condition"]), dtype=torch.float32)
+    expected_ndim = {"mlp": 1, "cnn1d": 2, "cnn2d": 3}[encoder_type]
+    if value.ndim == expected_ndim:
+        value = value.unsqueeze(0)
+    if value.shape[0] == 1:
+        value = value.expand(batch_size, *value.shape[1:])
+    elif value.shape[0] != batch_size:
+        raise ValueError(f"condition file {path} has batch {value.shape[0]}, expected 1 or {batch_size}")
+    return value.to(device)
+
+
 def infer(
     model,
     sampling_config,
@@ -486,10 +509,21 @@ def infer(
 
     model.load_state_dict(model_dict[model_type], strict=False)
     model.requires_grad_(False)
-    if isinstance(model, ControlNet):
-        base_model = model.trained_unet
-    else:
-        base_model = model
+    base_model = model
+
+    loaded_adapters = []
+    adapter_specs = sampling_config.get("adapters", [])
+    if adapter_specs:
+        adapters = {}
+        for spec in adapter_specs:
+            name, adapter, artifact = load_adapter(
+                spec["checkpoint"], base_model, model_config, weights=spec.get("weights", "ema"),
+            )
+            if name in adapters:
+                raise ValueError(f"adapter {name!r} appears more than once")
+            adapters[name] = adapter
+            loaded_adapters.append((name, spec, artifact["adapter_config"]["encoder"]["type"]))
+        model = ConditionedEDM2(base_model, adapters).to(device)
 
     # Switch model to evalution mode and sample
     model.eval()
@@ -526,6 +560,16 @@ def infer(
             **sampling_config,
             "replace_samples": sampling_config.get("replace_samples", False) and batch_index == 0,
         }
+        adapter_contexts = None
+        adapter_scales = None
+        if loaded_adapters:
+            raw_conditions = {
+                name: _adapter_condition(spec["condition"], encoder_type, batch_num_samples, device)
+                for name, spec, encoder_type in loaded_adapters
+            }
+            with torch.no_grad():
+                adapter_contexts = model.prepare_conditions(raw_conditions)
+            adapter_scales = {name: float(spec.get("scale", 1.0)) for name, spec, _ in loaded_adapters}
         batch_samples = sample(
             model,
             size,
@@ -537,6 +581,8 @@ def infer(
             save_to_file=save_to_file,
             device=device,
             verbose=verbose,
+            adapter_contexts=adapter_contexts,
+            adapter_scales=adapter_scales,
         )
         samples.append(batch_samples)
 

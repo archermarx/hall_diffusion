@@ -1,0 +1,37 @@
+[adapter]
+name = "image"
+base_checkpoint = "saved_models/unconditional/checkpoint.pth.tar"
+base_weights = "ema"
+
+[adapter.encoder]
+type = "cnn2d"
+in_channels = 1
+channels = [64, 128, 256]
+blocks_per_stage = 2
+token_dim = 256
+
+[adapter.condition]
+type = "files"
+train_directory = "data/train_images/data"
+test_directory = "data/test_images/data"
+key = "condition"
+
+[training]
+epochs = 128
+batch_size = 64
+load_workers = 2
+ema_epochs = 16
+ema_start_epochs = 0
+
+[training.loss]
+P_mean = -1.2
+P_std = 1.2
+
+[training.optimizer]
+lr = 3e-4
+adam_betas = [0.9, 0.999]
+
+[training.directories]
+out_dir = "saved_models/image_adapter"
+train_data_dir = "data/train_21"
+test_data_dir = "data/test_small"

@@ -255,7 +255,7 @@ class Block(nn.Module):
 
 # ----------------------------------------------------------------------------
 # Shared encoder construction helpers.
-# Used by both UNet and ControlNet to avoid duplicated architecture code.
+# Used by the U-Net construction path and residual-adapter feature extraction.
 
 
 def _encoder_channel_dims(base_channels, channel_mult, channel_mult_noise, channel_mult_emb):
@@ -349,7 +349,7 @@ class UNet(nn.Module):
         attn_resolutions=EDM2_DEFAULTS["attn_resolutions"],
         label_balance=EDM2_DEFAULTS["label_balance"],
         concat_balance=EDM2_DEFAULTS["concat_balance"],
-        include_decoder=True,  # Whether to include the decoder block (useful for ControlNets)
+        include_decoder=True,  # Whether to include the decoder block.
         **block_kwargs,  # Arguments for Block.
     ):
         super().__init__()

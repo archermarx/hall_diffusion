@@ -1,0 +1,14 @@
+num_samples = 32
+batch_size = 32
+num_steps = 64
+model_type = "ema"
+out_dir = "samples/image_adapter"
+replace_samples = true
+method = "midpoint"
+unconditional_data_dir = "data/test_large"
+
+[[adapters]]
+checkpoint = "saved_models/image_adapter/adapter.pth.tar"
+condition = "conditions/example_image.npz"
+scale = 1.0
+weights = "ema"

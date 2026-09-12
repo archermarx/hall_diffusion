@@ -70,10 +70,14 @@ def resolve_model_config(config: dict) -> dict:
         _apply_defaults(resolved, EDM2_DEFAULTS)
         resolved.setdefault("scalars_in_tensor", resolved.get("condition_dim") == 0)
         resolved.setdefault("fourier_features", False)
+        # Older configs did not distinguish an unconditional base from the
+        # historical vector-label path.  Preserve that behavior by default.
+        resolved.setdefault(
+            "base_conditioning",
+            "none" if resolved.get("condition_dim") == 0 else "legacy_vector",
+        )
         if "resolution" in resolved:
             resolved.setdefault("downsample_res", resolved["resolution"])
-    elif resolved["architecture"] == "controlnet" and "base_model_config" in resolved:
-        resolved["base_model_config"] = resolve_model_config(resolved["base_model_config"])
 
     return resolved
 

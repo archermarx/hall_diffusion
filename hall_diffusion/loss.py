@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from models.controlnet import ControlNet
 
 try:
     from hall_diffusion.configuration import LOSS_DEFAULTS
@@ -29,7 +28,7 @@ class EDM2Loss:
         model,
         noise_std=None,
         condition_vec=None,
-        ctrl=None,
+        conditions=None,
     ):
         batch_size, _, _ = x.shape
         rnd_normal = torch.randn([batch_size, 1, 1], device=x.device)
@@ -44,19 +43,13 @@ class EDM2Loss:
 
         noisy_im = x + noise
 
-        if isinstance(model, ControlNet):
-            assert isinstance(ctrl, tuple)
-            denoised = model(noisy_im, ctrl[0], sigma, condition_vec)
-            ctrl_loss_weight = ctrl[1]
-        else:
+        if conditions is None:
             denoised = model(noisy_im, sigma, condition_vec)
-            ctrl_loss_weight = 1.0
+        else:
+            denoised = model(noisy_im, sigma, condition_vec, conditions=conditions)
 
         # Base loss
         base_loss = (denoised - x) ** 2
-
-        # Add control loss weight if using ControlNet
-        base_loss = base_loss * ctrl_loss_weight
 
         # Derivative loss
         diff_denoised = torch.diff(denoised)

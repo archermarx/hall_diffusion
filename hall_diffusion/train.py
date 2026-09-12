@@ -25,7 +25,6 @@ from torch.utils.data import DataLoader
 
 # Our dependencies
 import models
-from models.controlnet import ControlNet
 from models.ema import EMA
 from loss import EDM2Loss
 from utils import utils, thruster_data, visualization
@@ -83,7 +82,7 @@ def validation_loss(
     epoch_idx=0,
     out_folder=Path("."),
     data_dir: Path | str = "data/training",
-    ctrl_fn=None,
+    condition_fn=None,
     seed=None,
 ) -> float:
     """Evaluate the loss on the validation set. Optionally visualize denoising progress, saving images to out_folder."""
@@ -97,12 +96,12 @@ def validation_loss(
     if seed is not None:
         torch.manual_seed(seed)
     losses = []
-    for _, (_, vec, x) in enumerate(val_loader):
+    for filenames, vec, x in val_loader:
         with torch.no_grad():
             x = x.float().to(DEVICE)
             vec = vec.float().to(DEVICE)
-            ctrl = ctrl_fn(x) if ctrl_fn is not None else None
-            _, loss, *_ = loss_fn(x, model, condition_vec=vec, ctrl=ctrl)
+            conditions = condition_fn(filenames, x, vec) if condition_fn is not None else None
+            _, loss, *_ = loss_fn(x, model, condition_vec=vec, conditions=conditions)
             losses.append(loss)
     torch.set_rng_state(rng_state)
     loss = float(np.mean(losses))
@@ -110,15 +109,15 @@ def validation_loss(
     if visualize:
         # Load first batch with fixed noise to visualize results
         with torch.no_grad():
-            _, vec, y = next(iter(val_loader))
+            filenames, vec, y = next(iter(val_loader))
             vec = vec.float().to(DEVICE)
             y = y.float().to(DEVICE)
-            ctrl = ctrl_fn(y) if ctrl_fn is not None else None
+            conditions = condition_fn(filenames, y, vec) if condition_fn is not None else None
             noise_std = torch.rand((y.shape[0], 1, 1), device=DEVICE)
             fixed_noise = torch.tensor(visualization.NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
             noise_std[: len(fixed_noise), 0, 0] = fixed_noise
 
-            _, _, noisy_im, denoise_pred = loss_fn(y, model, noise_std, condition_vec=vec, ctrl=ctrl)
+            _, _, noisy_im, denoise_pred = loss_fn(y, model, noise_std, condition_vec=vec, conditions=conditions)
 
             suptitle = f"Epoch: {epoch_idx + 1:04d}, Loss: {loss:.4f}"
             visualization.plot_denoising_2d(
@@ -165,7 +164,7 @@ def train_one_batch(
     logger: logging.Logger,
     condition_vec=None,
     use_amp=False,
-    ctrl_fn=None,
+    condition_fn=None,
     timer: StepTimer | None = None,
 ):
     """Perform one step of the optimization procedure on a batch of data."""
@@ -181,14 +180,14 @@ def train_one_batch(
         if condition_vec is not None:
             condition_vec = condition_vec.to(DEVICE)
 
-    with timer.section("ctrl_fn"):
-        ctrl = ctrl_fn(y) if ctrl_fn is not None else None
+    with timer.section("condition_fn"):
+        conditions = condition_fn(y, condition_vec) if condition_fn is not None else None
 
     # Compute loss and do backwards pass
     if use_amp:
         with timer.section("forward"):
             with torch.amp.autocast_mode.autocast(DEVICE.type, dtype=AMP_DTYPE):
-                loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
+                loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, conditions=conditions)
         if not torch.isfinite(loss):
             logger.debug(f"Non-finite loss ({loss.item():.4g}), skipping batch")
             return float("nan"), float("nan"), 0.0
@@ -199,7 +198,7 @@ def train_one_batch(
                 loss.backward()
     else:
         with timer.section("forward"):
-            loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, ctrl=ctrl)
+            loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, conditions=conditions)
         if not torch.isfinite(loss):
             logger.debug(f"Non-finite loss ({loss.item():.4g}), skipping batch")
             return float("nan"), float("nan"), 0.0
@@ -301,10 +300,7 @@ def train(args):
     os.makedirs(out_dir, exist_ok=True)
     log_file = out_dir / train_args["log_file"]
 
-    # Set up training and test data loaders.
-    # For controlnet, dataset settings (scalars_in_tensor, downsample_res) are
-    # inherited from the base model's stored config so they don't need to be
-    # re-specified in the controlnet toml.
+    # Set up training and test data loaders from the stored base architecture.
     dataset_settings = models.dataset_settings(config["model"])
     print(dataset_settings)
     scalars_in_tensor = dataset_settings["scalars_in_tensor"]
@@ -350,17 +346,14 @@ def train(args):
     # Load model from config file and print some summary statistics
     # TODO: is there a need to specify input channels in the TOML file or can they always be inferred?
     config["model"]["in_channels"] = train_dataset.num_fields
-    if scalars_in_tensor:
+    if config["model"].get("base_conditioning") == "none":
+        config["model"]["condition_dim"] = 0
+    elif scalars_in_tensor:
         config["model"]["condition_dim"] = 0
     else:
         config["model"]["condition_dim"] = train_dataset.num_params
 
     config["model"]["resolution"] = len(train_dataset.grid)
-    if config["model"].get("architecture") == "controlnet":
-        # Snapshot the fully resolved base architecture in the new checkpoint.
-        # Old ControlNet checkpoints without this field continue to load it from
-        # base_model through models.dataset_config().
-        config["model"]["base_model_config"] = models.dataset_config(config["model"])
     # Dataset-derived values are now available, so finalize the exact model
     # configuration that will be constructed and stored in checkpoints.
     config["model"] = resolve_model_config(config["model"])
@@ -423,10 +416,7 @@ def train(args):
 
         # Load EMA model
         if "ema" in ckpt:
-            if isinstance(ema_model, ControlNet):
-                ema_model.controlnet.load_state_dict(ckpt["ema"], strict=False)
-            else:
-                ema_model.load_state_dict(ckpt["ema"], strict=False)
+            ema_model.load_state_dict(ckpt["ema"], strict=False)
             ema.step_start = 0
             logger.info("EMA loaded from checkpoint")
 

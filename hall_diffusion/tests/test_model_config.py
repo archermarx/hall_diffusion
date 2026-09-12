@@ -76,29 +76,3 @@ def test_old_sparse_checkpoint_model_config_remains_constructible():
     assert model.condition_dim == 0
     assert model.unet.enc["8x8_block0"].num_heads == 0
     assert "channels_per_head" not in legacy_config
-
-
-def test_old_controlnet_config_resolves_sparse_base_checkpoint(monkeypatch):
-    legacy_base = {"resolution": 8, "in_channels": 1, "condition_dim": 0}
-    monkeypatch.setattr(models.torch, "load", lambda *args, **kwargs: {"model_config": legacy_base})
-
-    resolved = models.dataset_config({"architecture": "controlnet", "base_model": "old-model"})
-
-    assert resolved["channels_per_head"] == EDM2_DEFAULTS["channels_per_head"]
-    assert resolved["downsample_res"] == 8
-
-
-def test_new_controlnet_config_uses_embedded_resolved_base_config(monkeypatch):
-    def unexpected_load(*args, **kwargs):
-        raise AssertionError("an embedded base_model_config should not reload checkpoint metadata")
-
-    monkeypatch.setattr(models.torch, "load", unexpected_load)
-    config = {
-        "architecture": "controlnet",
-        "base_model": "new-model",
-        "base_model_config": {"resolution": 8, "in_channels": 1, "condition_dim": 0},
-    }
-
-    resolved = models.dataset_config(config)
-
-    assert resolved["channels_per_head"] == EDM2_DEFAULTS["channels_per_head"]
