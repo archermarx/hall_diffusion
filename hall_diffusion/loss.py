@@ -66,7 +66,7 @@ class EDM2Loss:
         h = self.deriv_h
 
         total_weight = 1 + h + h**2
-        loss =  weight * (base_loss + diff_loss_1 * h + diff_loss_2 * h**2) / total_weight
-        base_loss = loss.mean().item()
+        loss = weight * (base_loss + diff_loss_1 * h + diff_loss_2 * h**2) / total_weight
+        mean_loss = loss.mean()
 
-        return loss.mean(), base_loss, noisy_im, denoised
+        return mean_loss, mean_loss.detach(), noisy_im, denoised

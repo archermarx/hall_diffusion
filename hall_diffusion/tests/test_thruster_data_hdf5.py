@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from hall_diffusion.utils.thruster_data import ThrusterDataset
+from hall_diffusion.utils.thruster_data import HDF5ChunkBatchSampler, ThrusterDataset
 
 
 def write_dataset(path):
@@ -16,7 +16,7 @@ def write_dataset(path):
     parameters = np.array([[0.1, 0.2], [1.1, 1.2], [2.1, 2.2]], dtype=np.float32)
     performance = np.array([[3.0], [4.0], [5.0]], dtype=np.float32)
     with h5py.File(path, "w") as handle:
-        handle.create_dataset("fields", data=fields)
+        handle.create_dataset("fields", data=fields, chunks=(2, 2, resolution))
         handle.create_dataset("parameters", data=parameters)
         handle.create_dataset("performance", data=performance)
         handle.create_dataset("grid", data=np.linspace(0.0, 1.0, resolution))
@@ -102,6 +102,35 @@ def test_hdf5_dataset_loads_with_training_workers(tmp_path):
     assert filenames == ("one.npz", "two.npz")
     assert parameters.shape == (2, 2)
     assert fields.shape == (2, 2, 128)
+
+
+def test_hdf5_batch_reads_preserve_requested_order(tmp_path):
+    path = tmp_path / "training.h5"
+    fields, parameters, _ = write_dataset(path)
+    dataset = ThrusterDataset(path)
+
+    samples = dataset.__getitems__([2, 0, 1])
+
+    assert [sample[0] for sample in samples] == ["three.npz", "one.npz", "two.npz"]
+    for sample, expected_params, expected_fields in zip(
+        samples, parameters[[2, 0, 1]], fields[[2, 0, 1]], strict=True
+    ):
+        torch.testing.assert_close(sample[1], torch.from_numpy(expected_params))
+        torch.testing.assert_close(sample[2], torch.from_numpy(expected_fields))
+
+
+def test_hdf5_chunk_sampler_keeps_each_storage_chunk_together(tmp_path):
+    path = tmp_path / "training.h5"
+    write_dataset(path)
+    dataset = ThrusterDataset(path)
+    sampler = HDF5ChunkBatchSampler(dataset, batch_size=2, generator=torch.Generator().manual_seed(4))
+
+    batches = list(sampler)
+    flattened = [index for batch in batches for index in batch]
+
+    assert sorted(flattened) == list(range(len(dataset)))
+    assert len(batches) == 2
+    assert abs(flattened.index(0) - flattened.index(1)) == 1
 
 
 def test_hdf5_dataset_rejects_an_incomplete_schema(tmp_path):

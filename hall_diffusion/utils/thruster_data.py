@@ -4,7 +4,7 @@ import warnings
 import h5py
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -52,6 +52,57 @@ def binned_psd(t, signal, n_bins=50, fmin=None, fmax=None, pow_min=1e-6):
     bin_power = np.maximum(pow_min, bin_power)
 
     return bin_centers, bin_power
+
+
+class HDF5ChunkBatchSampler(Sampler[list[int]]):
+    """Shuffle HDF5 chunks while keeping records from each chunk adjacent."""
+
+    def __init__(self, dataset, batch_size: int, drop_last: bool = False, generator=None):
+        if not dataset.is_hdf5:
+            raise TypeError("HDF5ChunkBatchSampler requires an HDF5 ThrusterDataset")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.generator = generator
+        self._chunks = self._build_chunks()
+
+    def _build_chunks(self):
+        indices = self.dataset._indices
+        chunk_size = self.dataset.hdf5_chunk_size
+        if isinstance(indices, range) and indices.step == 1:
+            chunks = []
+            logical = 0
+            record = indices.start
+            while record < indices.stop:
+                count = min(chunk_size - record % chunk_size, indices.stop - record)
+                chunks.append(range(logical, logical + count))
+                logical += count
+                record += count
+            return chunks
+
+        chunks_by_id = {}
+        for logical, record in enumerate(indices):
+            chunks_by_id.setdefault(record // chunk_size, []).append(logical)
+        return list(chunks_by_id.values())
+
+    def __iter__(self):
+        order = torch.randperm(len(self._chunks), generator=self.generator).tolist()
+        batch = []
+        for chunk_index in order:
+            batch.extend(self._chunks[chunk_index])
+            while len(batch) >= self.batch_size:
+                yield batch[: self.batch_size]
+                batch = batch[self.batch_size :]
+        if batch and not self.drop_last:
+            yield batch
+
+    def __len__(self):
+        if self.drop_last:
+            return len(self.dataset) // self.batch_size
+        return math.ceil(len(self.dataset) / self.batch_size)
+
 
 class ThrusterDataset(Dataset):
     def __init__(
@@ -144,6 +195,8 @@ class ThrusterDataset(Dataset):
             if len(fields_shape) != 3:
                 raise ValueError(f"HDF5 'fields' must have shape (records, fields, grid), got {fields_shape}")
             record_count = fields_shape[0]
+            chunks = handle["fields"].chunks
+            self.hdf5_chunk_size = chunks[0] if chunks is not None else 1
             for name in ("parameters", "performance", "source_files"):
                 if handle[name].shape[0] != record_count:
                     raise ValueError(f"HDF5 '{name}' record count does not match 'fields'")
@@ -282,23 +335,65 @@ class ThrusterDataset(Dataset):
             record_index = self._indices[idx]
             data = self._hdf5_handle()
             raw_name = data["source_files"][record_index]
-            sample_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
-            tensor = torch.tensor(data["fields"][record_index], dtype=torch.float32)
-            params = torch.tensor(data["parameters"][record_index], dtype=torch.float32)
+            perf = data["performance"][record_index] if self.scalars_in_tensor else None
+            return self._format_sample(
+                raw_name,
+                data["parameters"][record_index],
+                data["fields"][record_index],
+                perf,
+            )
         else:
             sample_name = self.files[idx]
             filename = self.data_dir / sample_name
             data = np.load(filename)
-            tensor = torch.tensor(data["data"], dtype=torch.float32)
-            params = torch.tensor(data["params"], dtype=torch.float32)
-        perf = None
+            perf = data["perf"] if self.scalars_in_tensor else None
+            return self._format_sample(sample_name, data["params"], data["data"], perf)
+
+    def __getitems__(self, indices):
+        """Read a DataLoader batch in contiguous HDF5 runs."""
+        if not self.is_hdf5:
+            return [self[index] for index in indices]
+
+        records = [self._indices[int(index)] for index in indices]
+        sorted_positions = sorted(range(len(records)), key=records.__getitem__)
+        samples = [None] * len(records)
+        data = self._hdf5_handle()
+        run_start = 0
+        while run_start < len(sorted_positions):
+            run_end = run_start + 1
+            first_record = records[sorted_positions[run_start]]
+            last_record = first_record
+            while run_end < len(sorted_positions):
+                next_record = records[sorted_positions[run_end]]
+                if next_record != last_record + 1:
+                    break
+                last_record = next_record
+                run_end += 1
+
+            record_slice = slice(first_record, last_record + 1)
+            names = data["source_files"][record_slice]
+            parameters = data["parameters"][record_slice]
+            fields = data["fields"][record_slice]
+            performance = data["performance"][record_slice] if self.scalars_in_tensor else None
+            for offset, sorted_position in enumerate(sorted_positions[run_start:run_end]):
+                samples[sorted_position] = self._format_sample(
+                    names[offset],
+                    parameters[offset],
+                    fields[offset],
+                    performance[offset] if performance is not None else None,
+                )
+            run_start = run_end
+        return samples
+
+    def _format_sample(self, raw_name, raw_params, raw_tensor, raw_perf=None):
+        sample_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+        tensor = torch.as_tensor(np.asarray(raw_tensor), dtype=torch.float32)
+        params = torch.as_tensor(np.asarray(raw_params), dtype=torch.float32)
 
         if self.scalars_in_tensor:
             resolution = tensor.shape[1]
-            # Add params and performance quantitiesto the end of the tensor as constant channels
-            perf_key = "performance" if self.is_hdf5 else "perf"
-            perf_index = record_index if self.is_hdf5 else ...
-            perf = torch.tensor(data[perf_key][perf_index], dtype=torch.float32)
+            # Add parameters and performance quantities as constant channels.
+            perf = torch.as_tensor(np.asarray(raw_perf), dtype=torch.float32)
             param_tens = params.unsqueeze(1).expand(-1, resolution)
             perf_tens = perf.unsqueeze(1).expand(-1, resolution)
 

@@ -86,7 +86,7 @@ def train(config_path: str | Path, device_name: str = "auto"):
     batch_size = training["batch_size"]
     ema = EMA(
         EMA.calculate_ema_factor(batch_size, len(train_data), training["epochs"], training["ema_epochs"]),
-        step_start=training["ema_start_epochs"] * len(train_data),
+        step_start=EMA.calculate_start_step(batch_size, len(train_data), training["ema_start_epochs"]),
     )
     loss_fn = EDM2Loss(**training["loss"])
     train_loader = _loader(train_data, batch_size, True, training["load_workers"])

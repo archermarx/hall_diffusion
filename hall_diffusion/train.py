@@ -98,20 +98,20 @@ def validation_loss(
     losses = []
     for filenames, vec, x in val_loader:
         with torch.no_grad():
-            x = x.float().to(DEVICE)
-            vec = vec.float().to(DEVICE)
+            x = x.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
+            vec = vec.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
             conditions = condition_fn(filenames, x, vec) if condition_fn is not None else None
             _, loss, *_ = loss_fn(x, model, condition_vec=vec, conditions=conditions)
-            losses.append(loss)
+            losses.append(loss.detach())
     torch.set_rng_state(rng_state)
-    loss = float(np.mean(losses))
+    loss = torch.stack(losses).mean().item()
 
     if visualize:
         # Load first batch with fixed noise to visualize results
         with torch.no_grad():
             filenames, vec, y = next(iter(val_loader))
-            vec = vec.float().to(DEVICE)
-            y = y.float().to(DEVICE)
+            vec = vec.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
+            y = y.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
             conditions = condition_fn(filenames, y, vec) if condition_fn is not None else None
             noise_std = torch.rand((y.shape[0], 1, 1), device=DEVICE)
             fixed_noise = torch.tensor(visualization.NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
@@ -148,15 +148,6 @@ def update_lr(optimizer, batch_idx, batch_size, ref_lr, decay_batches, min_lr):
     return lr
 
 
-def compute_grad_norm(model, logger: logging.Logger):
-    """Compute the global gradient norm across all model parameters."""
-    grads = [p.grad.detach().flatten() for p in model.get_trainable_params() if p.grad is not None]
-    norm = torch.concat(grads).norm().item() if grads else 0.0
-    if not np.isfinite(norm):
-        logger.debug(f"Non-finite gradient norm encountered: {norm}")
-    return norm
-
-
 def train_one_batch(
     y,
     state,
@@ -176,9 +167,9 @@ def train_one_batch(
 
     # Transfer conditioning vector and data to device
     with timer.section("data_to_device"):
-        y = y.float().to(DEVICE)
+        y = y.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
         if condition_vec is not None:
-            condition_vec = condition_vec.to(DEVICE)
+            condition_vec = condition_vec.to(DEVICE, non_blocking=DEVICE.type == "cuda")
 
     with timer.section("condition_fn"):
         conditions = condition_fn(y, condition_vec) if condition_fn is not None else None
@@ -187,10 +178,7 @@ def train_one_batch(
     if use_amp:
         with timer.section("forward"):
             with torch.amp.autocast_mode.autocast(DEVICE.type, dtype=AMP_DTYPE):
-                loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, conditions=conditions)
-        if not torch.isfinite(loss):
-            logger.debug(f"Non-finite loss ({loss.item():.4g}), skipping batch")
-            return float("nan"), float("nan"), 0.0
+                loss, _, *_ = loss_fn(y, state.model, condition_vec=condition_vec, conditions=conditions)
         with timer.section("backward"):
             if state.scaler is not None:
                 state.scaler.scale(loss).backward()
@@ -198,36 +186,41 @@ def train_one_batch(
                 loss.backward()
     else:
         with timer.section("forward"):
-            loss, base_loss, *_ = loss_fn(y, state.model, condition_vec=condition_vec, conditions=conditions)
-        if not torch.isfinite(loss):
-            logger.debug(f"Non-finite loss ({loss.item():.4g}), skipping batch")
-            return float("nan"), float("nan"), 0.0
+            loss, _, *_ = loss_fn(y, state.model, condition_vec=condition_vec, conditions=conditions)
         with timer.section("backward"):
             loss.backward()
 
+    metrics = None
     with timer.section("optimizer"):
         if use_amp and state.scaler is not None:
             state.scaler.unscale_(state.optimizer)
-            torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=100.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(state.model.get_trainable_params(), max_norm=100.0)
             prev_scale = state.scaler.get_scale()
             state.scaler.step(state.optimizer)
             state.scaler.update()
             step_skipped = state.scaler.get_scale() < prev_scale
         else:
-            torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=100.0)
-            state.optimizer.step()
-            step_skipped = False
+            grad_norm = torch.nn.utils.clip_grad_norm_(state.model.get_trainable_params(), max_norm=100.0)
+            # This is the single synchronization needed for logging and also
+            # prevents a non-finite unscaled update from reaching the model.
+            metrics = torch.stack((loss.detach().float(), grad_norm.detach().float())).cpu().tolist()
+            step_skipped = not all(np.isfinite(value) for value in metrics)
+            if not step_skipped:
+                state.optimizer.step()
 
-    with timer.section("grad_norm"):
-        grad_norm = compute_grad_norm(state.model, logger)
+    if metrics is None:
+        # Copy both scalar metrics to the host with one device synchronization.
+        metrics = torch.stack((loss.detach().float(), grad_norm.detach().float())).cpu().tolist()
+    loss_value, grad_norm_value = metrics
 
     if step_skipped:
-        logger.debug(f"AMP optimizer step skipped due to inf/nan gradients (grad_norm={grad_norm})")
+        logger.debug(f"Optimizer step skipped due to non-finite loss/gradients (grad_norm={grad_norm_value})")
 
-    with timer.section("ema"):
-        state.ema.step_ema(state.ema_model, state.model)
+    if not step_skipped:
+        with timer.section("ema"):
+            state.ema.step_ema(state.ema_model, state.model)
 
-    return loss.item(), base_loss, grad_norm
+    return loss_value, loss_value, grad_norm_value
 
 
 def save_checkpoint(
@@ -251,6 +244,8 @@ def save_checkpoint(
         optimizer=state.optimizer.state_dict(),
         best=state.best_params,
         ema=ema_state,
+        ema_step=state.ema.step,
+        ema_started=state.ema.started,
     )
     torch.save(utils.paths_to_strings(out_dict), checkpoint_file)
     visualization.plot_training_progress(log_file, out_dir, evaluation_iters, state.outlier_inds)
@@ -324,21 +319,31 @@ def train(args):
     assert train_dataset.norm == test_dataset.norm
 
     pin = DEVICE.type == "cuda"
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        pin_memory=pin,
-        num_workers=load_workers,
-        prefetch_factor=prefetch_factor,
-    )
+    loader_kwargs = {
+        "pin_memory": pin,
+        "num_workers": load_workers,
+    }
+    if load_workers > 0:
+        loader_kwargs.update(prefetch_factor=prefetch_factor, persistent_workers=True)
+
+    if train_dataset.is_hdf5:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=thruster_data.HDF5ChunkBatchSampler(train_dataset, batch_size),
+            **loader_kwargs,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            **loader_kwargs,
+        )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        pin_memory=pin,
-        num_workers=load_workers,
-        prefetch_factor=prefetch_factor,
+        **loader_kwargs,
     )
 
     # ---------------------------------------------
@@ -369,7 +374,10 @@ def train(args):
     logger.info(
         f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}."
     )
-    ema = EMA(ema_factor, step_start=ema_start * len(train_dataset))
+    ema = EMA(
+        ema_factor,
+        step_start=EMA.calculate_start_step(batch_size, len(train_dataset), ema_start),
+    )
     ema_model = copy.deepcopy(model).eval().requires_grad_(False)
 
     # ---------------------------------------------
@@ -399,6 +407,7 @@ def train(args):
     old_checkpoint = out_dir / "checkpoint_prev.pth.tar"
 
     # Load checkpoint if found
+    loaded_ema_step = None
     if load_checkpoint and os.path.exists(checkpoint_file):
         # Load checkpoint
         ckpt = utils.load_checkpoint(checkpoint_file, DEVICE)
@@ -417,7 +426,15 @@ def train(args):
         # Load EMA model
         if "ema" in ckpt:
             ema_model.load_state_dict(ckpt["ema"], strict=False)
-            ema.step_start = 0
+            loaded_ema_step = ckpt.get("ema_step")
+            if "ema_started" in ckpt:
+                ema.started = ckpt["ema_started"]
+            else:
+                # Old checkpoints copied the live weights into the EMA model
+                # every step before averaging began, so they are safe to resume
+                # as an initialized EMA.
+                ema.started = True
+                ema.step_start = 0
             logger.info("EMA loaded from checkpoint")
 
     # ---------------------------------------------
@@ -448,7 +465,8 @@ def train(args):
         start_epoch = 0
         state = TrainingState(model=model, ema_model=ema_model, optimizer=optimizer, ema=ema, scaler=scaler)
 
-    ema.step = state.batch_idx  # Ensure EMA step counter is in sync with loaded batch index
+    # Ensure EMA's counter is in sync with the number of completed batches.
+    ema.step = loaded_ema_step if loaded_ema_step is not None else max(0, state.batch_idx + 1)
 
     # ---------------------------------------------
     # Noise args
@@ -537,19 +555,32 @@ def train(args):
                 if state.batch_idx % evaluation_iters == 0:
                     progress.set_description(description(epoch_idx, state.batch_idx, "Validating"))
                     val_seed = torch.randint(2**31, (1,)).item()
-                    state.ema_loss = validation_loss(
-                        state.ema_model,
-                        loss_fn,
-                        test_loader,
-                        visualize=True,
-                        epoch_idx=epoch_idx,
-                        out_folder=out_dir,
-                        data_dir=test_data_dir,
-                        seed=val_seed,
-                    )
-                    state.val_loss = validation_loss(
-                        state.model, loss_fn, test_loader, data_dir=test_data_dir, seed=val_seed
-                    )
+                    if state.ema.started:
+                        state.ema_loss = validation_loss(
+                            state.ema_model,
+                            loss_fn,
+                            test_loader,
+                            visualize=True,
+                            epoch_idx=epoch_idx,
+                            out_folder=out_dir,
+                            data_dir=test_data_dir,
+                            seed=val_seed,
+                        )
+                        state.val_loss = validation_loss(
+                            state.model, loss_fn, test_loader, data_dir=test_data_dir, seed=val_seed
+                        )
+                    else:
+                        state.val_loss = validation_loss(
+                            state.model,
+                            loss_fn,
+                            test_loader,
+                            visualize=True,
+                            epoch_idx=epoch_idx,
+                            out_folder=out_dir,
+                            data_dir=test_data_dir,
+                            seed=val_seed,
+                        )
+                        state.ema_loss = state.val_loss
                     ema_losses.append(state.ema_loss)
                     val_losses.append(state.val_loss)
 
