@@ -69,7 +69,9 @@ def resolve_model_config(config: dict) -> dict:
     if resolved["architecture"] == "edm2":
         _apply_defaults(resolved, EDM2_DEFAULTS)
         resolved.setdefault("scalars_in_tensor", resolved.get("condition_dim") == 0)
-        resolved.setdefault("fourier_features", False)
+        # Dataset-derived Fourier conditioning is no longer supported. Keep
+        # accepting the key so old configs/checkpoints remain loadable.
+        resolved["fourier_features"] = False
         # Older configs did not distinguish an unconditional base from the
         # historical vector-label path.  Preserve that behavior by default.
         resolved.setdefault(

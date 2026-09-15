@@ -1,4 +1,7 @@
 import os
+import warnings
+
+import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -64,32 +67,35 @@ class ThrusterDataset(Dataset):
     ):
         super().__init__()
         self.dir = Path(dir)
+        self._h5 = None
+        self._h5_pid = None
+        self.is_hdf5 = self.dir.is_file() and self.dir.suffix.lower() in {".h5", ".hdf5"}
 
-        self.data_dir = self.dir / "data"
-        self.files = os.listdir(self.data_dir)
+        if fourier_features:
+            warnings.warn(
+                "fourier_features is deprecated and is ignored",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
-        if files is not None:
-            filter_files = set(files)
-            self.files = [f for f in self.files if f in filter_files]
-        elif subset_size is not None and subset_size > 0:
-            self.files = self.files[start_index : (subset_size + start_index)]
+        if self.is_hdf5:
+            self._init_hdf5(files, subset_size, start_index, scalars_in_tensor)
+        else:
+            self._init_directory(files, subset_size, start_index, scalars_in_tensor)
 
-        self.metadata_grid = pd.read_csv(self.dir / "grid.csv")
-        self.grid = self.metadata_grid["z (m)"].to_numpy()
         self.downsample_res = downsample_res
 
         if downsample_res is not None:
             self.grid = np.linspace(self.grid[0], self.grid[-1], downsample_res)
 
         self.dx = self.grid[2] - self.grid[1]
-        self.norm = Normalizer(dir, scalars_in_tensor, fourier_features)
         self.num_fields = len(self.norm.norm_tensor["names"])
         self.num_params = len(self.norm.norm_params["names"])
         self.scalars_in_tensor = scalars_in_tensor
         self.resolution = len(self.grid)
 
         # Frequencies to analyze in fourier spectrum
-        self.fourier_features = fourier_features
+        self.fourier_features = False
         self.max_freqs = max_freqs
         self.min_freq = 5e3
         self.max_freq = 5e5
@@ -97,6 +103,103 @@ class ThrusterDataset(Dataset):
         self.min_pow = 1e-6
         # Factor used to normalize power spectra
         self.power_norm_factor = np.abs(np.log(self.min_pow))
+
+    def _init_directory(self, files, subset_size, start_index, scalars_in_tensor):
+        self.data_dir = self.dir / "data"
+        self.files = os.listdir(self.data_dir)
+        if files is not None:
+            filter_files = set(files)
+            self.files = [filename for filename in self.files if filename in filter_files]
+        elif subset_size is not None and subset_size > 0:
+            self.files = self.files[start_index : (subset_size + start_index)]
+
+        self.metadata_grid = pd.read_csv(self.dir / "grid.csv")
+        self.grid = self.metadata_grid["z (m)"].to_numpy()
+        self.norm = Normalizer(self.dir, scalars_in_tensor)
+        self._indices = None
+
+    def _init_hdf5(self, files, subset_size, start_index, scalars_in_tensor):
+        required = {
+            "fields",
+            "parameters",
+            "performance",
+            "grid",
+            "source_files",
+            "field_names",
+            "field_means",
+            "field_stds",
+            "parameter_names",
+            "parameter_means",
+            "parameter_stds",
+            "performance_names",
+            "performance_means",
+            "performance_stds",
+        }
+        with h5py.File(self.dir, "r") as handle:
+            missing = sorted(required.difference(handle.keys()))
+            if missing:
+                raise ValueError(f"HDF5 dataset {self.dir} is missing: {', '.join(missing)}")
+
+            fields_shape = handle["fields"].shape
+            if len(fields_shape) != 3:
+                raise ValueError(f"HDF5 'fields' must have shape (records, fields, grid), got {fields_shape}")
+            record_count = fields_shape[0]
+            for name in ("parameters", "performance", "source_files"):
+                if handle[name].shape[0] != record_count:
+                    raise ValueError(f"HDF5 '{name}' record count does not match 'fields'")
+            if fields_shape[1] != len(handle["field_names"]):
+                raise ValueError("HDF5 field count does not match 'field_names'")
+            if fields_shape[2] != len(handle["grid"]):
+                raise ValueError("HDF5 field resolution does not match 'grid'")
+            if handle["parameters"].ndim != 2 or handle["parameters"].shape[1] != len(handle["parameter_names"]):
+                raise ValueError("HDF5 parameter count does not match 'parameter_names'")
+            if handle["performance"].ndim != 2 or handle["performance"].shape[1] != len(
+                handle["performance_names"]
+            ):
+                raise ValueError("HDF5 performance count does not match 'performance_names'")
+
+            self.grid = np.asarray(handle["grid"], dtype=float)
+            self.metadata_grid = pd.DataFrame({"z (m)": self.grid})
+            if files is not None:
+                requested = set(files)
+                indices = []
+                for index, raw_name in enumerate(handle["source_files"]):
+                    name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+                    if name in requested:
+                        indices.append(index)
+                self._indices = indices
+            else:
+                stop = (
+                    record_count
+                    if subset_size is None or subset_size <= 0
+                    else min(record_count, start_index + subset_size)
+                )
+                self._indices = range(min(start_index, record_count), stop)
+
+        self.data_dir = None
+        self.files = None
+        self.norm = Normalizer.from_hdf5(self.dir, scalars_in_tensor)
+
+    def _hdf5_handle(self):
+        pid = os.getpid()
+        if self._h5 is not None and self._h5_pid != pid:
+            self._h5.close()
+            self._h5 = None
+        if self._h5 is None:
+            self._h5 = h5py.File(self.dir, "r")
+            self._h5_pid = pid
+        return self._h5
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_h5"] = None
+        state["_h5_pid"] = None
+        return state
+
+    def __del__(self):
+        handle = getattr(self, "_h5", None)
+        if handle is not None:
+            handle.close()
 
     def write_metadata(self, path: Path | str):
         path = Path(path)
@@ -153,7 +256,7 @@ class ThrusterDataset(Dataset):
         return param_vecs
 
     def __len__(self):
-        return len(self.files)
+        return len(self._indices) if self.is_hdf5 else len(self.files)
 
     def _signal_to_vec(self, t, signal, truncate=True):
         if truncate:
@@ -175,17 +278,27 @@ class ThrusterDataset(Dataset):
         return torch.concat([torch.tensor([mean_norm, rms_norm]), bin_powers])
 
     def __getitem__(self, idx):
-        filename = self.data_dir / self.files[idx]
-        data = np.load(filename)
-
-        tensor = torch.tensor(data["data"], dtype=torch.float32)
-        params = torch.tensor(data["params"], dtype=torch.float32)
+        if self.is_hdf5:
+            record_index = self._indices[idx]
+            data = self._hdf5_handle()
+            raw_name = data["source_files"][record_index]
+            sample_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+            tensor = torch.tensor(data["fields"][record_index], dtype=torch.float32)
+            params = torch.tensor(data["parameters"][record_index], dtype=torch.float32)
+        else:
+            sample_name = self.files[idx]
+            filename = self.data_dir / sample_name
+            data = np.load(filename)
+            tensor = torch.tensor(data["data"], dtype=torch.float32)
+            params = torch.tensor(data["params"], dtype=torch.float32)
         perf = None
 
         if self.scalars_in_tensor:
             resolution = tensor.shape[1]
             # Add params and performance quantitiesto the end of the tensor as constant channels
-            perf = torch.tensor(data["perf"], dtype=torch.float32)
+            perf_key = "performance" if self.is_hdf5 else "perf"
+            perf_index = record_index if self.is_hdf5 else ...
+            perf = torch.tensor(data[perf_key][perf_index], dtype=torch.float32)
             param_tens = params.unsqueeze(1).expand(-1, resolution)
             perf_tens = perf.unsqueeze(1).expand(-1, resolution)
 
@@ -208,19 +321,7 @@ class ThrusterDataset(Dataset):
 
             assert tensor.shape[1] == 128
 
-        if self.fourier_features:
-            if "fourier_amplitudes" in data:
-                fourier = torch.tensor(data["fourier_amplitudes"], dtype=torch.float32)
-            else:
-                # Get fourier info and save to file
-                time = torch.tensor(data["time"], dtype=torch.float32)
-                t_vals, I_vals = time[:, 0], time[:, 2]
-                fourier = self._signal_to_vec(t_vals, I_vals)
-                np.savez(filename, **data, fourier_amplitudes=fourier)
-
-            params = torch.concat((params, fourier))
-
-        return self.files[idx], params, tensor
+        return sample_name, params, tensor
 
 
 class ThrusterPlotter1D:

@@ -150,6 +150,12 @@ With `uv` and the small config, you would do:
 $ uv run python/train.py config_small.toml
 ```
 
+`train_data_dir` and `test_data_dir` may each point either to the legacy dataset
+directory described above or to a packed `.h5`/`.hdf5` file using the schema in
+`h9_val_small.h5`. Packed datasets are read lazily, so their full field arrays
+are not loaded into memory. Fourier-derived conditioning features are deprecated
+and are ignored when reading either format.
+
 ## Sampling
 
 The configs also have options for sampling/generating from the model.

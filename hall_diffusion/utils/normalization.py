@@ -35,7 +35,7 @@ def concat_norm_info(*infos: NormInfo) -> NormInfo:
 class Normalizer:
     def __init__(self, dir, scalars_in_tensor=False, fourier_features=False):
         self.dir = Path(dir)
-        self.fourier_features = fourier_features
+        self.fourier_features = False
         self.scalars_in_tensor = scalars_in_tensor
         self.norm_spatial, self.metadata_tensor = Normalizer.read_normalization_info(self.dir / "norm_data.csv")
         self.norm_params, self.metadata_params = Normalizer.read_normalization_info(self.dir / "norm_params.csv")
@@ -54,10 +54,56 @@ class Normalizer:
         else:
             self.norm_tensor = concat_norm_info(self.norm_spatial)
 
-        if self.fourier_features:
-            self.norm_fourier, self.metadata_fourier = Normalizer.read_normalization_info(self.dir / "norm_fourier.csv")
-        else:
-            self.norm_fourier = empty_norm_info()
+        self.norm_fourier = empty_norm_info()
+
+    @classmethod
+    def from_hdf5(cls, path: Path | str, scalars_in_tensor: bool = False):
+        """Build normalization metadata from a packed training HDF5 file."""
+        import h5py
+
+        def read_names(dataset) -> list[str]:
+            return [value.decode() if isinstance(value, bytes) else str(value) for value in dataset[...]]
+
+        def read_info(handle, prefix: str, *, log_dataset: str | None = None):
+            names = read_names(handle[f"{prefix}_names"])
+            means = np.asarray(handle[f"{prefix}_means"], dtype=float)
+            stds = np.asarray(handle[f"{prefix}_stds"], dtype=float)
+            logs = (
+                np.asarray(handle[log_dataset], dtype=bool)
+                if log_dataset is not None and log_dataset in handle
+                else np.zeros(len(names), dtype=bool)
+            )
+            if not (len(names) == len(means) == len(stds) == len(logs)):
+                raise ValueError(f"Inconsistent {prefix} normalization metadata in {path}")
+            metadata = pd.DataFrame({"Field": names, "Mean": means, "Std": stds, "Log": logs})
+            info: NormInfo = {
+                "names": {name: index for index, name in enumerate(names)},
+                "mean": means,
+                "std": stds,
+                "log": logs,
+            }
+            return info, metadata
+
+        normalizer = cls.__new__(cls)
+        normalizer.dir = Path(path)
+        normalizer.fourier_features = False
+        normalizer.scalars_in_tensor = scalars_in_tensor
+        with h5py.File(path, "r") as handle:
+            normalizer.norm_spatial, normalizer.metadata_tensor = read_info(
+                handle, "field", log_dataset="field_log_transformed"
+            )
+            normalizer.norm_params, normalizer.metadata_params = read_info(
+                handle, "parameter", log_dataset="parameter_log_transformed"
+            )
+            normalizer.norm_perf, normalizer.metadata_perf = read_info(handle, "performance")
+
+        normalizer.norm_tensor = (
+            concat_norm_info(normalizer.norm_spatial, normalizer.norm_params, normalizer.norm_perf)
+            if scalars_in_tensor
+            else concat_norm_info(normalizer.norm_spatial)
+        )
+        normalizer.norm_fourier = empty_norm_info()
+        return normalizer
 
     @staticmethod
     def read_normalization_info(path: Path|str) -> tuple[NormInfo, pd.DataFrame]:

@@ -15,10 +15,16 @@ def test_dataset_settings_are_inferred_from_checkpoint_config():
 
     assert settings == {
         "scalars_in_tensor": True,
-        "fourier_features": True,
+        "fourier_features": False,
         "downsample_res": 64,
     }
     assert config["fourier_features"] is True
+
+
+def test_explicit_legacy_fourier_setting_is_disabled():
+    config = resolve_model_config({"fourier_features": True})
+
+    assert config["fourier_features"] is False
 
 
 def test_legacy_checkpoint_infers_tensorized_scalars_from_zero_condition_dimension():

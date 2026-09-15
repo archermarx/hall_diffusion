@@ -24,7 +24,7 @@ def dataset_settings(config: dict) -> dict:
     scalars_in_tensor = data_config.get("scalars_in_tensor", data_config.get("condition_dim") == 0)
     return {
         "scalars_in_tensor": scalars_in_tensor,
-        "fourier_features": data_config.get("fourier_features", False),
+        "fourier_features": data_config["fourier_features"],
         "downsample_res": data_config.get("downsample_res", data_config.get("resolution")),
     }
 

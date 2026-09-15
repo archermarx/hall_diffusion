@@ -16,9 +16,6 @@ data_std = 0.5
 channels_per_head = 32
 # Whether to embed scalar parameters as constant channels in the input tensor. If false, parameters are passed as labels and embedded using a learned linear embedding layer.
 scalars_in_tensor = true
-# Whether to include Fourier features as conditioning info
-fourier_features = true
-
 #=======================================================================================================================
 
 [training]
@@ -59,9 +56,9 @@ weight_decay_epochs = 128
 [training.directories]
 # Folder to save results in
 out_dir = "saved_models/train_h9"
-# Training data folder
+# Training data directory, or a packed HDF5 training file
 train_data_dir = "data/h9_3ch_norm"
-# test data folder
+# Test data directory, or a packed HDF5 validation file
 test_data_dir = "data/h9_3ch_val_small"
 
 # Checkpoint configuration. Checkpoints are saved to and loaded from `out_dir`/checkpoint.pth.tar
