@@ -34,3 +34,24 @@ def test_ema_skips_prestart_copies_then_initializes_once_and_averages():
     set_weight(model, 5.0)
     assert ema.step_ema(ema_model, model) is True
     assert ema_model.weight.item() == 4.0
+
+
+def test_resume_before_configured_start_does_not_enable_ema():
+    steps_per_epoch = 10
+    ema = EMA(beta=0.5, step_start=1024 * steps_per_epoch)
+
+    # Simulate a legacy checkpoint made after ten epochs. Legacy checkpoints
+    # have no saved `started` flag.
+    ema.restore_state(completed_steps=10 * steps_per_epoch, started=None)
+
+    assert ema.started is False
+    assert ema.step_start == 1024 * steps_per_epoch
+
+
+def test_current_config_can_delay_an_ema_that_an_old_config_started():
+    ema = EMA(beta=0.5, step_start=1024)
+
+    ema.restore_state(completed_steps=100, started=True)
+
+    assert ema.started is False
+    assert ema.step_start == 1024

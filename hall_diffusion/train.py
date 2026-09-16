@@ -54,7 +54,7 @@ class TrainingState:
     ema: Any
     scaler: Any
     val_loss: float = math.inf
-    ema_loss: float = math.inf
+    ema_loss: float = math.nan
     best_loss: float = math.inf
     best_params: Any = None
     outlier_inds: list = field(default_factory=list)
@@ -374,10 +374,12 @@ def train(args):
     logger.info(
         f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}."
     )
+    ema_start_step = EMA.calculate_start_step(batch_size, len(train_dataset), ema_start)
     ema = EMA(
         ema_factor,
-        step_start=EMA.calculate_start_step(batch_size, len(train_dataset), ema_start),
+        step_start=ema_start_step,
     )
+    logger.info(f"EMA averaging is configured to start at epoch {ema_start} (optimizer step {ema_start_step}).")
     ema_model = copy.deepcopy(model).eval().requires_grad_(False)
 
     # ---------------------------------------------
@@ -408,6 +410,8 @@ def train(args):
 
     # Load checkpoint if found
     loaded_ema_step = None
+    loaded_ema_started = None
+    loaded_ema_weights = False
     if load_checkpoint and os.path.exists(checkpoint_file):
         # Load checkpoint
         ckpt = utils.load_checkpoint(checkpoint_file, DEVICE)
@@ -426,15 +430,9 @@ def train(args):
         # Load EMA model
         if "ema" in ckpt:
             ema_model.load_state_dict(ckpt["ema"], strict=False)
+            loaded_ema_weights = True
             loaded_ema_step = ckpt.get("ema_step")
-            if "ema_started" in ckpt:
-                ema.started = ckpt["ema_started"]
-            else:
-                # Old checkpoints copied the live weights into the EMA model
-                # every step before averaging began, so they are safe to resume
-                # as an initialized EMA.
-                ema.started = True
-                ema.step_start = 0
+            loaded_ema_started = ckpt.get("ema_started")
             logger.info("EMA loaded from checkpoint")
 
     # ---------------------------------------------
@@ -465,8 +463,18 @@ def train(args):
         start_epoch = 0
         state = TrainingState(model=model, ema_model=ema_model, optimizer=optimizer, ema=ema, scaler=scaler)
 
-    # Ensure EMA's counter is in sync with the number of completed batches.
-    ema.step = loaded_ema_step if loaded_ema_step is not None else max(0, state.batch_idx + 1)
+    # Restore progress without allowing a checkpoint made under a different
+    # configuration to override the current ema_start_epochs setting.
+    completed_ema_steps = loaded_ema_step if loaded_ema_step is not None else max(0, state.batch_idx + 1)
+    ema.restore_state(
+        completed_ema_steps,
+        started=loaded_ema_started if loaded_ema_weights else False,
+    )
+    if not ema.started:
+        state.ema_loss = math.nan
+    logger.info(
+        f"EMA state: completed optimizer steps={ema.step}, start step={ema.step_start}, started={ema.started}."
+    )
 
     # ---------------------------------------------
     # Noise args
@@ -580,8 +588,10 @@ def train(args):
                             data_dir=test_data_dir,
                             seed=val_seed,
                         )
-                        state.ema_loss = state.val_loss
-                    ema_losses.append(state.ema_loss)
+                        # Do not report the live-model loss as an EMA result.
+                        state.ema_loss = math.nan
+                    if np.isfinite(state.ema_loss):
+                        ema_losses.append(state.ema_loss)
                     val_losses.append(state.val_loss)
 
             with timer.section("logging"):

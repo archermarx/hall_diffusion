@@ -28,6 +28,21 @@ class EMA:
         """Convert an epoch offset to the number of optimizer steps."""
         return start_epochs * math.ceil(dataset_size / batch_size)
 
+    def restore_state(self, completed_steps, started=None):
+        """Restore progress while keeping the configured start step authoritative."""
+        self.step = max(0, int(completed_steps))
+        if self.step_start > 0 and self.step <= self.step_start:
+            # This also handles checkpoints created with an earlier start
+            # setting: increasing ema_start_epochs must delay EMA again.
+            self.started = False
+        elif started is None:
+            # Legacy checkpoints did not store this flag. Their EMA weights
+            # tracked the live weights before averaging, so they are a valid
+            # initialization once the configured start has passed.
+            self.started = True
+        else:
+            self.started = bool(started)
+
     def update_model_average(self, ema_model, model):
         pairs = [
             (ema_param, new_param)
