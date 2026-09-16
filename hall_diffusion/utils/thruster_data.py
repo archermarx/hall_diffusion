@@ -112,7 +112,7 @@ class ThrusterDataset(Dataset):
         start_index: int = 0,
         scalars_in_tensor=False,
         fourier_features=False,
-        files=None,
+        uuids=None,
         downsample_res=None,
         max_freqs=64,
     ):
@@ -130,9 +130,11 @@ class ThrusterDataset(Dataset):
             )
 
         if self.is_hdf5:
-            self._init_hdf5(files, subset_size, start_index, scalars_in_tensor)
+            self._init_hdf5(uuids, subset_size, start_index, scalars_in_tensor)
         else:
-            self._init_directory(files, subset_size, start_index, scalars_in_tensor)
+            if uuids is not None:
+                raise ValueError("UUID filtering is only supported for HDF5 datasets")
+            self._init_directory(subset_size, start_index, scalars_in_tensor)
 
         self.downsample_res = downsample_res
 
@@ -155,27 +157,25 @@ class ThrusterDataset(Dataset):
         # Factor used to normalize power spectra
         self.power_norm_factor = np.abs(np.log(self.min_pow))
 
-    def _init_directory(self, files, subset_size, start_index, scalars_in_tensor):
+    def _init_directory(self, subset_size, start_index, scalars_in_tensor):
         self.data_dir = self.dir / "data"
         self.files = os.listdir(self.data_dir)
-        if files is not None:
-            filter_files = set(files)
-            self.files = [filename for filename in self.files if filename in filter_files]
-        elif subset_size is not None and subset_size > 0:
+        if subset_size is not None and subset_size > 0:
             self.files = self.files[start_index : (subset_size + start_index)]
+        self.record_ids = self.files
 
         self.metadata_grid = pd.read_csv(self.dir / "grid.csv")
         self.grid = self.metadata_grid["z (m)"].to_numpy()
         self.norm = Normalizer(self.dir, scalars_in_tensor)
         self._indices = None
 
-    def _init_hdf5(self, files, subset_size, start_index, scalars_in_tensor):
+    def _init_hdf5(self, uuids, subset_size, start_index, scalars_in_tensor):
         required = {
             "fields",
             "parameters",
             "performance",
             "grid",
-            "source_files",
+            "UUID",
             "field_names",
             "field_means",
             "field_stds",
@@ -197,7 +197,7 @@ class ThrusterDataset(Dataset):
             record_count = fields_shape[0]
             chunks = handle["fields"].chunks
             self.hdf5_chunk_size = chunks[0] if chunks is not None else 1
-            for name in ("parameters", "performance", "source_files"):
+            for name in ("parameters", "performance", "UUID"):
                 if handle[name].shape[0] != record_count:
                     raise ValueError(f"HDF5 '{name}' record count does not match 'fields'")
             if fields_shape[1] != len(handle["field_names"]):
@@ -213,14 +213,12 @@ class ThrusterDataset(Dataset):
 
             self.grid = np.asarray(handle["grid"], dtype=float)
             self.metadata_grid = pd.DataFrame({"z (m)": self.grid})
-            if files is not None:
-                requested = set(files)
-                indices = []
-                for index, raw_name in enumerate(handle["source_files"]):
-                    name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
-                    if name in requested:
-                        indices.append(index)
-                self._indices = indices
+            all_uuids = handle["UUID"].asstr()[:].tolist()
+            if len(set(all_uuids)) != len(all_uuids):
+                raise ValueError(f"HDF5 dataset {self.dir} contains duplicate UUIDs")
+            if uuids is not None:
+                requested = set(uuids)
+                self._indices = [index for index, record_uuid in enumerate(all_uuids) if record_uuid in requested]
             else:
                 stop = (
                     record_count
@@ -228,6 +226,7 @@ class ThrusterDataset(Dataset):
                     else min(record_count, start_index + subset_size)
                 )
                 self._indices = range(min(start_index, record_count), stop)
+            self.record_ids = [all_uuids[index] for index in self._indices]
 
         self.data_dir = None
         self.files = None
@@ -334,10 +333,9 @@ class ThrusterDataset(Dataset):
         if self.is_hdf5:
             record_index = self._indices[idx]
             data = self._hdf5_handle()
-            raw_name = data["source_files"][record_index]
             perf = data["performance"][record_index] if self.scalars_in_tensor else None
             return self._format_sample(
-                raw_name,
+                self.record_ids[idx],
                 data["parameters"][record_index],
                 data["fields"][record_index],
                 perf,
@@ -355,6 +353,7 @@ class ThrusterDataset(Dataset):
             return [self[index] for index in indices]
 
         records = [self._indices[int(index)] for index in indices]
+        record_ids = [self.record_ids[int(index)] for index in indices]
         sorted_positions = sorted(range(len(records)), key=records.__getitem__)
         samples = [None] * len(records)
         data = self._hdf5_handle()
@@ -371,13 +370,12 @@ class ThrusterDataset(Dataset):
                 run_end += 1
 
             record_slice = slice(first_record, last_record + 1)
-            names = data["source_files"][record_slice]
             parameters = data["parameters"][record_slice]
             fields = data["fields"][record_slice]
             performance = data["performance"][record_slice] if self.scalars_in_tensor else None
             for offset, sorted_position in enumerate(sorted_positions[run_start:run_end]):
                 samples[sorted_position] = self._format_sample(
-                    names[offset],
+                    record_ids[sorted_position],
                     parameters[offset],
                     fields[offset],
                     performance[offset] if performance is not None else None,
@@ -385,8 +383,16 @@ class ThrusterDataset(Dataset):
             run_start = run_end
         return samples
 
-    def _format_sample(self, raw_name, raw_params, raw_tensor, raw_perf=None):
-        sample_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+    @staticmethod
+    def _decode_identifier(raw_identifier):
+        return (
+            raw_identifier.decode("utf-8")
+            if isinstance(raw_identifier, (bytes, np.bytes_))
+            else str(raw_identifier)
+        )
+
+    def _format_sample(self, raw_identifier, raw_params, raw_tensor, raw_perf=None):
+        record_id = self._decode_identifier(raw_identifier)
         tensor = torch.as_tensor(np.asarray(raw_tensor), dtype=torch.float32)
         params = torch.as_tensor(np.asarray(raw_params), dtype=torch.float32)
 
@@ -416,7 +422,7 @@ class ThrusterDataset(Dataset):
 
             assert tensor.shape[1] == 128
 
-        return sample_name, params, tensor
+        return record_id, params, tensor
 
 
 class ThrusterPlotter1D:

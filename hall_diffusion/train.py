@@ -97,11 +97,11 @@ def validation_loss(
     if seed is not None:
         torch.manual_seed(seed)
     losses = []
-    for filenames, vec, x in val_loader:
+    for record_ids, vec, x in val_loader:
         with torch.no_grad():
             x = x.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
             vec = vec.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
-            conditions = condition_fn(filenames, x, vec) if condition_fn is not None else None
+            conditions = condition_fn(record_ids, x, vec) if condition_fn is not None else None
             _, loss, *_ = loss_fn(x, model, condition_vec=vec, conditions=conditions)
             losses.append(loss.detach())
     torch.set_rng_state(rng_state)
@@ -110,10 +110,10 @@ def validation_loss(
     if visualize:
         # Load first batch with fixed noise to visualize results
         with torch.no_grad():
-            filenames, vec, y = next(iter(val_loader))
+            record_ids, vec, y = next(iter(val_loader))
             vec = vec.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
             y = y.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
-            conditions = condition_fn(filenames, y, vec) if condition_fn is not None else None
+            conditions = condition_fn(record_ids, y, vec) if condition_fn is not None else None
             noise_std = torch.rand((y.shape[0], 1, 1), device=DEVICE)
             fixed_noise = torch.tensor(visualization.NOISE_LEVELS_FOR_PLOTTING, device=DEVICE)
             noise_std[: len(fixed_noise), 0, 0] = fixed_noise
@@ -536,7 +536,7 @@ def train(args):
         while True:
             with timer.section("data_load"):
                 try:
-                    filenames, vec, y = next(data_iter)
+                    record_ids, vec, y = next(data_iter)
                 except StopIteration:
                     break
 
@@ -565,8 +565,8 @@ def train(args):
                 if np.isfinite(state.val_loss) and (batch_loss - state.val_loss) > state.val_loss:
                     state.outlier_inds.append(state.batch_idx * batch_size)
                     state.outlier_losses.append(batch_loss)
-                    for f in filenames:
-                        state.outliers[f] = state.outliers.get(f, 0) + 1
+                    for record_id in record_ids:
+                        state.outliers[record_id] = state.outliers.get(record_id, 0) + 1
                     sorted_outliers = dict(sorted(state.outliers.items(), key=lambda item: item[1], reverse=True))
                     with open(out_dir / "outliers.json", "w") as fd:
                         json.dump(sorted_outliers, fd, indent=4)

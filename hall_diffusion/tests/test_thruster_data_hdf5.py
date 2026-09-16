@@ -8,6 +8,12 @@ from torch.utils.data import DataLoader
 
 from hall_diffusion.utils.thruster_data import HDF5ChunkBatchSampler, ThrusterDataset
 
+UUIDS = [
+    "00000000-0000-0000-0000-000000000001",
+    "00000000-0000-0000-0000-000000000002",
+    "00000000-0000-0000-0000-000000000003",
+]
+
 
 def write_dataset(path):
     records = 3
@@ -20,7 +26,7 @@ def write_dataset(path):
         handle.create_dataset("parameters", data=parameters)
         handle.create_dataset("performance", data=performance)
         handle.create_dataset("grid", data=np.linspace(0.0, 1.0, resolution))
-        handle.create_dataset("source_files", data=np.array(["one.npz", "two.npz", "three.npz"], dtype="S"))
+        handle.create_dataset("UUID", data=np.asarray(UUIDS, dtype=h5py.string_dtype("utf-8")))
         handle.create_dataset("field_names", data=np.array(["density", "potential"], dtype="S"))
         handle.create_dataset("field_means", data=[10.0, 20.0])
         handle.create_dataset("field_stds", data=[2.0, 4.0])
@@ -43,24 +49,25 @@ def test_hdf5_dataset_reads_records_and_metadata_lazily(tmp_path):
 
     assert len(dataset) == 1
     assert dataset._h5 is None
+    assert dataset.record_ids == [UUIDS[1]]
     assert dataset.fields() == {"density": 0, "potential": 1}
     assert dataset.params() == {"voltage": 0, "propellant": 1}
     assert dataset.norm.norm_spatial["log"].tolist() == [True, False]
-    filename, params, tensor = dataset[0]
-    assert filename == "two.npz"
+    record_uuid, params, tensor = dataset[0]
+    assert record_uuid == UUIDS[1]
     torch.testing.assert_close(params, torch.from_numpy(parameters[1]))
     torch.testing.assert_close(tensor, torch.from_numpy(fields[1]))
     assert dataset._h5 is not None
 
 
-def test_hdf5_dataset_can_append_scalar_channels_and_filter_sources(tmp_path):
+def test_hdf5_dataset_can_append_scalar_channels_and_filter_uuids(tmp_path):
     path = tmp_path / "training.hdf5"
     fields, parameters, performance = write_dataset(path)
 
-    dataset = ThrusterDataset(path, files=["three.npz"], scalars_in_tensor=True)
-    filename, params, tensor = dataset[0]
+    dataset = ThrusterDataset(path, uuids=[UUIDS[2]], scalars_in_tensor=True)
+    record_uuid, params, tensor = dataset[0]
 
-    assert filename == "three.npz"
+    assert record_uuid == UUIDS[2]
     assert params.numel() == 0
     assert tensor.shape == (5, 128)
     torch.testing.assert_close(tensor[:2], torch.from_numpy(fields[2]))
@@ -83,9 +90,9 @@ def test_hdf5_dataset_is_worker_pickle_safe_and_ignores_fourier_features(tmp_pat
     with pytest.warns(DeprecationWarning, match="deprecated"):
         dataset = ThrusterDataset(path, fourier_features=True, downsample_res=64)
     restored = pickle.loads(pickle.dumps(dataset))
-    filename, params, tensor = restored[0]
+    record_uuid, params, tensor = restored[0]
 
-    assert filename == "one.npz"
+    assert record_uuid == UUIDS[0]
     assert params.shape == (2,)
     assert tensor.shape == (2, 64)
     assert restored.fourier_features is False
@@ -97,9 +104,9 @@ def test_hdf5_dataset_loads_with_training_workers(tmp_path):
     dataset = ThrusterDataset(path)
     dataset[0]  # Open a handle in the parent before workers are created.
 
-    filenames, parameters, fields = next(iter(DataLoader(dataset, batch_size=2, num_workers=2)))
+    record_uuids, parameters, fields = next(iter(DataLoader(dataset, batch_size=2, num_workers=2)))
 
-    assert filenames == ("one.npz", "two.npz")
+    assert record_uuids == tuple(UUIDS[:2])
     assert parameters.shape == (2, 2)
     assert fields.shape == (2, 2, 128)
 
@@ -111,7 +118,7 @@ def test_hdf5_batch_reads_preserve_requested_order(tmp_path):
 
     samples = dataset.__getitems__([2, 0, 1])
 
-    assert [sample[0] for sample in samples] == ["three.npz", "one.npz", "two.npz"]
+    assert [sample[0] for sample in samples] == [UUIDS[2], UUIDS[0], UUIDS[1]]
     for sample, expected_params, expected_fields in zip(
         samples, parameters[[2, 0, 1]], fields[[2, 0, 1]], strict=True
     ):
