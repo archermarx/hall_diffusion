@@ -28,6 +28,7 @@ EDM2_DEFAULTS = {
 TRAINING_DEFAULTS = {
     "condition_dropout": 0.0,
     "use_amp": True,
+    "torch_compile": False,
     "load_workers": 2,
     "prefetch_factor": 4,
     "ema_epochs": None,

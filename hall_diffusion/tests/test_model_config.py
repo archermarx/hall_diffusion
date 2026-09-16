@@ -61,6 +61,7 @@ def test_training_config_populates_nested_defaults():
     resolved = resolve_config(config)
 
     assert resolved["training"]["condition_dropout"] == 0.0
+    assert resolved["training"]["torch_compile"] is False
     assert resolved["training"]["optimizer"]["adam_betas"] == [0.9, 0.999]
     assert resolved["training"]["loss"] == LOSS_DEFAULTS
 

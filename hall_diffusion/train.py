@@ -20,7 +20,6 @@ from tqdm import tqdm
 
 # Pytorch deps
 import torch
-import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # Our dependencies
@@ -62,6 +61,7 @@ class TrainingState:
     outliers: dict = field(default_factory=dict)
     batch_idx: int = -1
     example_idx: int = -1
+    training_model: Any = None
 
 
 def learning_rate_schedule(cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3, rampup_batches=0):
@@ -162,7 +162,8 @@ def train_one_batch(
     if timer is None:
         timer = StepTimer(enabled=False)
 
-    state.model.train()
+    training_model = state.training_model if state.training_model is not None else state.model
+    training_model.train()
     state.optimizer.zero_grad(set_to_none=True)
 
     # Transfer conditioning vector and data to device
@@ -178,7 +179,7 @@ def train_one_batch(
     if use_amp:
         with timer.section("forward"):
             with torch.amp.autocast_mode.autocast(DEVICE.type, dtype=AMP_DTYPE):
-                loss, _, *_ = loss_fn(y, state.model, condition_vec=condition_vec, conditions=conditions)
+                loss, _, *_ = loss_fn(y, training_model, condition_vec=condition_vec, conditions=conditions)
         with timer.section("backward"):
             if state.scaler is not None:
                 state.scaler.scale(loss).backward()
@@ -186,7 +187,7 @@ def train_one_batch(
                 loss.backward()
     else:
         with timer.section("forward"):
-            loss, _, *_ = loss_fn(y, state.model, condition_vec=condition_vec, conditions=conditions)
+            loss, _, *_ = loss_fn(y, training_model, condition_vec=condition_vec, conditions=conditions)
         with timer.section("backward"):
             loss.backward()
 
@@ -283,6 +284,7 @@ def train(args):
     condition_dropout = train_args["condition_dropout"]
     evaluation_iters = train_args["eval_freq"]
     use_amp = amp_enabled(DEVICE, train_args["use_amp"])
+    use_torch_compile = train_args["torch_compile"]
     load_workers = train_args["load_workers"]
     prefetch_factor = train_args["prefetch_factor"]
 
@@ -325,6 +327,10 @@ def train(args):
     }
     if load_workers > 0:
         loader_kwargs.update(prefetch_factor=prefetch_factor, persistent_workers=True)
+    logger.info(
+        f"DataLoader workers={load_workers}, prefetch_factor={prefetch_factor if load_workers else None}, "
+        f"persistent_workers={load_workers > 0}."
+    )
 
     if train_dataset.is_hdf5:
         train_loader = DataLoader(
@@ -394,9 +400,14 @@ def train(args):
     weight_decay_epochs = opt_args["weight_decay_epochs"]
     weight_decay = 1 - EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, weight_decay_epochs)
 
-    optimizer = optim.AdamW(
-        [p for p in model.get_trainable_params()], lr=ref_lr, weight_decay=weight_decay, betas=betas
+    optimizer = utils.create_adamw(
+        model.get_trainable_params(),
+        DEVICE,
+        lr=ref_lr,
+        weight_decay=weight_decay,
+        betas=betas,
     )
+    logger.info(f"AdamW fused implementation: {optimizer.defaults.get('fused') is True}.")
     scaler = create_grad_scaler(DEVICE, use_amp and AMP_DTYPE == torch.float16)
     logger.info(f"AMP dtype: {AMP_DTYPE}, grad scaler: {'enabled' if scaler is not None else 'disabled'}")
 
@@ -510,6 +521,12 @@ def train(args):
 
     # ---------------------------------------------
     # Main training loop
+    # Keep the original model in state for stable checkpoint keys and EMA
+    # updates. The compiled wrapper shares its parameters and is used for
+    # training steps, including the autograd-generated backward graph.
+    state.training_model = utils.compile_model(state.model, use_torch_compile)
+    logger.info(f"torch.compile: {'enabled' if use_torch_compile else 'disabled'}.")
+
     epoch_range = range(start_epoch, max_epochs + 1) if max_epochs > 0 else itertools.count(start_epoch)
     for epoch_idx in epoch_range:
         with timer.section("epoch_setup"):

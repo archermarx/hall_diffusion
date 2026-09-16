@@ -29,6 +29,12 @@ eval_freq = 100
 ema_epochs = 128
 # Whether to use automatic mixed precision (float16 where possible)
 use_amp = true
+# Compile the model for training with torch.compile
+torch_compile = false
+# Number of worker processes used to load and prefetch training data
+load_workers = 2
+# Number of batches prefetched by each worker
+prefetch_factor = 4
 # Log file name
 log_file = "training.dat"
 

@@ -41,10 +41,16 @@ def load_frozen_base(path: str | Path, device, weights: str = "ema"):
     return base, config
 
 
-def _loader(dataset, batch_size, shuffle, workers):
-    kwargs = dict(batch_size=batch_size, shuffle=shuffle, num_workers=workers, collate_fn=collate_condition_batch)
+def _loader(dataset, batch_size, shuffle, workers, device, prefetch_factor=2):
+    kwargs = dict(
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=workers,
+        collate_fn=collate_condition_batch,
+        pin_memory=device.type == "cuda",
+    )
     if workers:
-        kwargs["prefetch_factor"] = 2
+        kwargs.update(prefetch_factor=prefetch_factor, persistent_workers=True)
     return DataLoader(dataset, **kwargs)
 
 
@@ -80,8 +86,11 @@ def train(config_path: str | Path, device_name: str = "auto"):
     model = ConditionedEDM2(base, {name: adapter}).to(device)
     ema_adapter = copy.deepcopy(adapter).eval().requires_grad_(False)
     optimizer_args = training["optimizer"]
-    optimizer = torch.optim.AdamW(
-        model.get_trainable_params(), lr=optimizer_args["lr"], betas=tuple(optimizer_args["adam_betas"])
+    optimizer = utils.create_adamw(
+        model.get_trainable_params(),
+        device,
+        lr=optimizer_args["lr"],
+        betas=tuple(optimizer_args["adam_betas"]),
     )
     batch_size = training["batch_size"]
     ema = EMA(
@@ -89,20 +98,26 @@ def train(config_path: str | Path, device_name: str = "auto"):
         step_start=EMA.calculate_start_step(batch_size, len(train_data), training["ema_start_epochs"]),
     )
     loss_fn = EDM2Loss(**training["loss"])
-    train_loader = _loader(train_data, batch_size, True, training["load_workers"])
-    test_loader = _loader(test_data, batch_size, False, training["load_workers"])
+    loader_args = dict(
+        workers=training["load_workers"],
+        device=device,
+        prefetch_factor=training["prefetch_factor"],
+    )
+    train_loader = _loader(train_data, batch_size, True, **loader_args)
+    test_loader = _loader(test_data, batch_size, False, **loader_args)
     output_dir = Path(directories["out_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "adapter.pth.tar"
 
+    training_model = utils.compile_model(model, training["torch_compile"])
     for epoch in range(training["epochs"]):
-        model.train()
+        training_model.train()
         for _, vector, target, condition in tqdm(train_loader, desc=f"adapter epoch {epoch + 1}"):
-            target = target.to(device)
-            vector = vector.to(device) if base.condition_dim else None
-            conditions = {name: condition.to(device)}
+            target = target.to(device, non_blocking=device.type == "cuda")
+            vector = vector.to(device, non_blocking=device.type == "cuda") if base.condition_dim else None
+            conditions = {name: condition.to(device, non_blocking=device.type == "cuda")}
             optimizer.zero_grad(set_to_none=True)
-            loss, _, _, _ = loss_fn(target, model, condition_vec=vector, conditions=conditions)
+            loss, _, _, _ = loss_fn(target, training_model, condition_vec=vector, conditions=conditions)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), 100.0)
             optimizer.step()
@@ -114,9 +129,9 @@ def train(config_path: str | Path, device_name: str = "auto"):
         losses = []
         with torch.no_grad():
             for _, vector, target, condition in test_loader:
-                target = target.to(device)
-                vector = vector.to(device) if base.condition_dim else None
-                conditions = {name: condition.to(device)}
+                target = target.to(device, non_blocking=device.type == "cuda")
+                vector = vector.to(device, non_blocking=device.type == "cuda") if base.condition_dim else None
+                conditions = {name: condition.to(device, non_blocking=device.type == "cuda")}
                 _, value, _, _ = loss_fn(target, model, condition_vec=vector, conditions=conditions)
                 losses.append(value)
         value = sum(losses) / len(losses)
