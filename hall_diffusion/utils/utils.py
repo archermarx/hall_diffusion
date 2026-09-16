@@ -55,16 +55,12 @@ def get_device(requested="auto"):
     return device
 
 
-def create_adamw(parameters, device, **kwargs):
-    """Create AdamW, automatically using its fused implementation on CUDA."""
-    if device.type == "cuda":
-        kwargs["fused"] = True
-    return torch.optim.AdamW(parameters, **kwargs)
-
-
 def compile_model(model, enabled):
     """Return a compiled training wrapper, or the original model when disabled."""
-    return torch.compile(model) if enabled else model
+    if not enabled:
+        return model
+    torch.set_float32_matmul_precision("high")
+    return torch.compile(model, fullgraph=True)
 
 
 def load_checkpoint(path, device):

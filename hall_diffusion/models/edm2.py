@@ -22,51 +22,6 @@ except ModuleNotFoundError:  # Support running hall_diffusion/train.py directly.
     from configuration import EDM2_DEFAULTS
 
 # ----------------------------------------------------------------------------
-# Cached construction of constant tensors. Avoids CPU=>GPU copy when the
-# same constant is used multiple times.
-
-_constant_cache = dict()
-
-
-def constant(value, shape=None, dtype=None, device=None, memory_format=None):
-    value = np.asarray(value)
-    if shape is not None:
-        shape = tuple(shape)
-    if dtype is None:
-        dtype = torch.get_default_dtype()
-    if device is None:
-        device = torch.device("cpu")
-    if memory_format is None:
-        memory_format = torch.contiguous_format
-
-    key = (
-        value.shape,
-        value.dtype,
-        value.tobytes(),
-        shape,
-        dtype,
-        device,
-        memory_format,
-    )
-    tensor = _constant_cache.get(key, None)
-    if tensor is None:
-        tensor = torch.as_tensor(value.copy(), dtype=dtype, device=device)
-        if shape is not None:
-            tensor, _ = torch.broadcast_tensors(tensor, torch.empty(shape))
-        tensor = tensor.contiguous(memory_format=memory_format)
-        _constant_cache[key] = tensor
-    return tensor
-
-
-def const_like(ref, value, shape=None, dtype=None, device=None, memory_format=None):
-    if dtype is None:
-        dtype = ref.dtype
-    if device is None:
-        device = ref.device
-    return constant(value, shape=shape, dtype=dtype, device=device, memory_format=memory_format)
-
-
-# ----------------------------------------------------------------------------
 # Normalize given tensor to unit magnitude with respect to the given
 # dimensions. Default = all dimensions except the first.
 
@@ -84,16 +39,11 @@ def normalize(x, dim=None, eps=1e-4):
 # or keep it as is.
 
 
-def resample1d(x, f=[1, 1], mode="keep"):
+def resample1d(x, f, mode="keep"):
     if mode == "keep":
         return x
-    f = np.float32(f)
-    assert f.ndim == 1 and len(f) % 2 == 0
-    pad = (len(f) - 1) // 2
-    f = f / f.sum()
-    # print(f"{f=}")
-    # f = np.outer(f, f)[np.newaxis, :]
-    f = const_like(x, f)
+    pad = (f.numel() - 1) // 2
+    f = f.to(x.dtype)
     c = x.shape[1]
     if mode == "down":
         return nn.functional.conv1d(x, f.tile([c, 1, 1]), groups=c, stride=2, padding=(pad,))
@@ -196,7 +146,10 @@ class Block(nn.Module):
         super().__init__()
         self.out_channels = out_channels
         self.flavor = flavor
-        self.resample_filter = resample_filter
+        resample_filter = torch.as_tensor(resample_filter, dtype=torch.float32)
+        if resample_filter.ndim != 1 or resample_filter.numel() % 2 != 0:
+            raise ValueError("resample_filter must contain an even number of coefficients")
+        self.register_buffer("resample_filter", resample_filter / resample_filter.sum(), persistent=False)
         self.resample_mode = resample_mode
         self.num_heads = out_channels // channels_per_head if attention else 0
         self.res_balance = res_balance

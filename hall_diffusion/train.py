@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 # Pytorch deps
 import torch
+import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # Our dependencies
@@ -400,14 +401,9 @@ def train(args):
     weight_decay_epochs = opt_args["weight_decay_epochs"]
     weight_decay = 1 - EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, weight_decay_epochs)
 
-    optimizer = utils.create_adamw(
-        model.get_trainable_params(),
-        DEVICE,
-        lr=ref_lr,
-        weight_decay=weight_decay,
-        betas=betas,
+    optimizer = optim.AdamW(
+        model.get_trainable_params(), lr=ref_lr, weight_decay=weight_decay, betas=betas
     )
-    logger.info(f"AdamW fused implementation: {optimizer.defaults.get('fused') is True}.")
     scaler = create_grad_scaler(DEVICE, use_amp and AMP_DTYPE == torch.float16)
     logger.info(f"AMP dtype: {AMP_DTYPE}, grad scaler: {'enabled' if scaler is not None else 'disabled'}")
 

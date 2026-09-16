@@ -86,11 +86,8 @@ def train(config_path: str | Path, device_name: str = "auto"):
     model = ConditionedEDM2(base, {name: adapter}).to(device)
     ema_adapter = copy.deepcopy(adapter).eval().requires_grad_(False)
     optimizer_args = training["optimizer"]
-    optimizer = utils.create_adamw(
-        model.get_trainable_params(),
-        device,
-        lr=optimizer_args["lr"],
-        betas=tuple(optimizer_args["adam_betas"]),
+    optimizer = torch.optim.AdamW(
+        model.get_trainable_params(), lr=optimizer_args["lr"], betas=tuple(optimizer_args["adam_betas"])
     )
     batch_size = training["batch_size"]
     ema = EMA(
