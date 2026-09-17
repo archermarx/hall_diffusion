@@ -180,7 +180,7 @@ def plot_condition_diagnostic(
         max_current = min_current + delta
         
         axes[row, 2].set_ylabel("Current [A]")
-        axes[row, 2].set_ylims(min_current, max_current)
+        axes[row, 2].set_ylim(min_current, max_current)
         axes[row, 2].grid(True, alpha=0.3)
 
     axes[0, 0].set_title("TLPP counts (log display)")
