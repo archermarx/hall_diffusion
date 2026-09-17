@@ -156,40 +156,6 @@ directory described above or to a packed `.h5`/`.hdf5` file using the schema in
 are not loaded into memory. Fourier-derived conditioning features are deprecated
 and are ignored when reading either format.
 
-### Adapter training diagnostics
-
-Adapter training writes `training.csv` in its output directory with one row per
-optimizer step and one validation row every `eval_freq` batches. It records
-event type, example and batch indices, epoch, training loss, live and EMA validation losses,
-gradient norm, and learning rate. It also updates the same `loss_prog.png`,
-`denoise_2d.png`, and fixed-noise `denoise_1d_*.png` figures used by
-unconditional training.
-
-TLPP runs can additionally enable the paired condition diagnostic:
-
-```toml
-[adapter.diagnostics]
-type = "tlpp"
-
-[training]
-log_file = "training.csv"
-eval_freq = 100
-
-[training.checkpoints]
-load_checkpoint = true
-checkpoint_save_freq = 100
-```
-
-This produces `condition_diagnostic.png` with the raw TLPP counts on a log
-display, their binary occupancy, and the UUID-matched `discharge_current_A`
-time trace. Denoising plots use EMA adapter weights after EMA averaging begins
-and live weights before then.
-
-Both intervals are measured in optimizer batches. Set
-`checkpoint_save_freq = -1` to disable checkpoint writes. With
-`load_checkpoint = true`, training resumes from `adapter.pth.tar`, including
-optimizer and EMA state and progress counters; pass `--restart` to ignore it.
-
 ## Sampling
 
 The configs also have options for sampling/generating from the model.
