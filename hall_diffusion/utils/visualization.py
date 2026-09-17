@@ -117,7 +117,7 @@ def plot_condition_diagnostic(
     fig, axes = plt.subplots(
         row_count,
         3,
-        figsize=(13, 2.0 * row_count),
+        figsize=(13, 2.5 * row_count),
         squeeze=False,
         constrained_layout=True,
     )
