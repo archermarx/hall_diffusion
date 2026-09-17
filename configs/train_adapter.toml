@@ -31,6 +31,8 @@ log_file = "training.csv"
 load_workers = 2
 ema_epochs = 16
 ema_start_epochs = 0
+# CUDA float16 autocast with gradient scaling; ignored on non-CUDA devices.
+use_amp = true
 
 [training.loss]
 P_mean = -1.2

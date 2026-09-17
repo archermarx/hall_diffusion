@@ -89,40 +89,90 @@ def plot_condition_diagnostic(
     time_s,
     discharge_current_a,
     current_range,
-    record_id,
+    record_ids,
     title="",
     folder=Path("."),
 ):
-    """Plot the raw TLPP, its occupancy, and its source current trace."""
+    """Plot rows of raw TLPPs, occupancies, and source current traces."""
     counts = np.asarray(counts)
-    if counts.ndim != 2:
-        raise ValueError(f"TLPP diagnostic expects one 2D count image, got {counts.shape}")
+    time_s = np.asarray(time_s)
+    discharge_current_a = np.asarray(discharge_current_a)
+    if counts.ndim == 2:
+        counts = counts[None, ...]
+        time_s = time_s[None, ...]
+        discharge_current_a = discharge_current_a[None, ...]
+        record_ids = [record_ids]
+    else:
+        record_ids = list(record_ids)
+    if counts.ndim != 3:
+        raise ValueError(f"TLPP diagnostic expects (examples, height, width), got {counts.shape}")
+    if time_s.ndim != 2 or discharge_current_a.shape != time_s.shape:
+        raise ValueError("TLPP diagnostic time and current arrays must have shape (examples, samples)")
+    if not (len(record_ids) == len(counts) == len(time_s)):
+        raise ValueError("TLPP diagnostic inputs must contain the same number of examples")
     current_min, current_max = current_range
     extent = (current_min, current_max, current_min, current_max)
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 3.8), constrained_layout=True)
-    image = axes[0].imshow(
-        np.log1p(counts), origin="lower", extent=extent, aspect="equal", interpolation="none", cmap="magma"
+    row_count = len(counts)
+    fig, axes = plt.subplots(
+        row_count,
+        3,
+        figsize=(13, 2.9 * row_count),
+        squeeze=False,
+        constrained_layout=True,
     )
-    axes[0].set_title("TLPP counts (log display)")
-    axes[0].set_xlabel(r"$I(t-\tau)$ [A]")
-    axes[0].set_ylabel(r"$I(t)$ [A]")
-    fig.colorbar(image, ax=axes[0], label=r"$\log(1 + \mathrm{count})$")
+    display_max = max(1.0, float(np.log1p(counts).max()))
+    for row, (count_image, times, current, record_id) in enumerate(
+        zip(counts, time_s, discharge_current_a, record_ids, strict=True)
+    ):
+        image = axes[row, 0].imshow(
+            np.log1p(count_image),
+            origin="lower",
+            extent=extent,
+            aspect="equal",
+            interpolation="none",
+            cmap="magma",
+            vmin=0,
+            vmax=display_max,
+        )
+        axes[row, 0].set_ylabel(r"$I(t)$ [A]")
+        axes[row, 0].text(
+            -0.36,
+            0.5,
+            record_id,
+            transform=axes[row, 0].transAxes,
+            rotation=90,
+            va="center",
+            ha="center",
+            fontsize=7,
+        )
 
-    occupancy = counts > 0
-    axes[1].imshow(occupancy, origin="lower", extent=extent, aspect="equal", interpolation="none", cmap="gray_r")
-    axes[1].set_title(f"Occupancy ({occupancy.mean():.2%})")
-    axes[1].set_xlabel(r"$I(t-\tau)$ [A]")
-    axes[1].set_ylabel(r"$I(t)$ [A]")
+        occupancy = count_image > 0
+        axes[row, 1].imshow(
+            occupancy,
+            origin="lower",
+            extent=extent,
+            aspect="equal",
+            interpolation="none",
+            cmap="gray_r",
+            vmin=0,
+            vmax=1,
+        )
+        axes[row, 1].set_ylabel(f"Occupied: {occupancy.mean():.2%}")
 
-    axes[2].plot(np.asarray(time_s) * 1e6, discharge_current_a, color="tab:blue", linewidth=1.0)
-    axes[2].set_title("Discharge current")
-    axes[2].set_xlabel(r"Time [$\mu$s]")
-    axes[2].set_ylabel("Current [A]")
-    axes[2].grid(True, alpha=0.3)
+        axes[row, 2].plot(times * 1e6, current, color="tab:blue", linewidth=1.0)
+        axes[row, 2].set_ylabel("Current [A]")
+        axes[row, 2].grid(True, alpha=0.3)
 
-    heading = record_id if not title else f"{title}\n{record_id}"
-    fig.suptitle(heading)
+    axes[0, 0].set_title("TLPP counts (log display)")
+    axes[0, 1].set_title("Occupancy")
+    axes[0, 2].set_title("Discharge current")
+    axes[-1, 0].set_xlabel(r"$I(t-\tau)$ [A]")
+    axes[-1, 1].set_xlabel(r"$I(t-\tau)$ [A]")
+    axes[-1, 2].set_xlabel(r"Time [$\mu$s]")
+    fig.colorbar(image, ax=axes[:, 0], label=r"$\log(1 + \mathrm{count})$", shrink=0.8)
+    if title:
+        fig.suptitle(title)
     fig.savefig(Path(folder) / "condition_diagnostic.png", dpi=200)
     plt.close(fig)
 

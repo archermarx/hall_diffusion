@@ -30,6 +30,20 @@ from hall_diffusion.models.ema import EMA
 from hall_diffusion.utils import thruster_data, utils, visualization
 
 
+AMP_DTYPE = torch.float16
+
+
+def _amp_enabled(device, requested):
+    """Use the same CUDA-only mixed-precision policy as base-model training."""
+    return bool(requested and device.type == "cuda")
+
+
+def _create_grad_scaler(device, enabled):
+    if not _amp_enabled(device, enabled):
+        return None
+    return torch.amp.GradScaler("cuda", enabled=True)
+
+
 def _base_checkpoint(path: str | Path) -> Path:
     path = Path(path)
     return path / "checkpoint.pth.tar" if path.is_dir() else path
@@ -141,12 +155,13 @@ def _plot_validation(
     seed,
     output_dir,
     diagnostic_type,
+    diagnostic_examples,
 ):
     """Create the standard denoising plots plus TLPP/source diagnostics."""
     model.eval()
     with torch.random.fork_rng(devices=_rng_devices(device)), torch.no_grad():
         torch.manual_seed(seed)
-        record_ids, vector, target, condition = next(iter(loader))
+        _, vector, target, condition = next(iter(loader))
         if target.shape[0] < len(visualization.NOISE_LEVELS_FOR_PLOTTING):
             raise ValueError("adapter validation plotting requires at least four examples per batch")
         target = target.to(device, non_blocking=device.type == "cuda")
@@ -181,21 +196,26 @@ def _plot_validation(
     )
 
     if diagnostic_type == "tlpp":
-        logical_index = dataset.base.record_ids.index(record_ids[0])
-        raw_condition = dataset.raw_condition(logical_index)
+        rng = np.random.default_rng(seed)
+        example_count = min(diagnostic_examples, len(dataset))
+        logical_indices = rng.choice(len(dataset), size=example_count, replace=False).tolist()
+        raw_conditions = np.stack([dataset.raw_condition(index) for index in logical_indices])
         base_handle = dataset.base._hdf5_handle()
         time_names = base_handle["time_names"].asstr()[:].tolist()
-        time_trace = np.asarray(base_handle["time"][dataset.base._indices[logical_index]])
-        time_s = time_trace[:, time_names.index("time_s")]
-        discharge_current = time_trace[:, time_names.index("discharge_current_A")]
+        time_traces = np.stack(
+            [np.asarray(base_handle["time"][dataset.base._indices[index]]) for index in logical_indices]
+        )
+        time_s = time_traces[:, :, time_names.index("time_s")]
+        discharge_current = time_traces[:, :, time_names.index("discharge_current_A")]
+        selected_record_ids = [dataset.base.record_ids[index] for index in logical_indices]
         condition_attrs = dataset._hdf5_handle().attrs
         current_range = (float(condition_attrs["current_min_A"]), float(condition_attrs["current_max_A"]))
         visualization.plot_condition_diagnostic(
-            raw_condition,
+            raw_conditions,
             time_s,
             discharge_current,
             current_range,
-            record_ids[0],
+            selected_record_ids,
             title=title,
             folder=output_dir,
         )
@@ -209,6 +229,10 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
     adapter_config = config["adapter"]
     training = resolve_training_config(config["training"])
     device = utils.get_device(device_name)
+    use_amp = _amp_enabled(device, training["use_amp"])
+    scaler = _create_grad_scaler(device, use_amp and AMP_DTYPE == torch.float16)
+    amp_description = f"enabled ({AMP_DTYPE})" if use_amp else "disabled"
+    print(f"Selected device: {device}; AMP: {amp_description}")
     base, base_config = load_frozen_base(
         adapter_config["base_checkpoint"], device, adapter_config.get("base_weights", "ema")
     )
@@ -222,9 +246,13 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
     train_base = thruster_data.ThrusterDataset(directories["train_data_dir"], **dataset_kwargs)
     test_base = thruster_data.ThrusterDataset(directories["test_data_dir"], **dataset_kwargs)
     source = adapter_config["condition"]
-    diagnostic_type = adapter_config.get("diagnostics", {}).get("type")
+    diagnostic_config = adapter_config.get("diagnostics", {})
+    diagnostic_type = diagnostic_config.get("type")
+    diagnostic_examples = int(diagnostic_config.get("examples", 6))
     if diagnostic_type not in {None, "tlpp"}:
         raise ValueError("adapter diagnostics type must be 'tlpp' when specified")
+    if diagnostic_examples < 1:
+        raise ValueError("adapter diagnostics examples must be at least one")
     train_source = _condition_source(source, "train")
     test_source = _condition_source(source, "test")
     train_data = ConditionDataset(train_base, train_source)
@@ -293,6 +321,8 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
     )
     restored_state = artifact.get("training_state") if artifact is not None else None
     restored_state = restored_state or {}
+    if scaler is not None and restored_state.get("grad_scaler") is not None:
+        scaler.load_state_dict(restored_state["grad_scaler"])
     batch_index = int(restored_state.get("batch_idx", 0))
     example_index = int(restored_state.get("example_idx", 0))
     start_epoch = int(restored_state.get("epoch_idx", 0))
@@ -330,18 +360,32 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
                 vector = vector.to(device, non_blocking=device.type == "cuda") if base.condition_dim else None
                 conditions = {name: condition.to(device, non_blocking=device.type == "cuda")}
                 optimizer.zero_grad(set_to_none=True)
-                loss, _, _, _ = loss_fn(target, training_model, condition_vec=vector, conditions=conditions)
-                loss.backward()
+                with torch.amp.autocast(device.type, dtype=AMP_DTYPE, enabled=use_amp):
+                    loss, _, _, _ = loss_fn(target, training_model, condition_vec=vector, conditions=conditions)
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                else:
+                    loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), 100.0)
                 loss_value, grad_norm_value = torch.stack(
                     (loss.detach().float(), grad_norm.detach().float())
                 ).cpu().tolist()
-                if not math.isfinite(loss_value) or not math.isfinite(grad_norm_value):
+                if scaler is not None:
+                    previous_scale = scaler.get_scale()
+                    scaler.step(optimizer)
+                    scaler.update()
+                    step_skipped = scaler.get_scale() < previous_scale
+                else:
+                    step_skipped = not math.isfinite(loss_value) or not math.isfinite(grad_norm_value)
+                    if not step_skipped:
+                        optimizer.step()
+                if step_skipped and scaler is None:
                     raise FloatingPointError(
                         f"non-finite adapter training metric: loss={loss_value}, grad_norm={grad_norm_value}"
                     )
-                optimizer.step()
-                ema.step_ema(ema_adapter, adapter)
+                if not step_skipped:
+                    ema.step_ema(ema_adapter, adapter)
 
                 batch_index += 1
                 example_index += target.shape[0]
@@ -394,6 +438,7 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
                         validation_seed,
                         output_dir,
                         diagnostic_type,
+                        diagnostic_examples,
                     )
                     log_writer.writerow(
                         {
@@ -437,6 +482,7 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
                             "ema_started": ema.started,
                             "val_loss": last_validation_loss,
                             "ema_loss": last_ema_loss,
+                            "grad_scaler": scaler.state_dict() if scaler is not None else None,
                         },
                     )
                     progress.set_description(f"adapter epoch {epoch + 1}")

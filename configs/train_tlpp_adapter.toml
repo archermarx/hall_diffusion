@@ -32,6 +32,8 @@ scale = 9.070294784580499e-5
 
 [adapter.diagnostics]
 type = "tlpp"
+# Number of distinct, randomly selected validation records shown in each diagnostic figure.
+examples = 6
 
 [training]
 epochs = 128
@@ -43,6 +45,8 @@ load_workers = 4
 prefetch_factor = 4
 ema_epochs = 16
 ema_start_epochs = 0
+# CUDA float16 autocast with gradient scaling; ignored on non-CUDA devices.
+use_amp = true
 torch_compile = false
 
 [training.loss]

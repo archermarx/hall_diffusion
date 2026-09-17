@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-from hall_diffusion.train_adapter import _interval_due
+from hall_diffusion.train_adapter import _amp_enabled, _interval_due
 from hall_diffusion.utils.visualization import plot_condition_diagnostic, plot_training_progress
 
 
@@ -12,6 +13,12 @@ def test_batch_intervals_match_training_config_semantics():
     assert not _interval_due(100, -1)
     with pytest.raises(ValueError, match="positive or -1"):
         _interval_due(1, 0)
+
+
+def test_adapter_amp_is_cuda_only():
+    assert _amp_enabled(torch.device("cuda"), True)
+    assert not _amp_enabled(torch.device("cuda"), False)
+    assert not _amp_enabled(torch.device("cpu"), True)
 
 
 def test_adapter_training_progress_plot_accepts_event_rows(tmp_path):
@@ -59,18 +66,21 @@ def test_adapter_training_progress_plot_accepts_event_rows(tmp_path):
 
 
 def test_tlpp_condition_diagnostic_plot(tmp_path):
-    counts = np.zeros((8, 8), dtype=np.uint16)
-    counts[2, 3] = 10
-    counts[5, 6] = 2
-    time_s = np.linspace(0, 2e-3, 101)
-    current = 2.0 + np.sin(2 * np.pi * 10_000 * time_s)
+    counts = np.zeros((6, 8, 8), dtype=np.uint16)
+    for index in range(len(counts)):
+        counts[index, index, index + 1] = index + 1
+    one_time_trace = np.linspace(0, 2e-3, 101)
+    time_s = np.repeat(one_time_trace[None, :], len(counts), axis=0)
+    current = np.stack(
+        [2.0 + np.sin(2 * np.pi * (10_000 + index * 100) * one_time_trace) for index in range(6)]
+    )
 
     plot_condition_diagnostic(
         counts,
         time_s,
         current,
         current_range=(-5.0, 105.0),
-        record_id="example-uuid",
+        record_ids=[f"example-uuid-{index}" for index in range(6)],
         title="Epoch: 0001, Loss: 1.0",
         folder=tmp_path,
     )
