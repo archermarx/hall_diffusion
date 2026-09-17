@@ -14,11 +14,11 @@ token_dim = 256
 
 [adapter.condition]
 type = "hdf5"
-train_file = "h9_batch3_train_TLPPs.h5"
-test_file = "h9_batch3_val_small_TLPPs.h5"
+train_file = "h9_batch3_train_TLPPs_compressed.h5"
+test_file = "h9_batch3_val_small_TLPPs_compressed.h5"
 # These caches are created in base-UUID order on the first run and reused.
-train_sorted_file = "h9_batch3_train_TLPPs_sorted.h5"
-test_sorted_file = "h9_batch3_val_small_TLPPs_sorted.h5"
+train_sorted_file = "h9_batch3_train_TLPPs_compressed_sorted.h5"
+test_sorted_file = "h9_batch3_val_small_TLPPs_compressed_sorted.h5"
 data_key = "tlpp_counts"
 id_key = "trace_uuid"
 add_channel_dim = true
@@ -30,9 +30,15 @@ transform = "none"
 # scaling only if the full training and validation products use that invariant.
 scale = 9.070294784580499e-5
 
+[adapter.diagnostics]
+type = "tlpp"
+
 [training]
 epochs = 128
 batch_size = 16
+# Frequency in optimizer batches for validation and diagnostic plots.
+eval_freq = 100
+log_file = "training.csv"
 load_workers = 4
 prefetch_factor = 4
 ema_epochs = 16
@@ -51,3 +57,9 @@ adam_betas = [0.9, 0.999]
 out_dir = "saved_models/tlpp_adapter"
 train_data_dir = "h9_batch3_train.h5"
 test_data_dir = "h9_batch3_val_small.h5"
+
+[training.checkpoints]
+# Resume from out_dir/adapter.pth.tar when it exists.
+load_checkpoint = true
+# Frequency in optimizer batches for saving. Set to -1 to disable.
+checkpoint_save_freq = 100

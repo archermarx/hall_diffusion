@@ -8,10 +8,14 @@ numeric normalization is the responsibility of the data producer.
 from __future__ import annotations
 
 import argparse
+import csv
 import copy
+import math
 from pathlib import Path
+import shutil
 import tomllib
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -20,10 +24,10 @@ from hall_diffusion import models
 from hall_diffusion.adapter_data import ConditionDataset, HDF5ConditionBatchSampler, collate_condition_batch
 from hall_diffusion.configuration import resolve_training_config
 from hall_diffusion.loss import EDM2Loss
-from hall_diffusion.models.adapter_io import save_adapter
+from hall_diffusion.models.adapter_io import load_adapter, save_adapter
 from hall_diffusion.models.conditioning import ConditionAdapter, ConditionedEDM2, build_condition_encoder
 from hall_diffusion.models.ema import EMA
-from hall_diffusion.utils import thruster_data, utils
+from hall_diffusion.utils import thruster_data, utils, visualization
 
 
 def _base_checkpoint(path: str | Path) -> Path:
@@ -65,7 +69,139 @@ def _condition_source(source: dict, split: str) -> dict:
     return resolved
 
 
-def train(config_path: str | Path, device_name: str = "auto"):
+def _rng_devices(device):
+    if device.type != "cuda":
+        return []
+    return [device.index if device.index is not None else torch.cuda.current_device()]
+
+
+def _interval_due(batch_index: int, interval: int) -> bool:
+    """Return whether a positive batch interval is due; -1 disables it."""
+    if interval == -1:
+        return False
+    if interval <= 0:
+        raise ValueError("batch intervals must be positive or -1")
+    return batch_index % interval == 0
+
+
+def _save_checkpoint(
+    path,
+    previous_path,
+    name,
+    adapter,
+    adapter_config,
+    base_config,
+    ema_adapter,
+    optimizer,
+    config,
+    training_state,
+):
+    if path.exists():
+        shutil.move(path, previous_path)
+    save_adapter(
+        path,
+        name=name,
+        adapter=adapter,
+        adapter_config=adapter_config,
+        base_model_config=base_config,
+        ema_state=ema_adapter.state_dict(),
+        optimizer_state=optimizer.state_dict(),
+        train_config=config,
+        training_state=training_state,
+    )
+
+
+def _validation_loss(model, loss_fn, loader, adapter_name, base, device, seed):
+    """Evaluate with a reproducible noise draw and a sample-weighted mean."""
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    with torch.random.fork_rng(devices=_rng_devices(device)), torch.no_grad():
+        torch.manual_seed(seed)
+        for _, vector, target, condition in loader:
+            target = target.to(device, non_blocking=device.type == "cuda")
+            vector = vector.to(device, non_blocking=device.type == "cuda") if base.condition_dim else None
+            conditions = {adapter_name: condition.to(device, non_blocking=device.type == "cuda")}
+            _, value, _, _ = loss_fn(target, model, condition_vec=vector, conditions=conditions)
+            total_loss += value.item() * target.shape[0]
+            total_samples += target.shape[0]
+    return total_loss / total_samples
+
+
+def _plot_validation(
+    model,
+    loss_fn,
+    dataset,
+    loader,
+    adapter_name,
+    base,
+    device,
+    epoch,
+    loss,
+    seed,
+    output_dir,
+    diagnostic_type,
+):
+    """Create the standard denoising plots plus TLPP/source diagnostics."""
+    model.eval()
+    with torch.random.fork_rng(devices=_rng_devices(device)), torch.no_grad():
+        torch.manual_seed(seed)
+        record_ids, vector, target, condition = next(iter(loader))
+        if target.shape[0] < len(visualization.NOISE_LEVELS_FOR_PLOTTING):
+            raise ValueError("adapter validation plotting requires at least four examples per batch")
+        target = target.to(device, non_blocking=device.type == "cuda")
+        vector = vector.to(device, non_blocking=device.type == "cuda") if base.condition_dim else None
+        conditions = {adapter_name: condition.to(device, non_blocking=device.type == "cuda")}
+        fixed_noise = torch.tensor(visualization.NOISE_LEVELS_FOR_PLOTTING, device=device)
+        noise_std = torch.full((target.shape[0], 1, 1), fixed_noise[-1], device=device)
+        noise_std[: len(fixed_noise), 0, 0] = fixed_noise
+        _, _, noisy, denoised = loss_fn(
+            target,
+            model,
+            noise_std=noise_std,
+            condition_vec=vector,
+            conditions=conditions,
+        )
+
+    title = f"Epoch: {epoch + 1:04d}, Loss: {loss:.4f}"
+    visualization.plot_denoising_2d(
+        len(fixed_noise),
+        noisy_image=noisy.cpu(),
+        denoised_prediction=denoised.cpu(),
+        ground_truth=target.cpu(),
+        title=title,
+        folder=output_dir,
+    )
+    visualization.plot_denoising_1d(
+        noisy.cpu(),
+        denoised.cpu(),
+        target.cpu(),
+        folder=output_dir,
+        data_dir=dataset.base.dir,
+    )
+
+    if diagnostic_type == "tlpp":
+        logical_index = dataset.base.record_ids.index(record_ids[0])
+        raw_condition = dataset.raw_condition(logical_index)
+        base_handle = dataset.base._hdf5_handle()
+        time_names = base_handle["time_names"].asstr()[:].tolist()
+        time_trace = np.asarray(base_handle["time"][dataset.base._indices[logical_index]])
+        time_s = time_trace[:, time_names.index("time_s")]
+        discharge_current = time_trace[:, time_names.index("discharge_current_A")]
+        condition_attrs = dataset._hdf5_handle().attrs
+        current_range = (float(condition_attrs["current_min_A"]), float(condition_attrs["current_max_A"]))
+        visualization.plot_condition_diagnostic(
+            raw_condition,
+            time_s,
+            discharge_current,
+            current_range,
+            record_ids[0],
+            title=title,
+            folder=output_dir,
+        )
+
+
+def train(config_path: str | Path, device_name: str = "auto", restart: bool = False):
     with open(config_path, "rb") as handle:
         config = tomllib.load(handle)
     if "adapter" not in config or "training" not in config:
@@ -86,28 +222,15 @@ def train(config_path: str | Path, device_name: str = "auto"):
     train_base = thruster_data.ThrusterDataset(directories["train_data_dir"], **dataset_kwargs)
     test_base = thruster_data.ThrusterDataset(directories["test_data_dir"], **dataset_kwargs)
     source = adapter_config["condition"]
+    diagnostic_type = adapter_config.get("diagnostics", {}).get("type")
+    if diagnostic_type not in {None, "tlpp"}:
+        raise ValueError("adapter diagnostics type must be 'tlpp' when specified")
     train_source = _condition_source(source, "train")
     test_source = _condition_source(source, "test")
     train_data = ConditionDataset(train_base, train_source)
     test_data = ConditionDataset(test_base, test_source)
 
-    name = adapter_config["name"]
-    adapter = ConditionAdapter(
-        base,
-        build_condition_encoder(adapter_config["encoder"]),
-        adapter_config.get("channels_per_head"),
-    )
-    model = ConditionedEDM2(base, {name: adapter}).to(device)
-    ema_adapter = copy.deepcopy(adapter).eval().requires_grad_(False)
-    optimizer_args = training["optimizer"]
-    optimizer = torch.optim.AdamW(
-        model.get_trainable_params(), lr=optimizer_args["lr"], betas=tuple(optimizer_args["adam_betas"])
-    )
     batch_size = training["batch_size"]
-    ema = EMA(
-        EMA.calculate_ema_factor(batch_size, len(train_data), training["epochs"], training["ema_epochs"]),
-        step_start=EMA.calculate_start_step(batch_size, len(train_data), training["ema_start_epochs"]),
-    )
     loss_fn = EDM2Loss(**training["loss"])
     loader_args = dict(
         workers=training["load_workers"],
@@ -119,52 +242,216 @@ def train(config_path: str | Path, device_name: str = "auto"):
     output_dir = Path(directories["out_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "adapter.pth.tar"
+    previous_checkpoint_path = output_dir / "adapter_prev.pth.tar"
+    log_path = output_dir / training.get("log_file", "training.csv")
+    evaluation_interval = int(training["eval_freq"])
+    if evaluation_interval <= 0:
+        raise ValueError("training eval_freq must be positive")
+    checkpoint_config = training["checkpoints"]
+    checkpoint_interval = int(checkpoint_config["checkpoint_save_freq"])
+    _interval_due(1, checkpoint_interval)
+    resume = bool(checkpoint_config["load_checkpoint"] and not restart and checkpoint_path.is_file())
+
+    name = adapter_config["name"]
+    saved_adapter_config = {
+        "encoder": adapter_config["encoder"],
+        "channels_per_head": adapter_config.get("channels_per_head"),
+    }
+    artifact = None
+    if resume:
+        loaded_name, adapter, artifact = load_adapter(
+            checkpoint_path,
+            base,
+            base_config,
+            weights="model",
+        )
+        if loaded_name != name:
+            raise ValueError(f"checkpoint adapter is named {loaded_name!r}, expected {name!r}")
+        if artifact["adapter_config"] != saved_adapter_config:
+            raise ValueError("checkpoint adapter configuration does not match the training configuration")
+    else:
+        adapter = ConditionAdapter(
+            base,
+            build_condition_encoder(adapter_config["encoder"]),
+            adapter_config.get("channels_per_head"),
+        )
+
+    model = ConditionedEDM2(base, {name: adapter}).to(device)
+    ema_adapter = copy.deepcopy(adapter).eval().requires_grad_(False)
+    if artifact is not None and artifact.get("ema") is not None:
+        ema_adapter.load_state_dict(artifact["ema"], strict=True)
+    ema_model = ConditionedEDM2(base, {name: ema_adapter}).to(device).eval()
+    optimizer_args = training["optimizer"]
+    optimizer = torch.optim.AdamW(
+        model.get_trainable_params(), lr=optimizer_args["lr"], betas=tuple(optimizer_args["adam_betas"])
+    )
+    if artifact is not None and artifact.get("optimizer") is not None:
+        optimizer.load_state_dict(artifact["optimizer"])
+    ema = EMA(
+        EMA.calculate_ema_factor(batch_size, len(train_data), training["epochs"], training["ema_epochs"]),
+        step_start=EMA.calculate_start_step(batch_size, len(train_data), training["ema_start_epochs"]),
+    )
+    restored_state = artifact.get("training_state") if artifact is not None else None
+    restored_state = restored_state or {}
+    batch_index = int(restored_state.get("batch_idx", 0))
+    example_index = int(restored_state.get("example_idx", 0))
+    start_epoch = int(restored_state.get("epoch_idx", 0))
+    last_validation_loss = float(restored_state.get("val_loss", math.nan))
+    last_ema_loss = float(restored_state.get("ema_loss", math.nan))
+    ema.restore_state(
+        restored_state.get("ema_step", batch_index),
+        started=restored_state.get("ema_started", artifact is not None and artifact.get("ema") is not None),
+    )
+    log_fields = (
+        "event",
+        "example_idx",
+        "batch_idx",
+        "epoch_idx",
+        "train_loss",
+        "val_loss",
+        "ema_loss",
+        "grad_norm",
+        "learning_rate",
+    )
 
     training_model = utils.compile_model(model, training["torch_compile"])
-    for epoch in range(training["epochs"]):
-        training_model.train()
-        for _, vector, target, condition in tqdm(train_loader, desc=f"adapter epoch {epoch + 1}"):
-            target = target.to(device, non_blocking=device.type == "cuda")
-            vector = vector.to(device, non_blocking=device.type == "cuda") if base.condition_dim else None
-            conditions = {name: condition.to(device, non_blocking=device.type == "cuda")}
-            optimizer.zero_grad(set_to_none=True)
-            loss, _, _, _ = loss_fn(target, training_model, condition_vec=vector, conditions=conditions)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), 100.0)
-            optimizer.step()
-            ema.step_ema(ema_adapter, adapter)
-
-        # Validation deliberately uses the live adapter: it checks the full
-        # frozen-base plus adapter path without consuming condition gradients.
-        model.eval()
-        losses = []
-        with torch.no_grad():
-            for _, vector, target, condition in test_loader:
+    log_mode = "a" if resume and log_path.is_file() else "w"
+    write_log_header = log_mode == "w" or log_path.stat().st_size == 0
+    with log_path.open(log_mode, newline="", buffering=1) as log_handle:
+        log_writer = csv.DictWriter(log_handle, fieldnames=log_fields)
+        if write_log_header:
+            log_writer.writeheader()
+        for epoch in range(start_epoch, training["epochs"]):
+            training_model.train()
+            batch_losses = []
+            progress = tqdm(train_loader, desc=f"adapter epoch {epoch + 1}")
+            for _, vector, target, condition in progress:
                 target = target.to(device, non_blocking=device.type == "cuda")
                 vector = vector.to(device, non_blocking=device.type == "cuda") if base.condition_dim else None
                 conditions = {name: condition.to(device, non_blocking=device.type == "cuda")}
-                _, value, _, _ = loss_fn(target, model, condition_vec=vector, conditions=conditions)
-                losses.append(value)
-        value = sum(losses) / len(losses)
-        print(f"epoch {epoch + 1}: validation loss {value:.6g}")
-        save_adapter(
-            checkpoint_path,
-            name=name,
-            adapter=adapter,
-            adapter_config={
-                "encoder": adapter_config["encoder"],
-                "channels_per_head": adapter_config.get("channels_per_head"),
-            },
-            base_model_config=base_config,
-            ema_state=ema_adapter.state_dict(),
-            optimizer_state=optimizer.state_dict(),
-            train_config=config,
-        )
+                optimizer.zero_grad(set_to_none=True)
+                loss, _, _, _ = loss_fn(target, training_model, condition_vec=vector, conditions=conditions)
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), 100.0)
+                loss_value, grad_norm_value = torch.stack(
+                    (loss.detach().float(), grad_norm.detach().float())
+                ).cpu().tolist()
+                if not math.isfinite(loss_value) or not math.isfinite(grad_norm_value):
+                    raise FloatingPointError(
+                        f"non-finite adapter training metric: loss={loss_value}, grad_norm={grad_norm_value}"
+                    )
+                optimizer.step()
+                ema.step_ema(ema_adapter, adapter)
+
+                batch_index += 1
+                example_index += target.shape[0]
+                batch_losses.append(loss_value)
+                learning_rate = optimizer.param_groups[0]["lr"]
+                log_writer.writerow(
+                    {
+                        "event": "train",
+                        "example_idx": example_index,
+                        "batch_idx": batch_index,
+                        "epoch_idx": epoch,
+                        "train_loss": loss_value,
+                        "val_loss": math.nan,
+                        "ema_loss": math.nan,
+                        "grad_norm": grad_norm_value,
+                        "learning_rate": learning_rate,
+                    }
+                )
+                progress.set_postfix(
+                    loss=f"{loss_value:.4g}",
+                    grad=f"{grad_norm_value:.4g}",
+                    val=f"{last_validation_loss:.4g}",
+                )
+
+                if _interval_due(batch_index, evaluation_interval):
+                    validation_seed = torch.randint(2**31, (1,)).item()
+                    last_validation_loss = _validation_loss(
+                        model, loss_fn, test_loader, name, base, device, validation_seed
+                    )
+                    if ema.started:
+                        last_ema_loss = _validation_loss(
+                            ema_model, loss_fn, test_loader, name, base, device, validation_seed
+                        )
+                        diagnostic_model = ema_model
+                        diagnostic_loss = last_ema_loss
+                    else:
+                        last_ema_loss = math.nan
+                        diagnostic_model = model
+                        diagnostic_loss = last_validation_loss
+                    _plot_validation(
+                        diagnostic_model,
+                        loss_fn,
+                        test_data,
+                        test_loader,
+                        name,
+                        base,
+                        device,
+                        epoch,
+                        diagnostic_loss,
+                        validation_seed,
+                        output_dir,
+                        diagnostic_type,
+                    )
+                    log_writer.writerow(
+                        {
+                            "event": "validation",
+                            "example_idx": example_index,
+                            "batch_idx": batch_index,
+                            "epoch_idx": epoch,
+                            "train_loss": loss_value,
+                            "val_loss": last_validation_loss,
+                            "ema_loss": last_ema_loss,
+                            "grad_norm": grad_norm_value,
+                            "learning_rate": learning_rate,
+                        }
+                    )
+                    log_handle.flush()
+                    visualization.plot_training_progress(
+                        log_path,
+                        output_dir,
+                        evaluation_iters=evaluation_interval,
+                        outlier_inds=[],
+                    )
+                    training_model.train()
+
+                if _interval_due(batch_index, checkpoint_interval):
+                    progress.set_description(f"adapter epoch {epoch + 1} (saving)")
+                    _save_checkpoint(
+                        checkpoint_path,
+                        previous_checkpoint_path,
+                        name,
+                        adapter,
+                        saved_adapter_config,
+                        base_config,
+                        ema_adapter,
+                        optimizer,
+                        config,
+                        {
+                            "batch_idx": batch_index,
+                            "example_idx": example_index,
+                            "epoch_idx": epoch,
+                            "ema_step": ema.step,
+                            "ema_started": ema.started,
+                            "val_loss": last_validation_loss,
+                            "ema_loss": last_ema_loss,
+                        },
+                    )
+                    progress.set_description(f"adapter epoch {epoch + 1}")
+
+            mean_train_loss = float(np.mean(batch_losses))
+            print(
+                f"epoch {epoch + 1}: train loss {mean_train_loss:.6g}, "
+                f"validation loss {last_validation_loss:.6g}, EMA loss {last_ema_loss:.6g}"
+            )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
+    parser.add_argument("--restart", action="store_true", help="ignore any existing adapter checkpoint")
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "mps", "cuda", "xpu"))
     args = parser.parse_args()
-    train(args.config, args.device)
+    train(args.config, args.device, restart=args.restart)

@@ -271,6 +271,11 @@ class ConditionDataset(Dataset):
     def __len__(self):
         return len(self.base)
 
+    def raw_condition(self, index):
+        """Return one untransformed condition record for diagnostics."""
+        row = self._condition_rows[int(index)]
+        return np.asarray(self._hdf5_handle()[self.key][row])
+
     def _format_condition(self, value, record_id):
         array = np.asarray(value)
         if self.add_channel_dim:

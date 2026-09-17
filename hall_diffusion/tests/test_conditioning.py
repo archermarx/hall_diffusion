@@ -85,10 +85,12 @@ def test_adapter_artifact_transfers_to_a_different_base_with_the_same_architectu
         path, name="scalar", adapter=adapter,
         adapter_config={"encoder": {"type": "mlp", "input_dim": 3, "token_dim": 8}, "channels_per_head": 8},
         base_model_config=base_config,
+        training_state={"batch_idx": 12, "example_idx": 48, "epoch_idx": 2},
     )
-    name, loaded, _ = load_adapter(path, base, base_config, weights="model")
+    name, loaded, artifact = load_adapter(path, base, base_config, weights="model")
     assert name == "scalar"
     assert isinstance(loaded.encoder, MLPConditionEncoder)
+    assert artifact["training_state"] == {"batch_idx": 12, "example_idx": 48, "epoch_idx": 2}
     other_base = make_base()
     name, loaded, _ = load_adapter(path, other_base, base_config)
     assert name == "scalar"

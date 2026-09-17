@@ -22,7 +22,8 @@ def base_signature(model_config: dict) -> dict:
 
 
 def make_adapter_artifact(name: str, adapter: ConditionAdapter, adapter_config: dict, base_model_config: dict, *,
-                          ema_state: dict | None = None, optimizer_state: dict | None = None, train_config: dict | None = None):
+                          ema_state: dict | None = None, optimizer_state: dict | None = None,
+                          train_config: dict | None = None, training_state: dict | None = None):
     return {
         "format_version": ADAPTER_FORMAT_VERSION,
         "artifact_type": "condition_adapter",
@@ -33,6 +34,7 @@ def make_adapter_artifact(name: str, adapter: ConditionAdapter, adapter_config: 
         "ema": ema_state,
         "optimizer": optimizer_state,
         "train_config": deepcopy(train_config),
+        "training_state": deepcopy(training_state),
     }
 
 
