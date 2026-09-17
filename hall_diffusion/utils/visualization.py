@@ -117,7 +117,7 @@ def plot_condition_diagnostic(
     fig, axes = plt.subplots(
         row_count,
         3,
-        figsize=(13, 2.5 * row_count),
+        figsize=(13, 2.8 * row_count),
         squeeze=False,
         constrained_layout=True,
     )
@@ -163,13 +163,24 @@ def plot_condition_diagnostic(
         steady_state = times >= 1e-3
         if not np.any(steady_state):
             raise ValueError("TLPP diagnostic current traces must extend to at least 1000 us")
+
+        steady_current = current[steady_state]
         axes[row, 2].plot(
             times[steady_state] * 1e6,
-            current[steady_state],
+            steady_current,
             color="tab:blue",
             linewidth=1.0,
         )
+        # Set y-lims to be at least +/- 2.5 A
+        pad = 1.1
+        min_current, max_current = np.min(steady_current), np.max(steady_current)
+        med_current = 0.5 + (min_current + max_current)
+        delta = max(pad * (max_current - min_current), 5.0)
+        min_current = max(med_current - delta / 2, 0.0)
+        max_current = min_current + delta
+        
         axes[row, 2].set_ylabel("Current [A]")
+        axes[row, 2].set_ylims(min_current, max_current)
         axes[row, 2].grid(True, alpha=0.3)
 
     axes[0, 0].set_title("TLPP counts (log display)")
