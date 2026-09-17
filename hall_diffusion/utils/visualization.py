@@ -117,7 +117,7 @@ def plot_condition_diagnostic(
     fig, axes = plt.subplots(
         row_count,
         3,
-        figsize=(13, 2.9 * row_count),
+        figsize=(13, 2.0 * row_count),
         squeeze=False,
         constrained_layout=True,
     )
@@ -125,7 +125,7 @@ def plot_condition_diagnostic(
     for row, (count_image, times, current, record_id) in enumerate(
         zip(counts, time_s, discharge_current_a, record_ids, strict=True)
     ):
-        image = axes[row, 0].imshow(
+        axes[row, 0].imshow(
             np.log1p(count_image),
             origin="lower",
             extent=extent,
@@ -160,7 +160,15 @@ def plot_condition_diagnostic(
         )
         axes[row, 1].set_ylabel(f"Occupied: {occupancy.mean():.2%}")
 
-        axes[row, 2].plot(times * 1e6, current, color="tab:blue", linewidth=1.0)
+        steady_state = times >= 1e-3
+        if not np.any(steady_state):
+            raise ValueError("TLPP diagnostic current traces must extend to at least 1000 us")
+        axes[row, 2].plot(
+            times[steady_state] * 1e6,
+            current[steady_state],
+            color="tab:blue",
+            linewidth=1.0,
+        )
         axes[row, 2].set_ylabel("Current [A]")
         axes[row, 2].grid(True, alpha=0.3)
 
@@ -170,7 +178,6 @@ def plot_condition_diagnostic(
     axes[-1, 0].set_xlabel(r"$I(t-\tau)$ [A]")
     axes[-1, 1].set_xlabel(r"$I(t-\tau)$ [A]")
     axes[-1, 2].set_xlabel(r"Time [$\mu$s]")
-    fig.colorbar(image, ax=axes[:, 0], label=r"$\log(1 + \mathrm{count})$", shrink=0.8)
     if title:
         fig.suptitle(title)
     fig.savefig(Path(folder) / "condition_diagnostic.png", dpi=200)
