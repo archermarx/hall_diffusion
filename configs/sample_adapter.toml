@@ -9,6 +9,14 @@ unconditional_data_dir = "data/test_large"
 
 [[adapters]]
 checkpoint = "saved_models/image_adapter/adapter.pth.tar"
-condition = "conditions/example_image.npz"
+condition_file = "h9_batch3_val_small_TLPPs_sorted.h5"
+condition_uuid = "replace-with-trace-uuid"
+condition_data_key = "tlpp_counts"
+condition_id_key = "trace_uuid"
+condition_add_channel_dim = true
+condition_add_occupancy_channel = true
+condition_transform = "none"
+condition_scale = 9.070294784580499e-5
+# Adapter residual strength; this is independent of condition-data scaling.
 scale = 1.0
 weights = "ema"

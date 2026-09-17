@@ -8,11 +8,13 @@ import uuid
 import warnings
 
 # Third-party deps
+import h5py
 import torch
 import numpy as np
 
 # Local deps
 from hall_diffusion import models
+from hall_diffusion.adapter_data import preprocess_condition
 from hall_diffusion.models.adapter_io import load_adapter
 from hall_diffusion.models.conditioning import ConditionedEDM2
 from hall_diffusion.guidance import guidance_score, legacy_guidance_score, load_variance_model
@@ -462,20 +464,43 @@ def sample(
     return output
 
 
-def _adapter_condition(path, encoder_type, batch_size, device):
-    """Load a preprocessed condition file and broadcast a singleton batch."""
-    with np.load(path, allow_pickle=False) as data:
-        if "condition" not in data:
-            raise KeyError(f"adapter condition file {path} must contain 'condition'")
-        value = torch.as_tensor(np.array(data["condition"]), dtype=torch.float32)
+def _load_adapter_condition(spec, encoder_type):
+    """Load one condition record from an HDF5 product by UUID."""
+    path = Path(spec["condition_file"])
+    data_key = spec.get("condition_data_key", "tlpp_counts")
+    id_key = spec.get("condition_id_key", "trace_uuid")
+    record_id = spec["condition_uuid"]
+    with h5py.File(path, "r") as data:
+        missing = [key for key in (data_key, id_key) if key not in data]
+        if missing:
+            raise KeyError(f"adapter condition file {path} is missing: {', '.join(missing)}")
+        identifiers = data[id_key].asstr()[:]
+        matches = np.flatnonzero(identifiers == record_id)
+        if len(matches) != 1:
+            raise ValueError(f"condition UUID {record_id!r} occurs {len(matches)} times in {path}")
+        value = np.asarray(data[data_key][int(matches[0])])
+    if spec.get("condition_add_channel_dim", False):
+        value = np.expand_dims(value, axis=0)
+    try:
+        value = preprocess_condition(
+            value,
+            transform=spec.get("condition_transform", "none"),
+            scale=float(spec.get("condition_scale", 1.0)),
+            add_occupancy_channel=spec.get("condition_add_occupancy_channel", False),
+        )
+    except ValueError as exc:
+        raise ValueError(f"condition {record_id!r} in {path}: {exc}") from exc
     expected_ndim = {"mlp": 1, "cnn1d": 2, "cnn2d": 3}[encoder_type]
-    if value.ndim == expected_ndim:
-        value = value.unsqueeze(0)
-    if value.shape[0] == 1:
-        value = value.expand(batch_size, *value.shape[1:])
-    elif value.shape[0] != batch_size:
-        raise ValueError(f"condition file {path} has batch {value.shape[0]}, expected 1 or {batch_size}")
-    return value.to(device)
+    if value.ndim != expected_ndim:
+        raise ValueError(
+            f"condition {record_id!r} in {path} has shape {tuple(value.shape)}; "
+            f"the {encoder_type} encoder expects {expected_ndim} dimensions per sample"
+        )
+    return value
+
+
+def _batch_adapter_condition(value, batch_size, device):
+    return value.unsqueeze(0).expand(batch_size, *value.shape).to(device)
 
 
 def infer(
@@ -522,7 +547,9 @@ def infer(
             if name in adapters:
                 raise ValueError(f"adapter {name!r} appears more than once")
             adapters[name] = adapter
-            loaded_adapters.append((name, spec, artifact["adapter_config"]["encoder"]["type"]))
+            encoder_type = artifact["adapter_config"]["encoder"]["type"]
+            condition = _load_adapter_condition(spec, encoder_type)
+            loaded_adapters.append((name, spec, condition))
         model = ConditionedEDM2(base_model, adapters).to(device)
 
     # Switch model to evalution mode and sample
@@ -564,8 +591,8 @@ def infer(
         adapter_scales = None
         if loaded_adapters:
             raw_conditions = {
-                name: _adapter_condition(spec["condition"], encoder_type, batch_num_samples, device)
-                for name, spec, encoder_type in loaded_adapters
+                name: _batch_adapter_condition(condition, batch_num_samples, device)
+                for name, _, condition in loaded_adapters
             }
             with torch.no_grad():
                 adapter_contexts = model.prepare_conditions(raw_conditions)

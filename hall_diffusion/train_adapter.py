@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from hall_diffusion import models
-from hall_diffusion.adapter_data import ConditionDataset, collate_condition_batch
+from hall_diffusion.adapter_data import ConditionDataset, HDF5ConditionBatchSampler, collate_condition_batch
 from hall_diffusion.configuration import resolve_training_config
 from hall_diffusion.loss import EDM2Loss
 from hall_diffusion.models.adapter_io import save_adapter
@@ -43,15 +43,26 @@ def load_frozen_base(path: str | Path, device, weights: str = "ema"):
 
 def _loader(dataset, batch_size, shuffle, workers, device, prefetch_factor=2):
     kwargs = dict(
-        batch_size=batch_size,
-        shuffle=shuffle,
         num_workers=workers,
         collate_fn=collate_condition_batch,
         pin_memory=device.type == "cuda",
     )
     if workers:
         kwargs.update(prefetch_factor=prefetch_factor, persistent_workers=True)
+    kwargs["batch_sampler"] = HDF5ConditionBatchSampler(dataset, batch_size, shuffle=shuffle)
     return DataLoader(dataset, **kwargs)
+
+
+def _condition_source(source: dict, split: str) -> dict:
+    """Resolve the split-specific location without changing source semantics."""
+    if source.get("type", "hdf5") != "hdf5":
+        raise ValueError("adapter condition source type must be 'hdf5'")
+    resolved = dict(source)
+    resolved["path"] = source[f"{split}_file"]
+    sorted_key = f"{split}_sorted_file"
+    if sorted_key in source:
+        resolved["sorted_file"] = source[sorted_key]
+    return resolved
 
 
 def train(config_path: str | Path, device_name: str = "auto"):
@@ -62,7 +73,9 @@ def train(config_path: str | Path, device_name: str = "auto"):
     adapter_config = config["adapter"]
     training = resolve_training_config(config["training"])
     device = utils.get_device(device_name)
-    base, base_config = load_frozen_base(adapter_config["base_checkpoint"], device, adapter_config.get("base_weights", "ema"))
+    base, base_config = load_frozen_base(
+        adapter_config["base_checkpoint"], device, adapter_config.get("base_weights", "ema")
+    )
 
     settings = models.dataset_settings(base_config)
     directories = training["directories"]
@@ -73,16 +86,17 @@ def train(config_path: str | Path, device_name: str = "auto"):
     train_base = thruster_data.ThrusterDataset(directories["train_data_dir"], **dataset_kwargs)
     test_base = thruster_data.ThrusterDataset(directories["test_data_dir"], **dataset_kwargs)
     source = adapter_config["condition"]
-    train_source = dict(source)
-    test_source = dict(source)
-    if source.get("type", "files") == "files":
-        train_source["directory"] = source["train_directory"]
-        test_source["directory"] = source["test_directory"]
+    train_source = _condition_source(source, "train")
+    test_source = _condition_source(source, "test")
     train_data = ConditionDataset(train_base, train_source)
     test_data = ConditionDataset(test_base, test_source)
 
     name = adapter_config["name"]
-    adapter = ConditionAdapter(base, build_condition_encoder(adapter_config["encoder"]), adapter_config.get("channels_per_head"))
+    adapter = ConditionAdapter(
+        base,
+        build_condition_encoder(adapter_config["encoder"]),
+        adapter_config.get("channels_per_head"),
+    )
     model = ConditionedEDM2(base, {name: adapter}).to(device)
     ema_adapter = copy.deepcopy(adapter).eval().requires_grad_(False)
     optimizer_args = training["optimizer"]
@@ -137,7 +151,10 @@ def train(config_path: str | Path, device_name: str = "auto"):
             checkpoint_path,
             name=name,
             adapter=adapter,
-            adapter_config={"encoder": adapter_config["encoder"], "channels_per_head": adapter_config.get("channels_per_head")},
+            adapter_config={
+                "encoder": adapter_config["encoder"],
+                "channels_per_head": adapter_config.get("channels_per_head"),
+            },
             base_model_config=base_config,
             ema_state=ema_adapter.state_dict(),
             optimizer_state=optimizer.state_dict(),

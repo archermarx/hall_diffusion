@@ -1,0 +1,53 @@
+[adapter]
+name = "tlpp"
+# Replace this with the checkpoint of the frozen unconditional denoiser.
+base_checkpoint = "saved_models/train_h9/checkpoint.pth.tar"
+base_weights = "ema"
+
+[adapter.encoder]
+type = "cnn2d"
+in_channels = 2
+# Four stages turn each 128x128 image into a 16x16 token grid.
+channels = [32, 64, 128, 256]
+blocks_per_stage = 2
+token_dim = 256
+
+[adapter.condition]
+type = "hdf5"
+train_file = "h9_batch3_train_TLPPs.h5"
+test_file = "h9_batch3_val_small_TLPPs.h5"
+# These caches are created in base-UUID order on the first run and reused.
+train_sorted_file = "h9_batch3_train_TLPPs_sorted.h5"
+test_sorted_file = "h9_batch3_val_small_TLPPs_sorted.h5"
+data_key = "tlpp_counts"
+id_key = "trace_uuid"
+add_channel_dim = true
+add_occupancy_channel = true
+sort_batch_size = 256
+# Applied to raw counts before scale: "none", "sqrt", or "log1p".
+transform = "none"
+# The example images each contain exactly 11,025 counts. Keep this data-layer
+# scaling only if the full training and validation products use that invariant.
+scale = 9.070294784580499e-5
+
+[training]
+epochs = 128
+batch_size = 16
+load_workers = 4
+prefetch_factor = 4
+ema_epochs = 16
+ema_start_epochs = 0
+torch_compile = false
+
+[training.loss]
+P_mean = -1.2
+P_std = 1.2
+
+[training.optimizer]
+lr = 3e-4
+adam_betas = [0.9, 0.999]
+
+[training.directories]
+out_dir = "saved_models/tlpp_adapter"
+train_data_dir = "h9_batch3_train.h5"
+test_data_dir = "h9_batch3_val_small.h5"

@@ -11,10 +11,17 @@ blocks_per_stage = 2
 token_dim = 256
 
 [adapter.condition]
-type = "files"
-train_directory = "data/train_images/data"
-test_directory = "data/test_images/data"
-key = "condition"
+type = "hdf5"
+train_file = "data/train_conditions.h5"
+test_file = "data/test_conditions.h5"
+train_sorted_file = "data/train_conditions_sorted.h5"
+test_sorted_file = "data/test_conditions_sorted.h5"
+data_key = "condition"
+id_key = "trace_uuid"
+add_channel_dim = true
+add_occupancy_channel = false
+sort_batch_size = 256
+transform = "none"
 
 [training]
 epochs = 128
