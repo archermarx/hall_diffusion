@@ -174,9 +174,9 @@ def plot_condition_diagnostic(
         # Set y-lims to be at least +/- 2.5 A
         pad = 1.1
         min_current, max_current = np.min(steady_current), np.max(steady_current)
-        med_current = 0.5 + (min_current + max_current)
+        mid_current = 0.5 * (min_current + max_current)
         delta = max(pad * (max_current - min_current), 5.0)
-        min_current = max(med_current - delta / 2, 0.0)
+        min_current = max(mid_current - delta / 2, 0.0)
         max_current = min_current + delta
         
         axes[row, 2].set_ylabel("Current [A]")
