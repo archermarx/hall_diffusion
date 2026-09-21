@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import torch
 
+from hall_diffusion.models.conditioning import ConditionAdapter, ConditionedEDM2, TLPPVAEConditionEncoder
 from hall_diffusion.models.edm2 import EDM2Denoiser
 from hall_diffusion.utils.utils import compile_model
 
@@ -53,3 +54,36 @@ def test_edm2_training_forward_is_capturable_as_one_graph():
 
     assert output.shape == (2, 2, 8)
     assert not any("resample_filter" in name for name in model.state_dict())
+
+
+def test_tlpp_vae_conditioned_training_forward_is_capturable_as_one_graph():
+    base = EDM2Denoiser(
+        resolution=8,
+        in_channels=2,
+        condition_dim=0,
+        base_channels=4,
+        channel_mult=[1, 2],
+        num_blocks=1,
+        attn_resolutions=[],
+        channels_per_head=4,
+    ).eval()
+    encoder = TLPPVAEConditionEncoder(
+        token_dim=8,
+        num_tokens=2,
+        hidden_dim=8,
+        depth=1,
+        freeze_vae=True,
+        initialize_pretrained=False,
+    )
+    model = ConditionedEDM2(base, {"tlpp": ConditionAdapter(base, encoder, channels_per_head=4)}).train()
+    compiled = torch.compile(model, backend="eager", fullgraph=True)
+
+    output = compiled(
+        torch.randn(2, 2, 8),
+        torch.rand(2, 1, 1),
+        conditions={"tlpp": torch.randint(0, 5, (2, 1, 128, 128), dtype=torch.int32)},
+    )
+    output.sum().backward()
+
+    assert output.shape == (2, 2, 8)
+    assert any(parameter.grad is not None for parameter in model.adapters["tlpp"].heads.parameters())

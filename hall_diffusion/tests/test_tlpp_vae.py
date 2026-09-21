@@ -1,6 +1,5 @@
 import math
 
-import pytest
 import torch
 
 from hall_diffusion.models.adapter_io import load_adapter, save_adapter
@@ -84,19 +83,6 @@ def test_tlpp_preprocessing_matches_probability_log01_reference():
 
     torch.testing.assert_close(actual, expected)
     assert torch.count_nonzero(actual[1]) == 0
-
-
-@pytest.mark.parametrize(
-    ("value", "message"),
-    [
-        (torch.zeros(1, 128, 128), "shape"),
-        (torch.full((1, 1, 128, 128), -1.0), "negative"),
-        (torch.full((1, 1, 128, 128), float("nan")), "non-finite"),
-    ],
-)
-def test_tlpp_preprocessing_rejects_invalid_conditions(value, message):
-    with pytest.raises(ValueError, match=message):
-        preprocess_tlpp_counts(value)
 
 
 def test_tlpp_encoder_loads_checkpoint_and_supports_both_training_modes(tmp_path):

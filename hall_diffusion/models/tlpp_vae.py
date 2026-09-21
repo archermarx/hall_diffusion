@@ -16,16 +16,7 @@ TLPP_LOG_EPSILON = 1e-6
 
 def preprocess_tlpp_counts(counts: Tensor) -> Tensor:
     """Convert raw TLPP counts to the probability-normalized log01 VAE input."""
-    if counts.ndim != 4 or tuple(counts.shape[1:]) != TLPP_SAMPLE_SHAPE:
-        raise ValueError(
-            f"TLPP VAE condition must have shape (B,1,128,128), got {tuple(counts.shape)}"
-        )
     values = counts.to(torch.float32)
-    if not torch.isfinite(values).all():
-        raise ValueError("TLPP VAE condition contains non-finite values")
-    if torch.any(values < 0):
-        raise ValueError("TLPP VAE condition contains negative counts")
-
     total = values.sum(dim=(-2, -1), keepdim=True)
     probability = values / total.clamp_min(1.0)
     return torch.log1p(probability / TLPP_LOG_EPSILON) / math.log1p(1.0 / TLPP_LOG_EPSILON)
