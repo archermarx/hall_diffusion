@@ -25,7 +25,12 @@ from hall_diffusion.adapter_data import ConditionDataset, HDF5ConditionBatchSamp
 from hall_diffusion.configuration import resolve_training_config
 from hall_diffusion.loss import EDM2Loss
 from hall_diffusion.models.adapter_io import load_adapter, save_adapter
-from hall_diffusion.models.conditioning import ConditionAdapter, ConditionedEDM2, build_condition_encoder
+from hall_diffusion.models.conditioning import (
+    ConditionAdapter,
+    ConditionedEDM2,
+    TLPPVAEConditionEncoder,
+    build_condition_encoder,
+)
 from hall_diffusion.models.ema import EMA
 from hall_diffusion.utils import thruster_data, utils, visualization
 
@@ -111,6 +116,31 @@ def _interval_due(batch_index: int, interval: int) -> bool:
     if interval <= 0:
         raise ValueError("batch intervals must be positive or -1")
     return batch_index % interval == 0
+
+
+def _progress_postfix(loss: float, grad: float, validation: float) -> str:
+    """Format progress metrics without changing the rendered line width."""
+    return f"loss={loss:10.3e}, grad={grad:10.3e}, val={validation:10.3e}"
+
+
+def _cache_frozen_vae_means(dataset, encoder, device, batch_size, use_amp, description):
+    if not isinstance(encoder, TLPPVAEConditionEncoder):
+        raise ValueError("VAE mean caching requires a tlpp_vae condition encoder")
+    if not encoder.freeze_vae:
+        raise ValueError("VAE mean caching requires freeze_vae=true")
+
+    def encode(conditions):
+        conditions = conditions.to(device, non_blocking=device.type == "cuda")
+        with torch.inference_mode(), torch.amp.autocast(
+            device.type,
+            dtype=AMP_DTYPE,
+            enabled=use_amp,
+        ):
+            return encoder.encode_latent(conditions)
+
+    cache = dataset.cache_condition_vectors(encode, batch_size, description)
+    size_gib = cache.numel() * cache.element_size() / 2**30
+    print(f"Cached {len(dataset):,} VAE means in memory ({size_gib:.2f} GiB)")
 
 
 def _save_checkpoint(
@@ -275,13 +305,6 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
 
     batch_size = training["batch_size"]
     loss_fn = EDM2Loss(**training["loss"])
-    loader_args = dict(
-        workers=training["load_workers"],
-        device=device,
-        prefetch_factor=training["prefetch_factor"],
-    )
-    train_loader = _loader(train_data, batch_size, True, **loader_args)
-    test_loader = _loader(test_data, batch_size, False, **loader_args)
     output_dir = Path(directories["out_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "adapter.pth.tar"
@@ -320,6 +343,33 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
         )
 
     model = ConditionedEDM2(base, {name: adapter}).to(device)
+    cache_vae_means = bool(source.get("cache_vae_means", False))
+    if cache_vae_means:
+        _cache_frozen_vae_means(
+            train_data,
+            adapter.encoder,
+            device,
+            batch_size,
+            use_amp,
+            "first epoch: caching train VAE means",
+        )
+        _cache_frozen_vae_means(
+            test_data,
+            adapter.encoder,
+            device,
+            batch_size,
+            use_amp,
+            "first epoch: caching validation VAE means",
+        )
+
+    loader_args = dict(
+        workers=training["load_workers"],
+        device=device,
+        prefetch_factor=training["prefetch_factor"],
+    )
+    train_loader = _loader(train_data, batch_size, True, **loader_args)
+    test_loader = _loader(test_data, batch_size, False, **loader_args)
+
     ema_adapter = copy.deepcopy(adapter).eval().requires_grad_(False)
     if artifact is not None and artifact.get("ema") is not None:
         ema_adapter.load_state_dict(artifact["ema"], strict=True)
@@ -419,10 +469,8 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
                         "learning_rate": learning_rate,
                     }
                 )
-                progress.set_postfix(
-                    loss=f"{loss_value:.4g}",
-                    grad=f"{grad_norm_value:.4g}",
-                    val=f"{last_validation_loss:.4g}",
+                progress.set_postfix_str(
+                    _progress_postfix(loss_value, grad_norm_value, last_validation_loss)
                 )
 
                 if _interval_due(batch_index, evaluation_interval):
@@ -432,7 +480,13 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
                     )
                     if ema.started:
                         last_ema_loss = _validation_loss(
-                            ema_model, loss_fn, test_loader, name, base, device, validation_seed
+                            ema_model,
+                            loss_fn,
+                            test_loader,
+                            name,
+                            base,
+                            device,
+                            validation_seed,
                         )
                         diagnostic_model = ema_model
                         diagnostic_loss = last_ema_loss

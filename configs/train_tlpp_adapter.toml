@@ -24,6 +24,9 @@ id_key = "trace_uuid"
 add_channel_dim = true
 sort_batch_size = 256
 # Raw counts are normalized and log01-transformed by the frozen VAE encoder.
+# Cache deterministic VAE means in CPU memory during the first epoch. This
+# requires freeze_vae = true and uses about 512 bytes per record.
+cache_vae_means = true
 
 [adapter.diagnostics]
 type = "tlpp"

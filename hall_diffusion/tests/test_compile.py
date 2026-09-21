@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from hall_diffusion.models.conditioning import ConditionAdapter, ConditionedEDM2, TLPPVAEConditionEncoder
@@ -56,7 +57,14 @@ def test_edm2_training_forward_is_capturable_as_one_graph():
     assert not any("resample_filter" in name for name in model.state_dict())
 
 
-def test_tlpp_vae_conditioned_training_forward_is_capturable_as_one_graph():
+@pytest.mark.parametrize(
+    "condition",
+    [
+        pytest.param(torch.randint(0, 5, (2, 1, 128, 128), dtype=torch.int32), id="raw-counts"),
+        pytest.param(torch.randn(2, 128), id="cached-means"),
+    ],
+)
+def test_tlpp_vae_conditioned_training_forward_is_capturable_as_one_graph(condition):
     base = EDM2Denoiser(
         resolution=8,
         in_channels=2,
@@ -81,7 +89,7 @@ def test_tlpp_vae_conditioned_training_forward_is_capturable_as_one_graph():
     output = compiled(
         torch.randn(2, 2, 8),
         torch.rand(2, 1, 1),
-        conditions={"tlpp": torch.randint(0, 5, (2, 1, 128, 128), dtype=torch.int32)},
+        conditions={"tlpp": condition},
     )
     output.sum().backward()
 

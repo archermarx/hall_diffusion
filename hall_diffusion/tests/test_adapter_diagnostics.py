@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 import torch
 
-from hall_diffusion.train_adapter import _amp_enabled, _condition_source, _interval_due
+from hall_diffusion.train_adapter import _amp_enabled, _condition_source, _interval_due, _progress_postfix
 from hall_diffusion.utils.visualization import plot_condition_diagnostic, plot_training_progress
 
 
@@ -19,6 +19,16 @@ def test_adapter_amp_is_cuda_only():
     assert _amp_enabled(torch.device("cuda"), True)
     assert not _amp_enabled(torch.device("cuda"), False)
     assert not _amp_enabled(torch.device("cpu"), True)
+
+
+def test_adapter_progress_metrics_have_fixed_width():
+    rendered = [
+        _progress_postfix(1.0, 12345.0, float("nan")),
+        _progress_postfix(1e-12, -0.25, 987654321.0),
+    ]
+
+    assert len(rendered[0]) == len(rendered[1])
+    assert rendered[0] == "loss= 1.000e+00, grad= 1.234e+04, val=       nan"
 
 
 def test_condition_source_accepts_prebuilt_sorted_file_without_unsorted_source():

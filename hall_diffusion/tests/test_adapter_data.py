@@ -28,6 +28,7 @@ class BaseDataset:
 
     def __init__(self):
         self.record_ids = UUIDS
+        self._indices = range(len(self.record_ids))
 
     def __len__(self):
         return len(self.record_ids)
@@ -114,6 +115,24 @@ def test_hdf5_condition_sampler_follows_condition_storage_order(tmp_path):
 
     assert batches == [[2, 0], [1]]
     assert sorted(index for batch in batches for index in batch) == [0, 1, 2]
+
+
+def test_condition_vectors_can_be_cached_in_logical_order(tmp_path):
+    path = tmp_path / "conditions.h5"
+    write_conditions(path)
+    dataset = ConditionDataset(
+        BaseDataset(),
+        {"type": "hdf5", "path": path, "data_key": "tlpp_counts"},
+    )
+
+    cache = dataset.cache_condition_vectors(lambda values: values.flatten(1), batch_size=2)
+    samples = dataset.__getitems__([2, 0, 1])
+    sampler = HDF5ConditionBatchSampler(dataset, batch_size=2, shuffle=False)
+
+    assert cache.shape == (3, 6)
+    assert cache[:, 0].tolist() == [10, 20, 30]
+    assert [sample[3][0].item() for sample in samples] == [30, 10, 20]
+    assert list(sampler) == [[0, 1], [2]]
 
 
 def test_hdf5_conditions_require_unique_complete_identifiers(tmp_path):

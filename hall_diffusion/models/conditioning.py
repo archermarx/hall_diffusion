@@ -124,7 +124,9 @@ class TLPPVAEConditionEncoder(ConditionEncoder):
         return self.vae(prepared)
 
     def forward(self, value: Tensor) -> ConditionTokens:
-        return self.bridge(self.encode_latent(value))
+        # Frozen VAE means may be cached by the adapter training data path.
+        latent = value if value.ndim == 2 else self.encode_latent(value)
+        return self.bridge(latent)
 
 
 def _group_count(channels: int, maximum: int = 32) -> int:

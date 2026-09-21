@@ -63,12 +63,17 @@ class HDF5ConditionBatchSampler(Sampler[list[int]]):
         self.shuffle = shuffle
         self.drop_last = drop_last
         self.generator = generator
-        locality_size = dataset.hdf5_chunk_size or batch_size
+        if dataset.has_condition_cache and dataset.base.is_hdf5:
+            storage_rows = dataset.base._indices
+            locality_size = dataset.base.hdf5_chunk_size
+        else:
+            storage_rows = dataset._condition_rows
+            locality_size = dataset.hdf5_chunk_size or batch_size
         chunks_by_id = {}
-        for logical_index, row in enumerate(dataset._condition_rows):
+        for logical_index, row in enumerate(storage_rows):
             chunks_by_id.setdefault(row // locality_size, []).append(logical_index)
         self._chunks = [
-            sorted(indices, key=dataset._condition_rows.__getitem__)
+            sorted(indices, key=storage_rows.__getitem__)
             for _, indices in sorted(chunks_by_id.items())
         ]
 
@@ -116,6 +121,7 @@ class ConditionDataset(Dataset):
 
         self._h5 = None
         self._h5_pid = None
+        self._condition_cache = None
         self.path = Path(source["path"])
         self.id_key = source.get("id_key", "trace_uuid")
         if sorted_file := source.get("sorted_file"):
@@ -276,6 +282,31 @@ class ConditionDataset(Dataset):
         row = self._condition_rows[int(index)]
         return np.asarray(self._hdf5_handle()[self.key][row])
 
+    @property
+    def has_condition_cache(self):
+        return self._condition_cache is not None
+
+    def cache_condition_vectors(self, encode, batch_size: int, description: str = "caching conditions"):
+        """Encode every condition once and retain the vectors in logical dataset order."""
+        if batch_size <= 0:
+            raise ValueError("condition cache batch size must be positive")
+
+        cache = None
+        starts = range(0, len(self), batch_size)
+        total_batches = (len(self) + batch_size - 1) // batch_size
+        for start in tqdm(starts, total=total_batches, desc=description):
+            stop = min(start + batch_size, len(self))
+            indices = list(range(start, stop))
+            record_ids = self.base.record_ids[start:stop]
+            conditions = torch.stack(self._read_hdf5_conditions(indices, record_ids))
+            vectors = encode(conditions).detach().to(device="cpu", dtype=torch.float32)
+            if cache is None:
+                cache = torch.empty((len(self), *vectors.shape[1:]), dtype=vectors.dtype)
+            cache[start:stop].copy_(vectors)
+
+        self._condition_cache = cache
+        return cache
+
     def _format_condition(self, value, record_id):
         array = np.asarray(value)
         if self.add_channel_dim:
@@ -318,15 +349,21 @@ class ConditionDataset(Dataset):
 
     def __getitem__(self, index):
         record_id, params, target = self.base[index]
-        value = self._hdf5_handle()[self.key][self._condition_rows[index]]
-        condition = self._format_condition(value, record_id)
+        if self._condition_cache is None:
+            value = self._hdf5_handle()[self.key][self._condition_rows[index]]
+            condition = self._format_condition(value, record_id)
+        else:
+            condition = self._condition_cache[index]
         return record_id, params, target, condition
 
     def __getitems__(self, indices):
         base_getitems = getattr(self.base, "__getitems__", None)
         samples = base_getitems(indices) if base_getitems is not None else [self.base[index] for index in indices]
-        record_ids = [sample[0] for sample in samples]
-        conditions = self._read_hdf5_conditions(indices, record_ids)
+        if self._condition_cache is None:
+            record_ids = [sample[0] for sample in samples]
+            conditions = self._read_hdf5_conditions(indices, record_ids)
+        else:
+            conditions = [self._condition_cache[int(index)] for index in indices]
         return [(*sample, condition) for sample, condition in zip(samples, conditions, strict=True)]
 
 

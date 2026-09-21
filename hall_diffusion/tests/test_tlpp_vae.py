@@ -97,6 +97,7 @@ def test_tlpp_encoder_loads_checkpoint_and_supports_both_training_modes(tmp_path
     expected_latent = source(preprocess_tlpp_counts(counts))
     torch.testing.assert_close(frozen.encode_latent(counts), expected_latent)
     assert frozen(counts).tokens.shape == (2, 4, 16)
+    torch.testing.assert_close(frozen(expected_latent).tokens, frozen(counts).tokens)
 
     frozen(counts).tokens.square().mean().backward()
     assert all(parameter.grad is None for parameter in frozen.vae.parameters())
