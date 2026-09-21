@@ -21,3 +21,5 @@ tmp_ref
 *.pdf
 sample_h9_*
 *.h5
+.pytest_cache
+vae_scratch

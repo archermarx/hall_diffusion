@@ -490,7 +490,7 @@ def _load_adapter_condition(spec, encoder_type):
         )
     except ValueError as exc:
         raise ValueError(f"condition {record_id!r} in {path}: {exc}") from exc
-    expected_ndim = {"mlp": 1, "cnn1d": 2, "cnn2d": 3}[encoder_type]
+    expected_ndim = {"mlp": 1, "cnn1d": 2, "cnn2d": 3, "tlpp_vae": 3}[encoder_type]
     if value.ndim != expected_ndim:
         raise ValueError(
             f"condition {record_id!r} in {path} has shape {tuple(value.shape)}; "

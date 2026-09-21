@@ -17,6 +17,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from .edm2 import EDM2Denoiser, get_precondition_factors, normalize
+from .tlpp_vae import TLPP_LATENT_DIM, TLPPVAEEncoder, preprocess_tlpp_counts
 
 
 @dataclass
@@ -75,6 +76,55 @@ class MLPConditionEncoder(ConditionEncoder):
             raise ValueError(f"MLP condition must have shape (B, D), got {tuple(value.shape)}")
         tokens = self.network(value.to(torch.float32)).reshape(value.shape[0], self.num_tokens, self.token_dim)
         return ConditionTokens(tokens=tokens)
+
+
+class TLPPVAEConditionEncoder(ConditionEncoder):
+    """Turn raw 128x128 TLPP counts into learned context tokens via a VAE latent."""
+
+    def __init__(
+        self,
+        token_dim: int,
+        num_tokens: int = 4,
+        hidden_dim: int = 256,
+        depth: int = 2,
+        freeze_vae: bool = True,
+        checkpoint: str | None = None,
+        initialize_pretrained: bool = True,
+    ):
+        super().__init__()
+        self.token_dim = token_dim
+        self.freeze_vae = freeze_vae
+        self.vae = TLPPVAEEncoder()
+        self.bridge = MLPConditionEncoder(
+            input_dim=TLPP_LATENT_DIM,
+            token_dim=token_dim,
+            num_tokens=num_tokens,
+            hidden_dim=hidden_dim,
+            depth=depth,
+        )
+        if initialize_pretrained:
+            if checkpoint is None:
+                raise ValueError("TLPP VAE condition encoder requires a checkpoint")
+            self.vae.load_pretrained(checkpoint)
+        self.vae.requires_grad_(not freeze_vae)
+        if freeze_vae:
+            self.vae.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_vae:
+            self.vae.eval()
+        return self
+
+    def encode_latent(self, value: Tensor) -> Tensor:
+        prepared = preprocess_tlpp_counts(value)
+        if self.freeze_vae:
+            with torch.no_grad():
+                return self.vae(prepared)
+        return self.vae(prepared)
+
+    def forward(self, value: Tensor) -> ConditionTokens:
+        return self.bridge(self.encode_latent(value))
 
 
 def _group_count(channels: int, maximum: int = 32) -> int:
@@ -163,7 +213,9 @@ class Conv2dConditionEncoder(_ConvConditionEncoder):
         return ConditionTokens(tokens=tokens)
 
 
-def build_condition_encoder(config: Mapping[str, object]) -> ConditionEncoder:
+def build_condition_encoder(
+    config: Mapping[str, object], *, initialize_pretrained: bool = True
+) -> ConditionEncoder:
     """Build one of the repository-owned condition encoders from config."""
     kind = config["type"]
     token_dim = int(config["token_dim"])
@@ -181,7 +233,23 @@ def build_condition_encoder(config: Mapping[str, object]) -> ConditionEncoder:
         return Conv2dConditionEncoder(
             int(config["in_channels"]), token_dim, list(config["channels"]), int(config.get("blocks_per_stage", 2))
         )
-    raise ValueError(f"unknown condition encoder type {kind!r}; expected mlp, cnn1d, or cnn2d")
+    if kind == "tlpp_vae":
+        freeze_vae = config.get("freeze_vae", True)
+        if not isinstance(freeze_vae, bool):
+            raise TypeError("TLPP VAE freeze_vae must be a boolean")
+        checkpoint = config.get("checkpoint")
+        if checkpoint is not None and not isinstance(checkpoint, str):
+            raise TypeError("TLPP VAE checkpoint must be a path string")
+        return TLPPVAEConditionEncoder(
+            token_dim=token_dim,
+            num_tokens=int(config.get("num_tokens", 4)),
+            hidden_dim=int(config.get("hidden_dim", 256)),
+            depth=int(config.get("depth", 2)),
+            freeze_vae=freeze_vae,
+            checkpoint=checkpoint,
+            initialize_pretrained=initialize_pretrained,
+        )
+    raise ValueError(f"unknown condition encoder type {kind!r}; expected mlp, cnn1d, cnn2d, or tlpp_vae")
 
 
 class CrossAttentionResidual(nn.Module):
@@ -259,7 +327,7 @@ class ConditionedEDM2(nn.Module):
         return self
 
     def get_trainable_params(self):
-        return self.adapters.parameters()
+        return (parameter for parameter in self.adapters.parameters() if parameter.requires_grad)
 
     def prepare_conditions(self, conditions: Mapping[str, Tensor]) -> dict[str, ConditionTokens]:
         unknown = set(conditions).difference(self.adapters)

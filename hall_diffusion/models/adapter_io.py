@@ -52,7 +52,11 @@ def load_adapter(path: str | Path, base, base_model_config: dict, *, weights: st
     if artifact["base_signature"] != base_signature(base_model_config):
         raise ValueError("adapter architecture does not match the supplied EDM2 base")
     config = artifact["adapter_config"]
-    adapter = ConditionAdapter(base, build_condition_encoder(config["encoder"]), config.get("channels_per_head"))
+    adapter = ConditionAdapter(
+        base,
+        build_condition_encoder(config["encoder"], initialize_pretrained=False),
+        config.get("channels_per_head"),
+    )
     state = artifact.get(weights) if weights == "ema" else None
     state = state if state is not None else artifact["model"]
     adapter.load_state_dict(state, strict=True)

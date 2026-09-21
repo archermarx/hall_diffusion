@@ -189,6 +189,26 @@ def test_sampling_loads_one_hdf5_condition_by_uuid(tmp_path):
     assert batch.shape == (3, 2, 2, 3)
 
 
+def test_sampling_loads_raw_tlpp_for_vae_encoder(tmp_path):
+    path = tmp_path / "conditions.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("trace_uuid", data=np.asarray(UUIDS[:1], dtype=h5py.string_dtype("utf-8")))
+        handle.create_dataset("tlpp_counts", data=np.ones((1, 128, 128), dtype=np.uint16))
+
+    condition = _load_adapter_condition(
+        {
+            "condition_file": path,
+            "condition_uuid": UUIDS[0],
+            "condition_data_key": "tlpp_counts",
+            "condition_add_channel_dim": True,
+        },
+        "tlpp_vae",
+    )
+
+    assert condition.shape == (1, 128, 128)
+    torch.testing.assert_close(condition, torch.ones_like(condition))
+
+
 @pytest.mark.parametrize(
     ("transform", "expected"),
     [

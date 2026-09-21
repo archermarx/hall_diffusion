@@ -5,12 +5,14 @@ base_checkpoint = "saved_models/train_h9/checkpoint.pth.tar"
 base_weights = "ema"
 
 [adapter.encoder]
-type = "cnn2d"
-in_channels = 2
-# Four stages turn each 128x128 image into a 16x16 token grid.
-channels = [32, 64, 128, 256]
-blocks_per_stage = 2
+type = "tlpp_vae"
+checkpoint = "vae_scratch/last.pt"
+# Set false to fine-tune the VAE encoder and latent-mean head with diffusion loss.
+freeze_vae = true
 token_dim = 256
+num_tokens = 4
+hidden_dim = 256
+depth = 2
 
 [adapter.condition]
 type = "hdf5"
@@ -22,13 +24,8 @@ test_sorted_file = "h9_batch3_val_small_TLPPs_compressed_sorted.h5"
 data_key = "tlpp_counts"
 id_key = "trace_uuid"
 add_channel_dim = true
-add_occupancy_channel = true
 sort_batch_size = 256
-# Applied to raw counts before scale: "none", "sqrt", or "log1p".
-transform = "none"
-# The example images each contain exactly 11,025 counts. Keep this data-layer
-# scaling only if the full training and validation products use that invariant.
-scale = 9.070294784580499e-5
+# Raw counts are normalized and log01-transformed by the frozen VAE encoder.
 
 [adapter.diagnostics]
 type = "tlpp"

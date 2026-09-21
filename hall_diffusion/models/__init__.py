@@ -1,5 +1,10 @@
 from . import edm2
-from .conditioning import ConditionAdapter, ConditionedEDM2, build_condition_encoder
+from .conditioning import (
+    ConditionAdapter,
+    ConditionedEDM2,
+    TLPPVAEConditionEncoder,
+    build_condition_encoder,
+)
 
 try:
     from hall_diffusion.configuration import resolve_model_config
