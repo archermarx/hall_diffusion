@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 import torch
 
-from hall_diffusion.train_adapter import _amp_enabled, _interval_due
+from hall_diffusion.train_adapter import _amp_enabled, _condition_source, _interval_due
 from hall_diffusion.utils.visualization import plot_condition_diagnostic, plot_training_progress
 
 
@@ -19,6 +19,39 @@ def test_adapter_amp_is_cuda_only():
     assert _amp_enabled(torch.device("cuda"), True)
     assert not _amp_enabled(torch.device("cuda"), False)
     assert not _amp_enabled(torch.device("cpu"), True)
+
+
+def test_condition_source_accepts_prebuilt_sorted_file_without_unsorted_source():
+    source = {
+        "type": "hdf5",
+        "train_sorted_file": "train_sorted.h5",
+        "test_sorted_file": "test_sorted.h5",
+        "data_key": "tlpp_counts",
+    }
+
+    resolved = _condition_source(source, "train")
+
+    assert resolved["path"] == "train_sorted.h5"
+    assert "sorted_file" not in resolved
+    assert resolved["data_key"] == "tlpp_counts"
+
+
+def test_condition_source_still_builds_or_reuses_sorted_cache_when_both_paths_are_given():
+    source = {
+        "type": "hdf5",
+        "train_file": "train.h5",
+        "train_sorted_file": "train_sorted.h5",
+    }
+
+    resolved = _condition_source(source, "train")
+
+    assert resolved["path"] == "train.h5"
+    assert resolved["sorted_file"] == "train_sorted.h5"
+
+
+def test_condition_source_requires_at_least_one_split_path():
+    with pytest.raises(ValueError, match="train_file.*train_sorted_file"):
+        _condition_source({"type": "hdf5"}, "train")
 
 
 def test_adapter_training_progress_plot_accepts_event_rows(tmp_path):

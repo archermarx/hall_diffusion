@@ -16,9 +16,7 @@ depth = 2
 
 [adapter.condition]
 type = "hdf5"
-train_file = "h9_batch3_train_TLPPs_compressed.h5"
-test_file = "h9_batch3_val_small_TLPPs_compressed.h5"
-# These caches are created in base-UUID order on the first run and reused.
+# These files are already stored in base-UUID order and can be used directly.
 train_sorted_file = "h9_batch3_train_TLPPs_compressed_sorted.h5"
 test_sorted_file = "h9_batch3_val_small_TLPPs_compressed_sorted.h5"
 data_key = "tlpp_counts"

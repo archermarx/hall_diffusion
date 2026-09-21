@@ -76,8 +76,23 @@ def _condition_source(source: dict, split: str) -> dict:
     if source.get("type", "hdf5") != "hdf5":
         raise ValueError("adapter condition source type must be 'hdf5'")
     resolved = dict(source)
-    resolved["path"] = source[f"{split}_file"]
+    source_key = f"{split}_file"
     sorted_key = f"{split}_sorted_file"
+
+    if source_key in source:
+        resolved["path"] = source[source_key]
+    elif sorted_key in source:
+        # A prebuilt sorted product is already a complete condition source.
+        # Do not route it through the cache creation path, which requires an
+        # unsorted source solely for creating a missing sorted file.
+        resolved["path"] = source[sorted_key]
+        resolved.pop("sorted_file", None)
+        return resolved
+    else:
+        raise ValueError(
+            f"adapter condition source requires {source_key!r} or {sorted_key!r}"
+        )
+
     if sorted_key in source:
         resolved["sorted_file"] = source[sorted_key]
     return resolved
