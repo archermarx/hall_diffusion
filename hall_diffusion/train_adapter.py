@@ -254,7 +254,10 @@ def _plot_validation(
         discharge_current = time_traces[:, :, time_names.index("discharge_current_A")]
         selected_record_ids = [dataset.base.record_ids[index] for index in logical_indices]
         condition_attrs = dataset._hdf5_handle().attrs
-        current_range = (float(condition_attrs.get("current_min_A", 0.0), float(condition_attrs.get("current_max_A", 100.0)))
+        current_range = (
+            float(condition_attrs.get("current_min_A", 0.0)),
+            float(condition_attrs.get("current_max_A", 100.0)),
+        )
         visualization.plot_condition_diagnostic(
             raw_conditions,
             time_s,
