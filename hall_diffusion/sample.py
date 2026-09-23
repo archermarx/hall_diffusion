@@ -503,6 +503,85 @@ def _batch_adapter_condition(value, batch_size, device):
     return value.unsqueeze(0).expand(batch_size, *value.shape).to(device)
 
 
+def _variance_data_dir(sampling_config, train_config):
+    """Find the calibration dataset for a missing process-variance cache."""
+    explicit = sampling_config.get("process_variance_data_dir")
+    if explicit is not None:
+        path = Path(explicit)
+        if not path.exists():
+            raise FileNotFoundError(f"process variance data not found: {path}")
+        return path
+
+    checkpoint_test_dir = train_config.get("directories", {}).get("test_data_dir")
+    candidates = [checkpoint_test_dir, sampling_config.get("unconditional_data_dir")]
+    candidates = [Path(candidate) for candidate in candidates if candidate is not None]
+    if path := next((candidate for candidate in candidates if candidate.exists()), None):
+        return path
+
+    checked = ", ".join(str(candidate) for candidate in candidates) or "none"
+    raise FileNotFoundError(
+        "process variance must be generated, but no calibration dataset was found "
+        f"(checked: {checked}). Set 'process_variance_data_dir' in the sampling config."
+    )
+
+
+def _generate_process_variance(
+    variance_file,
+    sampling_config,
+    train_config,
+    model,
+    dataset_settings,
+    device,
+):
+    """Generate a missing process-variance artifact for the loaded model."""
+    from hall_diffusion.estimate_variance import estimate_process_variance
+
+    data_dir = _variance_data_dir(sampling_config, train_config)
+    dataset = ThrusterDataset(data_dir, **dataset_settings)
+    print(f"Estimating process variance from {data_dir}; this is only needed once.")
+    variance_file = Path(variance_file)
+    temporary_file = variance_file.with_name(f".{variance_file.stem}.{uuid.uuid4().hex}.tmp.npz")
+    default_batch_size = sampling_config.get("batch_size", sampling_config.get("num_samples", 64))
+    try:
+        estimate_process_variance(
+            model,
+            dataset,
+            temporary_file,
+            device,
+            seed=int(sampling_config.get("process_variance_seed", 0)),
+            bias_subsets=int(sampling_config.get("process_variance_bias_subsets", 4)),
+            batch_size=int(sampling_config.get("process_variance_batch_size", default_batch_size)),
+            num_workers=int(sampling_config.get("process_variance_workers", 0)),
+            create_plots=False,
+        )
+        os.replace(temporary_file, variance_file)
+    finally:
+        temporary_file.unlink(missing_ok=True)
+    print(f"Stored process variance alongside the model at {variance_file}.")
+
+
+def _ensure_process_variance(
+    variance_file,
+    sampling_config,
+    train_config,
+    model,
+    dataset_settings,
+    device,
+):
+    """Create the process-variance cache on first use and return its path."""
+    variance_file = Path(variance_file)
+    if not variance_file.exists():
+        _generate_process_variance(
+            variance_file,
+            sampling_config,
+            train_config,
+            model,
+            dataset_settings,
+            device,
+        )
+    return variance_file
+
+
 def infer(
     model,
     sampling_config,
@@ -535,6 +614,8 @@ def infer(
     model.load_state_dict(model_dict[model_type], strict=False)
     model.requires_grad_(False)
     base_model = model
+    train_config = model_dict.get("train_config", {})
+    del model_dict
 
     loaded_adapters = []
     adapter_specs = sampling_config.get("adapters", [])
@@ -573,6 +654,14 @@ def infer(
     if "observation" in sampling_config and sampling_mode == "dps":
         variance_file = Path(
             sampling_config.get("process_variance_file", checkpoint_path.parent / "process_variance.npz")
+        )
+        variance_file = _ensure_process_variance(
+            variance_file,
+            sampling_config,
+            train_config,
+            base_model,
+            dataset_settings,
+            device,
         )
         variance_model = load_variance_model(
             variance_file, sampling_config, (channels, resolution), device

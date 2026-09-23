@@ -4,7 +4,6 @@ import argparse
 import math
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -25,6 +24,8 @@ def estimate_moments(residual_sum, residual_square_sum, count):
 
 def plot_process_std(process_variance, noise_levels, channel_names, output_dir):
     """Plot the spatially averaged centered standard deviation per field."""
+    import matplotlib.pyplot as plt
+
     field_std = np.sqrt(np.maximum(process_variance.mean(axis=-1), 0))
     fig, ax = plt.subplots(figsize=(7, 4.5), layout='constrained')
     for channel, name in enumerate(channel_names):
@@ -38,6 +39,8 @@ def plot_process_std(process_variance, noise_levels, channel_names, output_dir):
 
 def plot_spatial_variance(process_variance, noise_levels, grid, channel_names, output_dir):
     """Plot the spatial structure of the centered process standard deviation."""
+    import matplotlib.pyplot as plt
+
     process_std = np.sqrt(np.maximum(process_variance, 0))
     positive = process_std[process_std > 0]
     floor = positive.min() if positive.size else np.finfo(float).tiny
@@ -60,6 +63,8 @@ def plot_spatial_variance(process_variance, noise_levels, grid, channel_names, o
 
 def plot_bias_subsets(subset_bias, overall_bias, noise_levels, channel_names, output_dir):
     """Show whether each field's signed bias is stable across data subsets."""
+    import matplotlib.pyplot as plt
+
     subset_mean = subset_bias.mean(axis=-1)
     overall_mean = overall_bias.mean(axis=-1)
     columns = min(3, len(channel_names))
@@ -85,7 +90,7 @@ def plot_bias_subsets(subset_bias, overall_bias, noise_levels, channel_names, ou
 
 
 def save_results(
-    output_dir,
+    output_file,
     residual_sum,
     residual_square_sum,
     subset_residual_sum,
@@ -95,8 +100,13 @@ def save_results(
     noise_levels,
     grid,
     channel_names,
+    *,
+    create_plots=True,
 ):
     """Finalize, save, and plot the sufficient residual statistics."""
+    output_file = Path(output_file)
+    output_dir = output_file.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
     mean, mean_square, variance = estimate_moments(residual_sum, residual_square_sum, count)
     mean = mean.reshape(len(noise_levels), *state_shape).cpu().numpy()
     mean_square = mean_square.reshape(len(noise_levels), *state_shape).cpu().numpy()
@@ -109,7 +119,7 @@ def save_results(
     )
 
     np.savez(
-        output_dir / "process_variance.npz",
+        output_file,
         process_variance=mean_square,
         centered_variance=variance,
         mean_residual=mean,
@@ -119,34 +129,51 @@ def save_results(
         variance_convention=np.array("uncentered_mse"),
         noise_levels=noise_levels,
     )
-    plot_process_std(variance, noise_levels, channel_names, output_dir)
-    plot_spatial_variance(variance, noise_levels, grid, channel_names, output_dir)
-    plot_bias_subsets(subset_bias, mean, noise_levels, channel_names, output_dir)
+    if create_plots:
+        plot_process_std(variance, noise_levels, channel_names, output_dir)
+        plot_spatial_variance(variance, noise_levels, grid, channel_names, output_dir)
+        plot_bias_subsets(subset_bias, mean, noise_levels, channel_names, output_dir)
 
 
-def main(model_dir, data_dir, seed=0, bias_subsets=4):
-    device = utils.get_device()
-    output_dir = Path(model_dir)
-    checkpoint = utils.load_checkpoint(output_dir / "checkpoint.pth.tar", device)
-    model_config = models.resolve_model_config(checkpoint["model_config"])
-    dataset_settings = models.dataset_settings(model_config)
-    model = models.from_config(model_config.copy(), device=device)
-    model.load_state_dict(checkpoint["ema"], strict=False)
-    model.eval()
-    del checkpoint
+def estimate_process_variance(
+    model,
+    dataset,
+    output_file,
+    device,
+    *,
+    seed=0,
+    bias_subsets=4,
+    batch_size=512,
+    num_workers=2,
+    noise_levels=None,
+    show_progress=True,
+    create_plots=True,
+):
+    """Estimate and persist the statistics needed by moment-projected guidance."""
+    output_file = Path(output_file)
+    if batch_size <= 0:
+        raise ValueError("variance estimation batch_size must be positive")
+    if num_workers < 0:
+        raise ValueError("variance estimation num_workers must be nonnegative")
 
-    dataset = ThrusterDataset(data_dir, **dataset_settings)
     generator = torch.Generator().manual_seed(seed)
-    loader = DataLoader(
-        dataset,
-        batch_size=512,
+    loader_args = dict(
+        batch_size=batch_size,
         shuffle=True,
         generator=generator,
         pin_memory=device.type == "cuda",
-        num_workers=2,
-        prefetch_factor=2,
+        num_workers=num_workers,
     )
-    noise_levels = np.geomspace(1e-3, 100, 26)
+    if num_workers > 0:
+        loader_args["prefetch_factor"] = 2
+    loader = DataLoader(dataset, **loader_args)
+    if noise_levels is None:
+        noise_levels = np.geomspace(1e-3, 100, 26)
+    noise_levels = np.asarray(noise_levels)
+    if noise_levels.ndim != 1 or len(noise_levels) < 2 or np.any(noise_levels <= 0):
+        raise ValueError("variance noise_levels must contain at least two positive values")
+    if np.any(noise_levels[1:] <= noise_levels[:-1]):
+        raise ValueError("variance noise_levels must be strictly increasing")
     state_shape = dataset[0][2].shape
     state_size = math.prod(state_shape)
     bias_subsets = min(max(int(bias_subsets), 1), len(dataset))
@@ -159,7 +186,7 @@ def main(model_dir, data_dir, seed=0, bias_subsets=4):
     count = 0
 
     with torch.inference_mode():
-        for batch_index, data in enumerate(tqdm(loader)):
+        for batch_index, data in enumerate(tqdm(loader, disable=not show_progress)):
             params, clean = data[1].to(device), data[2].to(device)
             subset_indices = (count + torch.arange(clean.shape[0], device=device)) % bias_subsets
             count += clean.shape[0]
@@ -176,7 +203,7 @@ def main(model_dir, data_dir, seed=0, bias_subsets=4):
 
             if (batch_index + 1) % 20 == 0:
                 save_results(
-                    output_dir,
+                    output_file,
                     residual_sum,
                     residual_square_sum,
                     subset_residual_sum,
@@ -186,10 +213,11 @@ def main(model_dir, data_dir, seed=0, bias_subsets=4):
                     noise_levels,
                     dataset.grid,
                     channel_names,
+                    create_plots=create_plots,
                 )
 
     save_results(
-        output_dir,
+        output_file,
         residual_sum,
         residual_square_sum,
         subset_residual_sum,
@@ -199,6 +227,29 @@ def main(model_dir, data_dir, seed=0, bias_subsets=4):
         noise_levels,
         dataset.grid,
         channel_names,
+        create_plots=create_plots,
+    )
+
+
+def main(model_dir, data_dir, seed=0, bias_subsets=4):
+    device = utils.get_device()
+    output_dir = Path(model_dir)
+    checkpoint = utils.load_checkpoint(output_dir / "checkpoint.pth.tar", device)
+    model_config = models.resolve_model_config(checkpoint["model_config"])
+    dataset_settings = models.dataset_settings(model_config)
+    model = models.from_config(model_config.copy(), device=device)
+    model.load_state_dict(checkpoint["ema"], strict=False)
+    model.eval()
+    del checkpoint
+
+    dataset = ThrusterDataset(data_dir, **dataset_settings)
+    estimate_process_variance(
+        model,
+        dataset,
+        output_dir / "process_variance.npz",
+        device,
+        seed=seed,
+        bias_subsets=bias_subsets,
     )
 
 
