@@ -1,3 +1,4 @@
+import copy
 import os
 from pathlib import Path
 import sys
@@ -7,6 +8,17 @@ import numpy as np
 import bisect
 import tomllib
 import pathlib
+
+
+def snapshot_state_dict(module):
+    """Return an independent CPU copy of a module state dict."""
+    state = module.state_dict()
+    snapshot = state.__class__(
+        (name, value.detach().cpu().clone()) for name, value in state.items()
+    )
+    if hasattr(state, "_metadata"):
+        snapshot._metadata = copy.deepcopy(state._metadata)
+    return snapshot
 
 
 def paths_to_strings(d: dict):

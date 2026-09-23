@@ -1,3 +1,4 @@
+import multiprocessing
 import pickle
 
 import h5py
@@ -104,7 +105,17 @@ def test_hdf5_dataset_loads_with_training_workers(tmp_path):
     dataset = ThrusterDataset(path)
     dataset[0]  # Open a handle in the parent before workers are created.
 
-    record_uuids, parameters, fields = next(iter(DataLoader(dataset, batch_size=2, num_workers=2)))
+    worker_context = "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else None
+    record_uuids, parameters, fields = next(
+        iter(
+            DataLoader(
+                dataset,
+                batch_size=2,
+                num_workers=2,
+                multiprocessing_context=worker_context,
+            )
+        )
+    )
 
     assert record_uuids == tuple(UUIDS[:2])
     assert parameters.shape == (2, 2)

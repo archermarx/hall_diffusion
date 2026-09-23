@@ -1,3 +1,4 @@
+import multiprocessing
 import pickle
 
 import h5py
@@ -94,8 +95,17 @@ def test_hdf5_condition_batch_reads_restore_requested_order_and_work_with_worker
 
     restored = pickle.loads(pickle.dumps(dataset))
     assert restored._h5 is None
+    worker_context = "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else None
     record_ids, _, _, conditions = next(
-        iter(DataLoader(restored, batch_size=2, num_workers=2, collate_fn=collate_condition_batch))
+        iter(
+            DataLoader(
+                restored,
+                batch_size=2,
+                num_workers=2,
+                collate_fn=collate_condition_batch,
+                multiprocessing_context=worker_context,
+            )
+        )
     )
     assert record_ids == UUIDS[:2]
     assert conditions.shape == (2, 1, 2, 3)

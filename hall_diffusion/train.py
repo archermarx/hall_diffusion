@@ -230,7 +230,7 @@ def save_checkpoint(
 ):
     """Save a training checkpoint and update the diagnostic plot."""
     if batch_loss < state.best_loss:
-        state.best_params = state.model.state_dict()
+        state.best_params = utils.snapshot_state_dict(state.model)
         state.best_loss = batch_loss
 
     if os.path.exists(checkpoint_file):
