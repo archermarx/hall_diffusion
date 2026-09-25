@@ -14,7 +14,7 @@ import numpy as np
 
 # Local deps
 from hall_diffusion import models
-from hall_diffusion.adapter_data import preprocess_condition
+from hall_diffusion.adapter_data import condition_artifact_config, preprocess_condition
 from hall_diffusion.models.adapter_io import load_adapter
 from hall_diffusion.models.conditioning import ConditionedEDM2
 from hall_diffusion.guidance import guidance_score, legacy_guidance_score, load_variance_model
@@ -464,11 +464,104 @@ def sample(
     return output
 
 
-def _load_adapter_condition(spec, encoder_type):
+def _artifact_condition_settings(artifact):
+    """Read portable condition settings, including from legacy training metadata."""
+    settings = artifact.get("condition_config")
+    if settings is not None:
+        return settings
+    return (
+        (artifact.get("train_config") or {})
+        .get("adapter", {})
+        .get("condition", {})
+    )
+
+
+def _resolve_condition_settings(spec, artifact):
+    """Prefer artifact input semantics and fill missing values from sampling config."""
+    artifact_settings = _artifact_condition_settings(artifact)
+    keys = {
+        "data_key": ("condition_data_key", "tlpp_counts"),
+        "id_key": ("condition_id_key", "trace_uuid"),
+        "add_channel_dim": ("condition_add_channel_dim", False),
+        "add_occupancy_channel": ("condition_add_occupancy_channel", False),
+        "transform": ("condition_transform", "none"),
+        "scale": ("condition_scale", 1.0),
+    }
+    resolved = {
+        key: artifact_settings.get(key, spec.get(sampling_key, default))
+        for key, (sampling_key, default) in keys.items()
+    }
+    return condition_artifact_config(resolved)
+
+
+def _expected_condition_ndim(encoder_type):
+    return {"mlp": 1, "cnn1d": 2, "cnn2d": 3, "tlpp_vae": 3}[encoder_type]
+
+
+def _prepare_adapter_condition(value, settings, encoder_type):
+    """Apply training-time preprocessing to one raw condition or a condition batch."""
+    value = torch.as_tensor(value)
+    expected_ndim = _expected_condition_ndim(encoder_type)
+    add_channel_dim = settings["add_channel_dim"]
+    raw_sample_ndim = expected_ndim - int(add_channel_dim)
+
+    if not add_channel_dim:
+        is_batch = value.ndim == expected_ndim + 1
+        valid = value.ndim in {expected_ndim, expected_ndim + 1}
+        values = value if is_batch else value.unsqueeze(0)
+        insert_channel = False
+    elif value.ndim == raw_sample_ndim:
+        is_batch = False
+        valid = True
+        values = value.unsqueeze(0)
+        insert_channel = True
+    elif value.ndim == expected_ndim:
+        # A leading singleton can be an explicitly supplied channel. Otherwise
+        # this is a batch of channel-less source values.
+        is_batch = value.shape[0] != 1
+        valid = True
+        values = value if is_batch else value.unsqueeze(0)
+        insert_channel = is_batch
+    elif value.ndim == expected_ndim + 1:
+        is_batch = True
+        valid = value.shape[1] == 1
+        values = value
+        insert_channel = False
+    else:
+        is_batch = False
+        valid = False
+        values = value.unsqueeze(0)
+        insert_channel = False
+
+    if not valid:
+        raise ValueError(
+            f"the {encoder_type} encoder expects raw conditions with {raw_sample_ndim} dimensions "
+            "per sample, with an optional singleton channel and optional batch dimension; "
+            f"got shape {tuple(value.shape)}"
+        )
+
+    conditions = []
+    for sample_value in values:
+        if insert_channel:
+            sample_value = sample_value.unsqueeze(0)
+        conditions.append(
+            preprocess_condition(
+                sample_value,
+                transform=settings["transform"],
+                scale=settings["scale"],
+                add_occupancy_channel=settings["add_occupancy_channel"],
+            )
+        )
+    result = torch.stack(conditions)
+    return result if is_batch else result[0]
+
+
+def _load_adapter_condition(spec, encoder_type, condition_settings=None):
     """Load one condition record from an HDF5 product by UUID."""
+    condition_settings = condition_settings or _resolve_condition_settings(spec, {})
     path = Path(spec["condition_file"])
-    data_key = spec.get("condition_data_key", "tlpp_counts")
-    id_key = spec.get("condition_id_key", "trace_uuid")
+    data_key = condition_settings["data_key"]
+    id_key = condition_settings["id_key"]
     record_id = spec["condition_uuid"]
     with h5py.File(path, "r") as data:
         missing = [key for key in (data_key, id_key) if key not in data]
@@ -479,18 +572,11 @@ def _load_adapter_condition(spec, encoder_type):
         if len(matches) != 1:
             raise ValueError(f"condition UUID {record_id!r} occurs {len(matches)} times in {path}")
         value = np.asarray(data[data_key][int(matches[0])])
-    if spec.get("condition_add_channel_dim", False):
-        value = np.expand_dims(value, axis=0)
     try:
-        value = preprocess_condition(
-            value,
-            transform=spec.get("condition_transform", "none"),
-            scale=float(spec.get("condition_scale", 1.0)),
-            add_occupancy_channel=spec.get("condition_add_occupancy_channel", False),
-        )
+        value = _prepare_adapter_condition(value, condition_settings, encoder_type)
     except ValueError as exc:
         raise ValueError(f"condition {record_id!r} in {path}: {exc}") from exc
-    expected_ndim = {"mlp": 1, "cnn1d": 2, "cnn2d": 3, "tlpp_vae": 3}[encoder_type]
+    expected_ndim = _expected_condition_ndim(encoder_type)
     if value.ndim != expected_ndim:
         raise ValueError(
             f"condition {record_id!r} in {path} has shape {tuple(value.shape)}; "
@@ -501,6 +587,25 @@ def _load_adapter_condition(spec, encoder_type):
 
 def _batch_adapter_condition(value, batch_size, device):
     return value.unsqueeze(0).expand(batch_size, *value.shape).to(device)
+
+
+def _adapter_condition_batch(value, encoder_type, start, batch_size, total_samples, device):
+    """Repeat one condition or select the matching portion of a supplied batch."""
+    expected_ndim = _expected_condition_ndim(encoder_type)
+    if value.ndim == expected_ndim:
+        return _batch_adapter_condition(value, batch_size, device)
+    if value.ndim != expected_ndim + 1:
+        raise ValueError(
+            f"processed {encoder_type} condition has shape {tuple(value.shape)}; "
+            f"expected {expected_ndim} or {expected_ndim + 1} dimensions"
+        )
+    if value.shape[0] == 1:
+        return _batch_adapter_condition(value[0], batch_size, device)
+    if value.shape[0] != total_samples:
+        raise ValueError(
+            f"adapter condition batch contains {value.shape[0]} samples, expected 1 or {total_samples}"
+        )
+    return value[start : start + batch_size].to(device)
 
 
 def _variance_data_dir(sampling_config, train_config):
@@ -589,7 +694,9 @@ def infer(
     save_to_file=True,
     verbose=False,
     device="auto",
+    adapter_conditions=None,
 ):
+    """Load a checkpoint and sample, optionally using raw tensors keyed by adapter name."""
     device = utils.get_device(device) if isinstance(device, str) else device
     print(f"Selected device: {device}")
 
@@ -618,6 +725,7 @@ def infer(
     del model_dict
 
     loaded_adapters = []
+    adapter_conditions = dict(adapter_conditions or {})
     adapter_specs = sampling_config.get("adapters", [])
     if adapter_specs:
         adapters = {}
@@ -629,9 +737,23 @@ def infer(
                 raise ValueError(f"adapter {name!r} appears more than once")
             adapters[name] = adapter
             encoder_type = artifact["adapter_config"]["encoder"]["type"]
-            condition = _load_adapter_condition(spec, encoder_type)
-            loaded_adapters.append((name, spec, condition))
+            condition_settings = _resolve_condition_settings(spec, artifact)
+            if name in adapter_conditions:
+                condition = _prepare_adapter_condition(
+                    adapter_conditions[name], condition_settings, encoder_type
+                )
+            else:
+                missing = {"condition_file", "condition_uuid"}.difference(spec)
+                if missing:
+                    raise ValueError(
+                        f"adapter {name!r} requires adapter_conditions[{name!r}] or "
+                        f"sampling config fields {sorted(missing)}"
+                    )
+                condition = _load_adapter_condition(spec, encoder_type, condition_settings)
+            loaded_adapters.append((name, spec, condition, encoder_type))
         model = ConditionedEDM2(base_model, adapters).to(device)
+    if unknown := set(adapter_conditions).difference(name for name, *_ in loaded_adapters):
+        raise ValueError(f"conditions were supplied for unknown adapters: {sorted(unknown)}")
 
     # Switch model to evalution mode and sample
     model.eval()
@@ -668,6 +790,7 @@ def infer(
         )
 
     samples = []
+    batch_start = 0
 
     # Sample in batches
     for batch_index, batch_num_samples in enumerate(batches):
@@ -680,12 +803,22 @@ def infer(
         adapter_scales = None
         if loaded_adapters:
             raw_conditions = {
-                name: _batch_adapter_condition(condition, batch_num_samples, device)
-                for name, _, condition in loaded_adapters
+                name: _adapter_condition_batch(
+                    condition,
+                    encoder_type,
+                    batch_start,
+                    batch_num_samples,
+                    num_samples,
+                    device,
+                )
+                for name, _, condition, encoder_type in loaded_adapters
             }
             with torch.no_grad():
                 adapter_contexts = model.prepare_conditions(raw_conditions)
-            adapter_scales = {name: float(spec.get("scale", 1.0)) for name, spec, _ in loaded_adapters}
+            adapter_scales = {
+                name: float(spec.get("scale", 1.0))
+                for name, spec, _, _ in loaded_adapters
+            }
         batch_samples = sample(
             model,
             size,
@@ -701,6 +834,7 @@ def infer(
             adapter_scales=adapter_scales,
         )
         samples.append(batch_samples)
+        batch_start += batch_num_samples
 
     # Concatenate along batch dimension
     sample_tensor = torch.concatenate(samples, dim=1)

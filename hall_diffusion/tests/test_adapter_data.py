@@ -7,13 +7,20 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
+import hall_diffusion.sample as sample_module
 from hall_diffusion.adapter_data import (
     ConditionDataset,
     HDF5ConditionBatchSampler,
     collate_condition_batch,
     preprocess_condition,
 )
-from hall_diffusion.sample import _batch_adapter_condition, _load_adapter_condition
+from hall_diffusion.sample import (
+    _adapter_condition_batch,
+    _batch_adapter_condition,
+    _load_adapter_condition,
+    _prepare_adapter_condition,
+    _resolve_condition_settings,
+)
 
 
 UUIDS = [
@@ -236,6 +243,138 @@ def test_sampling_loads_raw_tlpp_for_vae_encoder(tmp_path):
 
     assert condition.shape == (1, 128, 128)
     torch.testing.assert_close(condition, torch.ones_like(condition))
+
+
+def test_direct_adapter_conditions_use_artifact_preprocessing_and_support_batches():
+    artifact = {
+        "condition_config": {
+            "data_key": "counts",
+            "id_key": "uuid",
+            "add_channel_dim": True,
+            "add_occupancy_channel": True,
+            "transform": "sqrt",
+            "scale": 0.25,
+        }
+    }
+    settings = _resolve_condition_settings(
+        {"condition_scale": 99.0, "condition_transform": "none"}, artifact
+    )
+    raw = torch.tensor(
+        [
+            [[0.0, 1.0], [4.0, 0.0]],
+            [[9.0, 0.0], [0.0, 16.0]],
+            [[1.0, 1.0], [1.0, 1.0]],
+        ]
+    )
+
+    prepared = _prepare_adapter_condition(raw, settings, "cnn2d")
+    batch = _adapter_condition_batch(
+        prepared, "cnn2d", start=1, batch_size=2, total_samples=3, device=torch.device("cpu")
+    )
+
+    assert prepared.shape == (3, 2, 2, 2)
+    torch.testing.assert_close(prepared[0, 0], torch.tensor([[0.0, 0.25], [0.5, 0.0]]))
+    torch.testing.assert_close(prepared[0, 1], torch.tensor([[0.0, 1.0], [1.0, 0.0]]))
+    torch.testing.assert_close(batch, prepared[1:])
+
+
+def test_sampling_condition_settings_fall_back_for_legacy_artifact():
+    settings = _resolve_condition_settings(
+        {
+            "condition_data_key": "legacy_counts",
+            "condition_id_key": "legacy_ids",
+            "condition_add_channel_dim": True,
+            "condition_scale": 0.5,
+        },
+        {"condition_config": None, "train_config": None},
+    )
+
+    assert settings == {
+        "data_key": "legacy_counts",
+        "id_key": "legacy_ids",
+        "add_channel_dim": True,
+        "add_occupancy_channel": False,
+        "transform": "none",
+        "scale": 0.5,
+    }
+
+
+def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
+    class FakeBase(torch.nn.Module):
+        img_channels = 2
+        img_resolution = 4
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(()))
+
+    captured = []
+
+    class FakeConditioned(torch.nn.Module):
+        def __init__(self, base, adapters):
+            super().__init__()
+            self.base = base
+
+        def prepare_conditions(self, conditions):
+            captured.append({name: value.clone() for name, value in conditions.items()})
+            return {}
+
+    checkpoint = tmp_path / "checkpoint.pth.tar"
+    torch.save(
+        {
+            "model_config": {
+                "architecture": "edm2",
+                "resolution": 4,
+                "in_channels": 2,
+                "condition_dim": 0,
+                "scalars_in_tensor": True,
+            },
+            "ema": {"weight": torch.zeros(())},
+        },
+        checkpoint,
+    )
+    artifact = {
+        "adapter_config": {"encoder": {"type": "cnn2d"}},
+        "condition_config": {
+            "data_key": "counts",
+            "id_key": "uuid",
+            "add_channel_dim": True,
+            "add_occupancy_channel": False,
+            "transform": "none",
+            "scale": 2.0,
+        },
+    }
+    monkeypatch.setattr(sample_module.models, "from_config", lambda config, device: FakeBase().to(device))
+    monkeypatch.setattr(
+        sample_module,
+        "load_adapter",
+        lambda *args, **kwargs: ("tlpp", torch.nn.Identity(), artifact),
+    )
+    monkeypatch.setattr(sample_module, "ConditionedEDM2", FakeConditioned)
+    monkeypatch.setattr(
+        sample_module,
+        "sample",
+        lambda model, shape, *args, **kwargs: torch.zeros((1, *shape)),
+    )
+    raw = torch.arange(12, dtype=torch.float32).reshape(3, 1, 2, 2)
+
+    result = sample_module.infer(
+        checkpoint,
+        {
+            "model_type": "ema",
+            "num_samples": 3,
+            "batch_size": 2,
+            "adapters": [{"checkpoint": "unused.pth.tar"}],
+        },
+        adapter_conditions={"tlpp": raw},
+        save_to_file=False,
+        device="cpu",
+    )
+
+    assert result.shape == (1, 3, 2, 4)
+    assert [entry["tlpp"].shape for entry in captured] == [(2, 1, 2, 2), (1, 1, 2, 2)]
+    torch.testing.assert_close(captured[0]["tlpp"], 2 * raw[:2])
+    torch.testing.assert_close(captured[1]["tlpp"], 2 * raw[2:])
 
 
 @pytest.mark.parametrize(

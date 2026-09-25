@@ -21,7 +21,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from hall_diffusion import models
-from hall_diffusion.adapter_data import ConditionDataset, HDF5ConditionBatchSampler, collate_condition_batch
+from hall_diffusion.adapter_data import (
+    ConditionDataset,
+    HDF5ConditionBatchSampler,
+    collate_condition_batch,
+    condition_artifact_config,
+)
 from hall_diffusion.configuration import resolve_training_config
 from hall_diffusion.loss import EDM2Loss
 from hall_diffusion.models.adapter_io import load_adapter, save_adapter
@@ -149,6 +154,7 @@ def _save_checkpoint(
     name,
     adapter,
     adapter_config,
+    condition_config,
     base_config,
     ema_adapter,
     optimizer,
@@ -162,6 +168,7 @@ def _save_checkpoint(
         name=name,
         adapter=adapter,
         adapter_config=adapter_config,
+        condition_config=condition_config,
         base_model_config=base_config,
         ema_state=ema_adapter.state_dict(),
         optimizer_state=optimizer.state_dict(),
@@ -326,6 +333,7 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
         "encoder": adapter_config["encoder"],
         "channels_per_head": adapter_config.get("channels_per_head"),
     }
+    saved_condition_config = condition_artifact_config(source)
     artifact = None
     if resume:
         loaded_name, adapter, artifact = load_adapter(
@@ -338,6 +346,11 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
             raise ValueError(f"checkpoint adapter is named {loaded_name!r}, expected {name!r}")
         if artifact["adapter_config"] != saved_adapter_config:
             raise ValueError("checkpoint adapter configuration does not match the training configuration")
+        if (
+            artifact.get("condition_config") is not None
+            and artifact["condition_config"] != saved_condition_config
+        ):
+            raise ValueError("checkpoint condition configuration does not match the training configuration")
     else:
         adapter = ConditionAdapter(
             base,
@@ -542,6 +555,7 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
                         name,
                         adapter,
                         saved_adapter_config,
+                        saved_condition_config,
                         base_config,
                         ema_adapter,
                         optimizer,

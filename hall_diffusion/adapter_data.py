@@ -12,6 +12,20 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 
+def condition_artifact_config(source: dict) -> dict:
+    """Return the portable condition settings that affect adapter inputs."""
+    config = {
+        "data_key": source.get("data_key", "condition"),
+        "id_key": source.get("id_key", "trace_uuid"),
+        "add_channel_dim": bool(source.get("add_channel_dim", False)),
+        "add_occupancy_channel": bool(source.get("add_occupancy_channel", False)),
+        "transform": source.get("transform", "none"),
+        "scale": float(source.get("scale", 1.0)),
+    }
+    preprocess_condition([], config["transform"], config["scale"])
+    return config
+
+
 def preprocess_condition(
     value,
     transform: str = "none",
@@ -24,7 +38,7 @@ def preprocess_condition(
     if not np.isfinite(scale):
         raise ValueError("condition scale must be finite")
 
-    raw = torch.as_tensor(np.asarray(value), dtype=torch.float32)
+    raw = torch.as_tensor(value, dtype=torch.float32)
     if not torch.isfinite(raw).all():
         raise ValueError("raw condition contains non-finite values")
     condition = raw
@@ -111,19 +125,18 @@ class ConditionDataset(Dataset):
         self.kind = source.get("type", "hdf5")
         if self.kind != "hdf5":
             raise ValueError("condition source type must be 'hdf5'")
-        self.key = source.get("data_key", "condition")
-        self.add_channel_dim = bool(source.get("add_channel_dim", False))
-        self.add_occupancy_channel = bool(source.get("add_occupancy_channel", False))
-        self.transform = source.get("transform", "none")
-        self.scale = float(source.get("scale", 1.0))
-        # Validate preprocessing eagerly, before a training worker is started.
-        preprocess_condition([], self.transform, self.scale)
+        condition_config = condition_artifact_config(source)
+        self.key = condition_config["data_key"]
+        self.add_channel_dim = condition_config["add_channel_dim"]
+        self.add_occupancy_channel = condition_config["add_occupancy_channel"]
+        self.transform = condition_config["transform"]
+        self.scale = condition_config["scale"]
 
         self._h5 = None
         self._h5_pid = None
         self._condition_cache = None
         self.path = Path(source["path"])
-        self.id_key = source.get("id_key", "trace_uuid")
+        self.id_key = condition_config["id_key"]
         if sorted_file := source.get("sorted_file"):
             self._use_or_create_sorted_file(
                 Path(sorted_file),
