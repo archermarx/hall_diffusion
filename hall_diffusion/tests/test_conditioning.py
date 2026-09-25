@@ -57,6 +57,43 @@ def test_noop_adapter_preserves_base_input_jacobian_for_guidance():
     torch.testing.assert_close(adapter_gradient, base_gradient, atol=1e-6, rtol=1e-6)
 
 
+def test_prepared_contexts_cache_projections_and_expand_singletons():
+    torch.manual_seed(3)
+    base = make_base()
+    adapter = ConditionAdapter(base, MLPConditionEncoder(3, token_dim=8), channels_per_head=8)
+    model = ConditionedEDM2(base, {"scalar": adapter}).eval().requires_grad_(False)
+    with torch.no_grad():
+        for head in adapter.heads.values():
+            head.output.weight.normal_(std=0.05)
+            head.output.bias.normal_(std=0.05)
+
+    projection_calls = 0
+
+    def count_projection(*_):
+        nonlocal projection_calls
+        projection_calls += 1
+
+    handles = [head.key_value.register_forward_hook(count_projection) for head in adapter.heads.values()]
+    condition = torch.randn(1, 3)
+    with torch.no_grad():
+        context = model.prepare_conditions({"scalar": condition})["scalar"]
+        expanded = context.expand_batch(3)
+        calls_after_preparation = projection_calls
+        x = torch.randn(3, 2, 16)
+        sigma = torch.full((3, 1, 1), 0.5)
+        cached = model(x, sigma, contexts={"scalar": expanded})
+        cached_again = model(x, sigma, contexts={"scalar": expanded})
+        direct = model(x, sigma, conditions={"scalar": condition.expand(3, -1)})
+    for handle in handles:
+        handle.remove()
+
+    assert calls_after_preparation == len(adapter.site_names)
+    assert projection_calls == 2 * len(adapter.site_names)
+    assert all(site.key.shape[0] == 3 for site in expanded.sites.values())
+    torch.testing.assert_close(cached_again, cached)
+    torch.testing.assert_close(cached, direct, atol=1e-6, rtol=1e-6)
+
+
 def test_adapter_can_change_output_without_changing_base_weights():
     torch.manual_seed(2)
     base = make_base()

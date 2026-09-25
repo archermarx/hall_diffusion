@@ -8,6 +8,16 @@ class IdentityDenoiser(torch.nn.Module):
         return x
 
 
+class GradRecordingDenoiser(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def forward(self, x, noise_std):
+        self.calls.append((torch.is_grad_enabled(), x.requires_grad))
+        return x
+
+
 class CountingGuidance:
     def __init__(self):
         self.calls = 0
@@ -17,11 +27,11 @@ class CountingGuidance:
         return torch.ones_like(x)
 
 
-def make_integrator(threshold):
+def make_integrator(threshold, model=None):
     score = CountingGuidance()
     guidance = ObservationGuidance("dps", score, observation=None)
     return RK2Integrator(
-        IdentityDenoiser(),
+        model or IdentityDenoiser(),
         guidance_score_fn=guidance,
         method="midpoint",
         guidance_second_order_below=threshold,
@@ -42,6 +52,24 @@ def test_guidance_is_recomputed_below_threshold():
     integrator.step(torch.ones(1, 1, 2), torch.tensor(0.08), torch.tensor(0.06))
 
     assert score.calls == 2
+
+
+def test_reused_midpoint_guidance_does_not_build_an_autograd_graph():
+    model = GradRecordingDenoiser()
+    integrator, _ = make_integrator(threshold=0.1, model=model)
+
+    integrator.step_with_guidance(torch.ones(1, 1, 2), torch.tensor(1.0), torch.tensor(0.8))
+
+    assert model.calls == [(True, True), (False, False)]
+
+
+def test_recomputed_midpoint_guidance_retains_its_input_graph():
+    model = GradRecordingDenoiser()
+    integrator, _ = make_integrator(threshold=0.1, model=model)
+
+    integrator.step_with_guidance(torch.ones(1, 1, 2), torch.tensor(0.08), torch.tensor(0.06))
+
+    assert model.calls == [(True, True), (True, True)]
 
 
 def test_trajectory_recording_is_disabled_by_default():

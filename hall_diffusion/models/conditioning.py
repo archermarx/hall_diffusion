@@ -27,6 +27,34 @@ class ConditionTokens:
     tokens: Tensor  # (batch, tokens, channels)
 
 
+@dataclass
+class AttentionContext:
+    """Condition projections that remain constant across denoising steps."""
+
+    key: Tensor
+    value: Tensor
+
+    def expand_batch(self, batch_size: int) -> AttentionContext:
+        if self.key.shape[0] == batch_size:
+            return self
+        if self.key.shape[0] != 1:
+            raise ValueError(
+                f"prepared adapter context contains {self.key.shape[0]} samples, expected 1 or {batch_size}"
+            )
+        shape = (batch_size, *self.key.shape[1:])
+        return AttentionContext(self.key.expand(shape), self.value.expand(shape))
+
+
+@dataclass
+class AdapterContext:
+    """Per-site projected condition tensors for one adapter."""
+
+    sites: dict[str, AttentionContext]
+
+    def expand_batch(self, batch_size: int) -> AdapterContext:
+        return AdapterContext({name: context.expand_batch(batch_size) for name, context in self.sites.items()})
+
+
 def _position_encoding_1d(length: int, channels: int, *, device, dtype) -> Tensor:
     """Fixed position encoding that works for any input length."""
     if channels == 0:
@@ -271,18 +299,22 @@ class CrossAttentionResidual(nn.Module):
         nn.init.zeros_(self.output.weight)
         nn.init.zeros_(self.output.bias)
 
-    def forward(self, feature: Tensor, emb: Tensor, context: ConditionTokens) -> Tensor:
+    def prepare_context(self, context: ConditionTokens) -> AttentionContext:
+        kv = self.key_value(context.tokens)
+        key, value = kv.chunk(2, dim=-1)
+        batch = context.tokens.shape[0]
+        key = key.reshape(batch, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        value = value.reshape(batch, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        return AttentionContext(key, value)
+
+    def forward(self, feature: Tensor, emb: Tensor, context: AttentionContext) -> Tensor:
         # Frozen feature tensors are constants, but all adapter operations remain differentiable.
         batch, channels, length = feature.shape
-        if context.tokens.shape[0] != batch:
+        if context.key.shape[0] != batch:
             raise ValueError("condition batch size must match denoiser batch size")
         q = normalize(feature, dim=1).transpose(1, 2)
         q = self.query(q).reshape(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
-        kv = self.key_value(context.tokens.to(q.dtype))
-        k, v = kv.chunk(2, dim=-1)
-        k = k.reshape(batch, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.reshape(batch, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q, k, v)
+        y = F.scaled_dot_product_attention(q, context.key.to(q.dtype), context.value.to(q.dtype))
         y = y.transpose(1, 2).reshape(batch, length, channels).transpose(1, 2)
         scale, shift = self.time(emb.to(y.dtype)).chunk(2, dim=1)
         y = F.silu(y * (scale.unsqueeze(-1) + 1) + shift.unsqueeze(-1))
@@ -309,8 +341,15 @@ class ConditionAdapter(nn.Module):
     def encode_condition(self, condition: Tensor) -> ConditionTokens:
         return self.encoder(condition)
 
-    def residuals(self, features: Mapping[str, Tensor], emb: Tensor, context: ConditionTokens) -> dict[str, Tensor]:
-        return {name: self.heads[name](features[name], emb, context) for name in self.site_names}
+    def prepare_condition(self, condition: Tensor) -> AdapterContext:
+        tokens = self.encode_condition(condition)
+        return AdapterContext({name: self.heads[name].prepare_context(tokens) for name in self.site_names})
+
+    def residuals(self, features: Mapping[str, Tensor], emb: Tensor, context: AdapterContext) -> dict[str, Tensor]:
+        return {
+            name: self.heads[name](features[name], emb, context.sites[name])
+            for name in self.site_names
+        }
 
 
 class ConditionedEDM2(nn.Module):
@@ -331,11 +370,11 @@ class ConditionedEDM2(nn.Module):
     def get_trainable_params(self):
         return (parameter for parameter in self.adapters.parameters() if parameter.requires_grad)
 
-    def prepare_conditions(self, conditions: Mapping[str, Tensor]) -> dict[str, ConditionTokens]:
+    def prepare_conditions(self, conditions: Mapping[str, Tensor]) -> dict[str, AdapterContext]:
         unknown = set(conditions).difference(self.adapters)
         if unknown:
             raise ValueError(f"unknown adapter(s): {sorted(unknown)}")
-        return {name: self.adapters[name].encode_condition(value) for name, value in conditions.items()}
+        return {name: self.adapters[name].prepare_condition(value) for name, value in conditions.items()}
 
     def _base_features(self, x: Tensor, noise_std: Tensor, condition_vector: Tensor | None):
         x = x.to(torch.float32)
@@ -369,7 +408,7 @@ class ConditionedEDM2(nn.Module):
         condition_vector: Tensor | None = None,
         *,
         conditions: Mapping[str, Tensor] | None = None,
-        contexts: Mapping[str, ConditionTokens] | None = None,
+        contexts: Mapping[str, AdapterContext] | None = None,
         adapter_scales: Mapping[str, float] | None = None,
     ) -> Tensor:
         if conditions is not None and contexts is not None:

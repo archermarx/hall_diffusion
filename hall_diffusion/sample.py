@@ -589,18 +589,31 @@ def _batch_adapter_condition(value, batch_size, device):
     return value.unsqueeze(0).expand(batch_size, *value.shape).to(device)
 
 
-def _adapter_condition_batch(value, encoder_type, start, batch_size, total_samples, device):
+def _adapter_condition_batch(
+    value,
+    encoder_type,
+    start,
+    batch_size,
+    total_samples,
+    device,
+    *,
+    expand_single=True,
+):
     """Repeat one condition or select the matching portion of a supplied batch."""
     expected_ndim = _expected_condition_ndim(encoder_type)
     if value.ndim == expected_ndim:
-        return _batch_adapter_condition(value, batch_size, device)
+        if expand_single:
+            return _batch_adapter_condition(value, batch_size, device)
+        return value.unsqueeze(0).to(device)
     if value.ndim != expected_ndim + 1:
         raise ValueError(
             f"processed {encoder_type} condition has shape {tuple(value.shape)}; "
             f"expected {expected_ndim} or {expected_ndim + 1} dimensions"
         )
     if value.shape[0] == 1:
-        return _batch_adapter_condition(value[0], batch_size, device)
+        if expand_single:
+            return _batch_adapter_condition(value[0], batch_size, device)
+        return value.to(device)
     if value.shape[0] != total_samples:
         raise ValueError(
             f"adapter condition batch contains {value.shape[0]} samples, expected 1 or {total_samples}"
@@ -828,6 +841,25 @@ def infer(
             variance_file, sampling_config, (channels, resolution), device
         )
 
+    adapter_scales = {
+        name: float(spec.get("scale", 1.0))
+        for name, spec, _, _ in loaded_adapters
+    }
+    sampling_adapters = [
+        adapter for adapter in loaded_adapters if adapter_scales[adapter[0]] != 0
+    ]
+    singleton_conditions = {}
+    for name, _, condition, encoder_type in sampling_adapters:
+        expected_ndim = _expected_condition_ndim(encoder_type)
+        if condition.ndim == expected_ndim:
+            singleton_conditions[name] = condition.unsqueeze(0).to(device)
+        elif condition.shape[0] == 1:
+            singleton_conditions[name] = condition.to(device)
+    with torch.no_grad():
+        cached_adapter_contexts = (
+            model.prepare_conditions(singleton_conditions) if singleton_conditions else {}
+        )
+
     samples = []
     batch_start = 0
 
@@ -839,8 +871,7 @@ def infer(
             "replace_samples": sampling_config.get("replace_samples", False) and batch_index == 0,
         }
         adapter_contexts = None
-        adapter_scales = None
-        if loaded_adapters:
+        if sampling_adapters:
             raw_conditions = {
                 name: _adapter_condition_batch(
                     condition,
@@ -849,15 +880,17 @@ def infer(
                     batch_num_samples,
                     num_samples,
                     device,
+                    expand_single=False,
                 )
-                for name, _, condition, encoder_type in loaded_adapters
+                for name, _, condition, encoder_type in sampling_adapters
+                if name not in cached_adapter_contexts
             }
             with torch.no_grad():
-                adapter_contexts = model.prepare_conditions(raw_conditions)
-            adapter_scales = {
-                name: float(spec.get("scale", 1.0))
-                for name, spec, _, _ in loaded_adapters
-            }
+                prepared_contexts = model.prepare_conditions(raw_conditions) if raw_conditions else {}
+                adapter_contexts = {
+                    name: context.expand_batch(batch_num_samples)
+                    for name, context in {**cached_adapter_contexts, **prepared_contexts}.items()
+                }
         batch_samples = sample(
             model,
             size,

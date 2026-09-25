@@ -218,11 +218,21 @@ def test_sampling_loads_one_hdf5_condition_by_uuid(tmp_path):
         "cnn2d",
     )
     batch = _batch_adapter_condition(condition, 3, torch.device("cpu"))
+    encoding_batch = _adapter_condition_batch(
+        condition,
+        "cnn2d",
+        start=0,
+        batch_size=3,
+        total_samples=3,
+        device=torch.device("cpu"),
+        expand_single=False,
+    )
 
     assert condition.shape == (2, 2, 3)
     torch.testing.assert_close(condition[0], torch.full((2, 3), 2.0))
     torch.testing.assert_close(condition[1], torch.ones((2, 3)))
     assert batch.shape == (3, 2, 2, 3)
+    assert encoding_batch.shape == (1, 2, 2, 3)
 
 
 def test_sampling_loads_raw_tlpp_for_vae_encoder(tmp_path):
@@ -313,6 +323,10 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     sampled_models = []
     adapter_loads = []
 
+    class FakeContext:
+        def expand_batch(self, batch_size):
+            return self
+
     class FakeConditioned(torch.nn.Module):
         def __init__(self, base, adapters):
             super().__init__()
@@ -321,7 +335,7 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
 
         def prepare_conditions(self, conditions):
             captured.append({name: value.clone() for name, value in conditions.items()})
-            return {}
+            return {name: FakeContext() for name in conditions}
 
     checkpoint = tmp_path / "checkpoint.pth.tar"
     torch.save(
@@ -349,12 +363,14 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
         },
     }
     monkeypatch.setattr(sample_module.models, "from_config", lambda config, device: FakeBase().to(device))
+
     def fake_load_adapter(*args, **kwargs):
         adapter_loads.append(args[0])
         return "trained_tlpp_name", torch.nn.Identity(), artifact
 
     monkeypatch.setattr(sample_module, "load_adapter", fake_load_adapter)
     monkeypatch.setattr(sample_module, "ConditionedEDM2", FakeConditioned)
+
     def fake_sample(model, shape, *args, **kwargs):
         sampled_models.append(model)
         return torch.zeros((1, *shape))
@@ -379,6 +395,22 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     assert [entry["tlpp"].shape for entry in captured] == [(2, 1, 2, 2), (1, 1, 2, 2)]
     torch.testing.assert_close(captured[0]["tlpp"], 2 * raw[:2])
     torch.testing.assert_close(captured[1]["tlpp"], 2 * raw[2:])
+
+    contexts_before = len(captured)
+    sample_module.infer(
+        checkpoint,
+        {
+            "model_type": "ema",
+            "num_samples": 3,
+            "batch_size": 2,
+            "adapters": [{"name": "tlpp", "checkpoint": "unused.pth.tar"}],
+        },
+        adapter_conditions={"tlpp": raw[0]},
+        save_to_file=False,
+        device="cpu",
+    )
+    assert len(captured) == contexts_before + 1
+    assert captured[-1]["tlpp"].shape == (1, 1, 2, 2)
 
     sample_module.infer(
         checkpoint,

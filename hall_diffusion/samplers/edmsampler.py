@@ -87,13 +87,31 @@ class RK2Integrator:
         # Take second step
         if t_mid != 0:
             recompute_guidance = guidance1 is None or t_mid <= self.guidance_second_order_below
-            _, d_mid, _ = self.eval_deriv(
-                x_mid,
-                t_mid,
-                model_args=model_args,
-                guidance_override=guidance1,
-                compute_guidance=recompute_guidance,
+            midpoint_needs_grad = (
+                recompute_guidance
+                and self.guidance_score_fn is not None
+                and self.guidance_score_fn.type == "dps"
+                and t_mid < self.guidance_score_fn.guidance_start_time
             )
+            x_mid = x_mid.detach()
+            if midpoint_needs_grad:
+                x_mid.requires_grad_(True)
+                _, d_mid, _ = self.eval_deriv(
+                    x_mid,
+                    t_mid,
+                    model_args=model_args,
+                    guidance_override=guidance1,
+                    compute_guidance=True,
+                )
+            else:
+                with torch.no_grad():
+                    _, d_mid, _ = self.eval_deriv(
+                        x_mid,
+                        t_mid,
+                        model_args=model_args,
+                        guidance_override=guidance1,
+                        compute_guidance=recompute_guidance,
+                    )
             x2 = x + h * ((1 - c) * d1 + c * d_mid)
         else:
             x2 = x + h * d1
