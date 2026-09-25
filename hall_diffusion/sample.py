@@ -726,16 +726,45 @@ def infer(
 
     loaded_adapters = []
     adapter_conditions = dict(adapter_conditions or {})
+    supplied_condition_names = list(adapter_conditions)
+    if any(not isinstance(name, str) or not name for name in supplied_condition_names):
+        raise ValueError(
+            "adapter condition names must be nonempty strings; "
+            f"supplied names: {supplied_condition_names!r}"
+        )
     adapter_specs = sampling_config.get("adapters", [])
     if adapter_specs:
         adapters = {}
+        loaded_artifacts = []
+        configured_names = []
         for spec in adapter_specs:
-            name, adapter, artifact = load_adapter(
+            artifact_name, adapter, artifact = load_adapter(
                 spec["checkpoint"], base_model, model_config, weights=spec.get("weights", "ema"),
             )
+            name = spec.get("name", artifact_name)
+            configured_names.append(name)
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    "adapter names must be nonempty strings; "
+                    f"configured names: {configured_names!r}"
+                )
             if name in adapters:
-                raise ValueError(f"adapter {name!r} appears more than once")
+                raise ValueError(
+                    f"adapter name {name!r} appears more than once; "
+                    f"configured names: {configured_names!r}"
+                )
             adapters[name] = adapter
+            loaded_artifacts.append((name, spec, artifact))
+
+        available_names = list(adapters)
+        if unknown := set(adapter_conditions).difference(adapters):
+            raise ValueError(
+                f"conditions were supplied for unknown adapters: {sorted(unknown)}; "
+                f"supplied condition names: {sorted(supplied_condition_names)}; "
+                f"available adapter names: {available_names}"
+            )
+
+        for name, spec, artifact in loaded_artifacts:
             encoder_type = artifact["adapter_config"]["encoder"]["type"]
             condition_settings = _resolve_condition_settings(spec, artifact)
             if name in adapter_conditions:
@@ -752,8 +781,11 @@ def infer(
                 condition = _load_adapter_condition(spec, encoder_type, condition_settings)
             loaded_adapters.append((name, spec, condition, encoder_type))
         model = ConditionedEDM2(base_model, adapters).to(device)
-    if unknown := set(adapter_conditions).difference(name for name, *_ in loaded_adapters):
-        raise ValueError(f"conditions were supplied for unknown adapters: {sorted(unknown)}")
+    elif adapter_conditions:
+        raise ValueError(
+            "conditions were supplied but no adapters were configured; "
+            f"supplied condition names: {sorted(supplied_condition_names)}; available adapter names: []"
+        )
 
     # Switch model to evalution mode and sample
     model.eval()

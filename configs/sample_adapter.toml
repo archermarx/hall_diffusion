@@ -8,6 +8,7 @@ method = "midpoint"
 unconditional_data_dir = "data/test_large"
 
 [[adapters]]
+name = "image"
 checkpoint = "saved_models/image_adapter/adapter.pth.tar"
 condition_file = "h9_batch3_val_small_TLPPs_sorted.h5"
 condition_uuid = "replace-with-trace-uuid"

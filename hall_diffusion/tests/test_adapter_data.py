@@ -348,7 +348,7 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     monkeypatch.setattr(
         sample_module,
         "load_adapter",
-        lambda *args, **kwargs: ("tlpp", torch.nn.Identity(), artifact),
+        lambda *args, **kwargs: ("trained_tlpp_name", torch.nn.Identity(), artifact),
     )
     monkeypatch.setattr(sample_module, "ConditionedEDM2", FakeConditioned)
     monkeypatch.setattr(
@@ -364,7 +364,7 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
             "model_type": "ema",
             "num_samples": 3,
             "batch_size": 2,
-            "adapters": [{"checkpoint": "unused.pth.tar"}],
+            "adapters": [{"name": "tlpp", "checkpoint": "unused.pth.tar"}],
         },
         adapter_conditions={"tlpp": raw},
         save_to_file=False,
@@ -375,6 +375,37 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     assert [entry["tlpp"].shape for entry in captured] == [(2, 1, 2, 2), (1, 1, 2, 2)]
     torch.testing.assert_close(captured[0]["tlpp"], 2 * raw[:2])
     torch.testing.assert_close(captured[1]["tlpp"], 2 * raw[2:])
+
+    sample_module.infer(
+        checkpoint,
+        {
+            "model_type": "ema",
+            "num_samples": 3,
+            "batch_size": 2,
+            "adapters": [{"checkpoint": "unused.pth.tar"}],
+        },
+        adapter_conditions={"trained_tlpp_name": raw},
+        save_to_file=False,
+        device="cpu",
+    )
+    assert set(captured[-1]) == {"trained_tlpp_name"}
+
+    with pytest.raises(ValueError, match="unknown adapters") as error:
+        sample_module.infer(
+            checkpoint,
+            {
+                "model_type": "ema",
+                "num_samples": 3,
+                "batch_size": 2,
+                "adapters": [{"name": "renamed", "checkpoint": "unused.pth.tar"}],
+            },
+            adapter_conditions={"wrong_name": raw},
+            save_to_file=False,
+            device="cpu",
+        )
+    message = str(error.value)
+    assert "supplied condition names: ['wrong_name']" in message
+    assert "available adapter names: ['renamed']" in message
 
 
 @pytest.mark.parametrize(

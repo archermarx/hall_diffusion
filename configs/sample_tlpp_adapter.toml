@@ -8,6 +8,7 @@ method = "midpoint"
 unconditional_data_dir = "h9_batch3_val_small.h5"
 
 [[adapters]]
+name = "tlpp"
 checkpoint = "saved_models/tlpp_adapter/adapter.pth.tar"
 condition_file = "h9_batch3_val_small_TLPPs_compressed.h5"
 condition_uuid = "replace-with-trace-uuid"
