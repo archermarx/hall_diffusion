@@ -309,11 +309,15 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
             self.weight = torch.nn.Parameter(torch.zeros(()))
 
     captured = []
+    conditioned_models = []
+    sampled_models = []
+    adapter_loads = []
 
     class FakeConditioned(torch.nn.Module):
         def __init__(self, base, adapters):
             super().__init__()
             self.base = base
+            conditioned_models.append(list(adapters))
 
         def prepare_conditions(self, conditions):
             captured.append({name: value.clone() for name, value in conditions.items()})
@@ -345,17 +349,17 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
         },
     }
     monkeypatch.setattr(sample_module.models, "from_config", lambda config, device: FakeBase().to(device))
-    monkeypatch.setattr(
-        sample_module,
-        "load_adapter",
-        lambda *args, **kwargs: ("trained_tlpp_name", torch.nn.Identity(), artifact),
-    )
+    def fake_load_adapter(*args, **kwargs):
+        adapter_loads.append(args[0])
+        return "trained_tlpp_name", torch.nn.Identity(), artifact
+
+    monkeypatch.setattr(sample_module, "load_adapter", fake_load_adapter)
     monkeypatch.setattr(sample_module, "ConditionedEDM2", FakeConditioned)
-    monkeypatch.setattr(
-        sample_module,
-        "sample",
-        lambda model, shape, *args, **kwargs: torch.zeros((1, *shape)),
-    )
+    def fake_sample(model, shape, *args, **kwargs):
+        sampled_models.append(model)
+        return torch.zeros((1, *shape))
+
+    monkeypatch.setattr(sample_module, "sample", fake_sample)
     raw = torch.arange(12, dtype=torch.float32).reshape(3, 1, 2, 2)
 
     result = sample_module.infer(
@@ -390,6 +394,25 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     )
     assert set(captured[-1]) == {"trained_tlpp_name"}
 
+    wrappers_before = len(conditioned_models)
+    contexts_before = len(captured)
+    loads_before = len(adapter_loads)
+    sample_module.infer(
+        checkpoint,
+        {
+            "model_type": "ema",
+            "num_samples": 3,
+            "batch_size": 2,
+            "adapters": [{"name": "tlpp", "checkpoint": "unused.pth.tar"}],
+        },
+        save_to_file=False,
+        device="cpu",
+    )
+    assert len(conditioned_models) == wrappers_before
+    assert len(captured) == contexts_before
+    assert len(adapter_loads) == loads_before
+    assert isinstance(sampled_models[-1], FakeBase)
+
     with pytest.raises(ValueError, match="unknown adapters") as error:
         sample_module.infer(
             checkpoint,
@@ -406,6 +429,59 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     message = str(error.value)
     assert "supplied condition names: ['wrong_name']" in message
     assert "available adapter names: ['renamed']" in message
+
+
+def test_infer_rejects_incomplete_file_based_adapter_condition(tmp_path, monkeypatch):
+    class FakeBase(torch.nn.Module):
+        img_channels = 2
+        img_resolution = 4
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(()))
+
+    checkpoint = tmp_path / "checkpoint.pth.tar"
+    torch.save(
+        {
+            "model_config": {
+                "architecture": "edm2",
+                "resolution": 4,
+                "in_channels": 2,
+                "condition_dim": 0,
+                "scalars_in_tensor": True,
+            },
+            "ema": {"weight": torch.zeros(())},
+        },
+        checkpoint,
+    )
+    artifact = {
+        "adapter_config": {"encoder": {"type": "cnn2d"}},
+        "condition_config": {},
+    }
+    monkeypatch.setattr(sample_module.models, "from_config", lambda config, device: FakeBase().to(device))
+    monkeypatch.setattr(
+        sample_module,
+        "load_adapter",
+        lambda *args, **kwargs: ("tlpp", torch.nn.Identity(), artifact),
+    )
+
+    with pytest.raises(ValueError, match="incomplete file-based condition"):
+        sample_module.infer(
+            checkpoint,
+            {
+                "model_type": "ema",
+                "num_samples": 1,
+                "adapters": [
+                    {
+                        "name": "tlpp",
+                        "checkpoint": "unused.pth.tar",
+                        "condition_file": "conditions.h5",
+                    }
+                ],
+            },
+            save_to_file=False,
+            device="cpu",
+        )
 
 
 @pytest.mark.parametrize(

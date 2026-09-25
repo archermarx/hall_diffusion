@@ -733,7 +733,9 @@ def infer(
             f"supplied names: {supplied_condition_names!r}"
         )
     adapter_specs = sampling_config.get("adapters", [])
-    if adapter_specs:
+    condition_fields = {"condition_file", "condition_uuid"}
+    has_file_conditions = any(condition_fields.intersection(spec) for spec in adapter_specs)
+    if adapter_specs and (adapter_conditions or has_file_conditions):
         adapters = {}
         loaded_artifacts = []
         configured_names = []
@@ -772,15 +774,20 @@ def infer(
                     adapter_conditions[name], condition_settings, encoder_type
                 )
             else:
-                missing = {"condition_file", "condition_uuid"}.difference(spec)
+                if not condition_fields.intersection(spec):
+                    continue
+                missing = condition_fields.difference(spec)
                 if missing:
                     raise ValueError(
-                        f"adapter {name!r} requires adapter_conditions[{name!r}] or "
-                        f"sampling config fields {sorted(missing)}"
+                        f"adapter {name!r} has an incomplete file-based condition; "
+                        f"missing sampling config fields {sorted(missing)}"
                     )
                 condition = _load_adapter_condition(spec, encoder_type, condition_settings)
             loaded_adapters.append((name, spec, condition, encoder_type))
-        model = ConditionedEDM2(base_model, adapters).to(device)
+        if loaded_adapters:
+            active_adapters = {name: adapters[name] for name, *_ in loaded_adapters}
+            model = ConditionedEDM2(base_model, active_adapters).to(device)
+        del adapters, loaded_artifacts
     elif adapter_conditions:
         raise ValueError(
             "conditions were supplied but no adapters were configured; "
