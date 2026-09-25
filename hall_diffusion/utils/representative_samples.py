@@ -29,17 +29,27 @@ class KMedoidsResult:
 
 def _as_numpy_samples(samples) -> tuple[np.ndarray, bool]:
     is_tensor = isinstance(samples, torch.Tensor)
-    values = samples.detach().cpu().numpy() if is_tensor else np.asarray(samples)
+    if is_tensor:
+        cpu_samples = samples.detach().cpu()
+        # NumPy does not directly support PyTorch's bfloat16 dtype.
+        if cpu_samples.dtype == torch.bfloat16:
+            cpu_samples = cpu_samples.float()
+        values = cpu_samples.numpy()
+    else:
+        values = np.asarray(samples)
     if values.ndim < 2:
         raise ValueError("samples must have shape (n_samples, ...)")
     if values.shape[0] < 2:
         raise ValueError("at least two samples are required")
+    if values[0].size == 0:
+        raise ValueError("samples must contain at least one feature")
     if not np.issubdtype(values.dtype, np.number) or np.iscomplexobj(values):
         raise TypeError("samples must contain real numeric values")
     if not np.isfinite(values).all():
         raise ValueError("samples must contain only finite values")
-    dtype = np.float64 if values.dtype == np.float64 else np.float32
-    return values.reshape(values.shape[0], -1).astype(dtype, copy=False), is_tensor
+    # PCA and Euclidean distance calculations readily overflow float32 for
+    # valid physical quantities such as number densities around 1e20.
+    return values.reshape(values.shape[0], -1).astype(np.float64, copy=False), is_tensor
 
 
 def _validate_weights(weights, n_samples: int, n_medoids: int, dtype) -> np.ndarray:
@@ -94,11 +104,20 @@ def _randomized_pca(
 
 
 def _pairwise_distances(values: np.ndarray) -> np.ndarray:
-    squared_norms = np.einsum("ij,ij->i", values, values)
-    squared_distances = squared_norms[:, None] + squared_norms[None, :] - 2 * values @ values.T
+    # Scaling every coordinate by the same constant does not affect k-medoids,
+    # and prevents avoidable overflow in the squared-distance calculation.
+    scale = float(np.max(np.abs(values)))
+    if scale == 0:
+        return np.zeros((len(values), len(values)), dtype=values.dtype)
+    scaled = values / scale
+    squared_norms = np.einsum("ij,ij->i", scaled, scaled)
+    squared_distances = squared_norms[:, None] + squared_norms[None, :] - 2 * scaled @ scaled.T
     np.maximum(squared_distances, 0, out=squared_distances)
     np.sqrt(squared_distances, out=squared_distances)
+    squared_distances *= scale
     np.fill_diagonal(squared_distances, 0)
+    if not np.isfinite(squared_distances).all():
+        raise ValueError("PCA distance calculation produced non-finite values; consider rescaling the samples")
     return squared_distances
 
 
@@ -119,6 +138,8 @@ def _initial_medoids(distances: np.ndarray, weights: np.ndarray, n_medoids: int)
             if cost < best_cost:
                 best_candidate = int(candidate)
                 best_cost = cost
+        if best_candidate is None:
+            raise ValueError("k-medoids could not find a finite candidate cost")
         medoids.append(best_candidate)
         np.minimum(nearest, distances[:, best_candidate], out=nearest)
     return np.asarray(medoids, dtype=np.int64)

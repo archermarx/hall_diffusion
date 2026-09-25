@@ -59,6 +59,18 @@ def test_duplicate_samples_still_produce_distinct_medoid_indices():
     assert sorted(result.medoid_indices) == [0, 1, 2]
 
 
+def test_large_float32_values_do_not_overflow_distance_calculation():
+    rng = np.random.default_rng(12)
+    samples = (rng.normal(size=(128, 25, 128)) * np.float32(1e20)).astype(np.float32)
+
+    result = pca_k_medoids(samples, 8, n_components=16)
+
+    assert len(np.unique(result.medoid_indices)) == 8
+    assert np.isfinite(result.embedding).all()
+    assert np.isfinite(result.explained_variance_ratio).all()
+    assert np.isfinite(result.inertia)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
