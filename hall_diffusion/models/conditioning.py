@@ -419,14 +419,22 @@ class ConditionedEDM2(nn.Module):
         if unknown:
             raise ValueError(f"unknown adapter(s): {sorted(unknown)}")
         x, c_out, c_skip, emb, bottleneck, skips, features = self._base_features(x, noise_std, condition_vector)
-        residuals = {name: torch.zeros_like(value) for name, value in features.items()}
+        residuals = {}
         for name, context in contexts.items():
             scale = 1.0 if adapter_scales is None else float(adapter_scales.get(name, 1.0))
             if scale == 0:
                 continue
             for site, value in self.adapters[name].residuals(features, emb, context).items():
-                residuals[site] = residuals[site] + scale * value
-        modified_skips = [skip + residuals[name] for name, skip in zip(self.base.unet.enc.keys(), skips, strict=True)]
+                if scale != 1:
+                    value = scale * value
+                residuals[site] = value if site not in residuals else residuals[site] + value
+        modified_skips = [
+            skip if name not in residuals else skip + residuals[name]
+            for name, skip in zip(self.base.unet.enc.keys(), skips, strict=True)
+        ]
         # Do not use no_grad: gradients must traverse the frozen decoder to adapter residuals.
-        output = self.base.unet.decode(bottleneck + residuals["bottleneck"], modified_skips, emb)
+        modified_bottleneck = (
+            bottleneck if "bottleneck" not in residuals else bottleneck + residuals["bottleneck"]
+        )
+        output = self.base.unet.decode(modified_bottleneck, modified_skips, emb)
         return c_skip * x + c_out * output.to(torch.float32)

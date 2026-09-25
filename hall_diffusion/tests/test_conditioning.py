@@ -94,6 +94,28 @@ def test_prepared_contexts_cache_projections_and_expand_singletons():
     torch.testing.assert_close(cached, direct, atol=1e-6, rtol=1e-6)
 
 
+def test_single_adapter_does_not_allocate_zero_residual_buffers(monkeypatch):
+    torch.manual_seed(4)
+    base = make_base()
+    adapter = ConditionAdapter(base, MLPConditionEncoder(3, token_dim=8), channels_per_head=8)
+    model = ConditionedEDM2(base, {"scalar": adapter}).eval().requires_grad_(False)
+    with torch.no_grad():
+        context = model.prepare_conditions({"scalar": torch.randn(2, 3)})
+
+    def unexpected_zeros_like(*args, **kwargs):
+        raise AssertionError("adapter residual accumulation should not allocate zero buffers")
+
+    monkeypatch.setattr(torch, "zeros_like", unexpected_zeros_like)
+    with torch.no_grad():
+        output = model(
+            torch.randn(2, 2, 16),
+            torch.full((2, 1, 1), 0.5),
+            contexts=context,
+        )
+
+    assert output.shape == (2, 2, 16)
+
+
 def test_adapter_can_change_output_without_changing_base_weights():
     torch.manual_seed(2)
     base = make_base()

@@ -12,10 +12,30 @@ the likelihood, avoiding second derivatives of arbitrary measurement maps.
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
+
+
+@dataclass
+class DPSCovarianceCache:
+    """Bounded accelerator cache for sample-independent DPS covariance terms."""
+
+    max_bytes: int = 64 * 1024**2
+    values: dict[tuple, torch.Tensor] = field(default_factory=dict)
+    used_bytes: int = 0
+
+    def get_or_compute(self, key, compute):
+        if key is not None and key in self.values:
+            return self.values[key]
+        value = compute().detach()
+        size = value.numel() * value.element_size()
+        if key is not None and self.used_bytes + size <= self.max_bytes:
+            self.values[key] = value
+            self.used_bytes += size
+        return value
 
 
 def load_variance_model(path, sampling_config, state_shape, device):
@@ -164,6 +184,17 @@ def _noise_covariance(variance, size, *, dtype, device):
     return variance
 
 
+def _covariance_cache_key(observation, kind, t, reference):
+    cache = observation.get("covariance_cache")
+    if cache is None:
+        return None, None
+    if isinstance(t, torch.Tensor):
+        if t.numel() != 1 or t.device.type != "cpu":
+            return cache, None
+        t = t.item()
+    return cache, (kind, float(t), reference.dtype, str(reference.device))
+
+
 def guidance_score(x_t, x_0, t, observation, retain_graph=False):
     """Differentiate the locally Gaussian measurement log likelihood."""
     if observation["data"] is None:
@@ -189,22 +220,47 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
     ):
         if noise.ndim == 1 and noise.numel() != size:
             raise ValueError("observation variance has the wrong length")
-        state_variance = _state_variance(mean, t, observation["variance_model"]).reshape(-1)
-        projected_variance = operator.square() @ state_variance
-        solved = residual / (noise + projected_variance + jitter)
+        cache, cache_key = _covariance_cache_key(observation, "diagonal", t, measurement)
+
+        def diagonal_covariance():
+            state_variance = _state_variance(mean, t, observation["variance_model"]).reshape(-1)
+            projected_variance = operator.square() @ state_variance
+            return noise + projected_variance + jitter
+
+        denominator = (
+            diagonal_covariance()
+            if cache is None
+            else cache.get_or_compute(cache_key, diagonal_covariance)
+        )
+        solved = residual / denominator
     else:
-        covariance = _noise_covariance(
-            noise, size, dtype=measurement.dtype, device=measurement.device
-        )
-        projected_covariance = _projected_covariance(
-            mean, operator, t, observation["variance_model"]
-        )
-        identity = torch.eye(size, dtype=measurement.dtype, device=measurement.device)
-        if projected_covariance.ndim == 2:
-            covariance = covariance + projected_covariance + jitter * identity
-            factor = torch.linalg.cholesky(covariance)
+        if isinstance(operator, torch.Tensor):
+            cache, cache_key = _covariance_cache_key(observation, "dense", t, measurement)
+
+            def covariance_factor():
+                covariance = _noise_covariance(
+                    noise, size, dtype=measurement.dtype, device=measurement.device
+                )
+                projected_covariance = _projected_covariance(
+                    mean, operator, t, observation["variance_model"]
+                )
+                identity = torch.eye(size, dtype=measurement.dtype, device=measurement.device)
+                return torch.linalg.cholesky(covariance + projected_covariance + jitter * identity)
+
+            factor = (
+                covariance_factor()
+                if cache is None
+                else cache.get_or_compute(cache_key, covariance_factor)
+            )
             solved = torch.cholesky_solve(residual.T, factor).T
         else:
+            covariance = _noise_covariance(
+                noise, size, dtype=measurement.dtype, device=measurement.device
+            )
+            projected_covariance = _projected_covariance(
+                mean, operator, t, observation["variance_model"]
+            )
+            identity = torch.eye(size, dtype=measurement.dtype, device=measurement.device)
             covariance = covariance.unsqueeze(0) + projected_covariance + jitter * identity
             factor = torch.linalg.cholesky(covariance)
             solved = torch.cholesky_solve(residual.unsqueeze(-1), factor).squeeze(-1)

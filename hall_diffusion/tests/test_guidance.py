@@ -2,7 +2,13 @@ import numpy as np
 import pytest
 import torch
 
-from hall_diffusion.guidance import _corrected_mean, _interpolate, guidance_score, load_variance_model
+from hall_diffusion.guidance import (
+    DPSCovarianceCache,
+    _corrected_mean,
+    _interpolate,
+    guidance_score,
+    load_variance_model,
+)
 
 
 def variance_model(num_channels, variance=0.3):
@@ -129,6 +135,33 @@ def test_dense_linear_covariance_factorization_is_shared_across_batch(monkeypatc
     assert covariance_shapes == [torch.Size([2, 2])]
     assert score.shape == x_t.shape
     assert torch.all(torch.isfinite(score))
+
+
+def test_dense_linear_covariance_factorization_is_cached_across_batches(monkeypatch):
+    operator = torch.tensor([[1.0, 0.2], [-0.3, 0.8]])
+    observation = {
+        "operator": operator,
+        "data": torch.zeros(2),
+        "var": torch.tensor([0.2, 0.3]),
+        "variance_model": variance_model(1),
+        "covariance_cache": DPSCovarianceCache(),
+    }
+    original_cholesky = torch.linalg.cholesky
+    factorization_count = 0
+
+    def record_cholesky(covariance):
+        nonlocal factorization_count
+        factorization_count += 1
+        return original_cholesky(covariance)
+
+    monkeypatch.setattr(torch.linalg, "cholesky", record_cholesky)
+    scores = []
+    for batch_size in (3, 1):
+        x_t = torch.randn(batch_size, 1, 2, requires_grad=True)
+        scores.append(guidance_score(x_t, 0.75 * x_t, 0.5, observation))
+
+    assert factorization_count == 1
+    assert all(torch.all(torch.isfinite(score)) for score in scores)
 
 
 def test_process_variance_is_linear_in_log_noise():

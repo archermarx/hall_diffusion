@@ -17,7 +17,12 @@ from hall_diffusion import models
 from hall_diffusion.adapter_data import condition_artifact_config, preprocess_condition
 from hall_diffusion.models.adapter_io import load_adapter
 from hall_diffusion.models.conditioning import ConditionedEDM2
-from hall_diffusion.guidance import guidance_score, legacy_guidance_score, load_variance_model
+from hall_diffusion.guidance import (
+    DPSCovarianceCache,
+    guidance_score,
+    legacy_guidance_score,
+    load_variance_model,
+)
 from hall_diffusion.utils import utils
 from hall_diffusion.utils.thruster_data import ThrusterDataset
 from hall_diffusion.samplers.edmsampler import EDMSampler, RK2Integrator, ObservationGuidance
@@ -375,6 +380,7 @@ def sample(
     verbose=False,
     adapter_contexts=None,
     adapter_scales=None,
+    guidance_cache=None,
 ):
     num_samples, _, _ = shape
 
@@ -388,6 +394,8 @@ def sample(
         device,
         verbose=verbose,
     )
+    if guidance_cache is not None:
+        obs["covariance_cache"] = guidance_cache
 
     # Timestep args
     num_steps = args.get("num_steps", 256)
@@ -858,6 +866,14 @@ def infer(
         name: float(spec.get("scale", 1.0))
         for name, spec, _, _ in loaded_adapters
     }
+    guidance_cache = None
+    if variance_model is not None:
+        cache_size_mb = sampling_config.get("dps_covariance_cache_mb", 64)
+        if isinstance(cache_size_mb, bool) or not isinstance(cache_size_mb, (int, float)):
+            raise TypeError("dps_covariance_cache_mb must be a number")
+        if cache_size_mb < 0:
+            raise ValueError("dps_covariance_cache_mb must be nonnegative")
+        guidance_cache = DPSCovarianceCache(max_bytes=int(cache_size_mb * 1024**2))
     sampling_adapters = [
         adapter for adapter in loaded_adapters if adapter_scales[adapter[0]] != 0
     ]
@@ -917,6 +933,7 @@ def infer(
             verbose=verbose,
             adapter_contexts=adapter_contexts,
             adapter_scales=adapter_scales,
+            guidance_cache=guidance_cache,
         )
         samples.append(batch_samples)
         batch_start += batch_num_samples
