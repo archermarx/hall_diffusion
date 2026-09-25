@@ -38,6 +38,25 @@ def test_new_adapter_is_an_exact_noop_and_base_stays_eval():
     assert not model.base.training
 
 
+def test_noop_adapter_preserves_base_input_jacobian_for_guidance():
+    torch.manual_seed(2)
+    base = make_base()
+    adapter = ConditionAdapter(base, MLPConditionEncoder(3, token_dim=8), channels_per_head=8)
+    model = ConditionedEDM2(base, {"scalar": adapter}).eval()
+    x = torch.randn(2, 2, 16, requires_grad=True)
+    sigma = torch.full((2, 1, 1), 0.5)
+    condition = {"scalar": torch.randn(2, 3)}
+
+    base_output = base(x, sigma)
+    adapter_output = model(x, sigma, conditions=condition)
+    projection = torch.randn_like(base_output)
+    base_gradient = torch.autograd.grad((base_output * projection).sum(), x, retain_graph=True)[0]
+    adapter_gradient = torch.autograd.grad((adapter_output * projection).sum(), x)[0]
+
+    torch.testing.assert_close(adapter_output, base_output, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(adapter_gradient, base_gradient, atol=1e-6, rtol=1e-6)
+
+
 def test_adapter_can_change_output_without_changing_base_weights():
     torch.manual_seed(2)
     base = make_base()

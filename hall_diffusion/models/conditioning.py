@@ -350,7 +350,14 @@ class ConditionedEDM2(nn.Module):
         x_in = torch.cat((c_in * x, torch.ones_like(x[:, :1])), dim=1)
         with torch.no_grad():
             emb = self.base.unet.embed(c_noise, labels)
+        if x.requires_grad:
+            # DPS differentiates its observation likelihood through the
+            # denoiser with respect to x. Preserve that input Jacobian while
+            # keeping the frozen encoder graph-free during adapter training.
             bottleneck, skips = self.base.unet.encode(x_in, emb)
+        else:
+            with torch.no_grad():
+                bottleneck, skips = self.base.unet.encode(x_in, emb)
         features = dict(zip(self.base.unet.enc.keys(), skips, strict=True))
         features["bottleneck"] = bottleneck
         return x, c_out, c_skip, emb, bottleneck, skips, features

@@ -786,7 +786,7 @@ def infer(
             loaded_adapters.append((name, spec, condition, encoder_type))
         if loaded_adapters:
             active_adapters = {name: adapters[name] for name, *_ in loaded_adapters}
-            model = ConditionedEDM2(base_model, active_adapters).to(device)
+            model = ConditionedEDM2(base_model, active_adapters).to(device).requires_grad_(False)
         del adapters, loaded_artifacts
     elif adapter_conditions:
         raise ValueError(
