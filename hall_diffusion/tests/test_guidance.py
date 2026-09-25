@@ -73,6 +73,64 @@ def test_fieldwise_variance_is_propagated_through_linear_operator():
     torch.testing.assert_close(score, expected)
 
 
+def test_diagonal_linear_guidance_avoids_cholesky(monkeypatch):
+    x_t = torch.tensor(
+        [[[0.5, -0.25, 0.75]], [[-0.5, 0.25, -0.75]]], requires_grad=True
+    )
+    scale = 0.4
+    operator = torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.5, 0.0]])
+    process_variance = torch.tensor([[0.1, 0.4, 0.2], [0.1, 0.4, 0.2]])
+    observation = {
+        "operator": operator,
+        "data": torch.zeros(2),
+        "var": torch.tensor([0.2, 0.3]),
+        "variance_model": {
+            "noise_levels": torch.tensor([0.1, 1.0]),
+            "process_variance": process_variance,
+        },
+        "diagonal_covariance": True,
+        "covariance_jitter": 1e-6,
+    }
+
+    def unexpected_cholesky(*args, **kwargs):
+        raise AssertionError("diagonal guidance should not use Cholesky")
+
+    monkeypatch.setattr(torch.linalg, "cholesky", unexpected_cholesky)
+    score = guidance_score(x_t, scale * x_t, torch.tensor(0.5), observation)
+
+    projected = operator.square() @ process_variance[0]
+    residual = scale * x_t.flatten(start_dim=1) @ operator.T
+    solved = residual / (observation["var"] + projected + observation["covariance_jitter"])
+    expected = -scale * (solved @ operator).reshape_as(x_t)
+    torch.testing.assert_close(score, expected)
+
+
+def test_dense_linear_covariance_factorization_is_shared_across_batch(monkeypatch):
+    x_t = torch.tensor(
+        [[[0.5, -0.25]], [[-0.5, 0.25]], [[0.75, 0.1]]], requires_grad=True
+    )
+    operator = torch.tensor([[1.0, 0.2], [-0.3, 0.8]])
+    observation = {
+        "operator": operator,
+        "data": torch.zeros(2),
+        "var": torch.tensor([0.2, 0.3]),
+        "variance_model": variance_model(1),
+    }
+    original_cholesky = torch.linalg.cholesky
+    covariance_shapes = []
+
+    def record_cholesky(covariance):
+        covariance_shapes.append(covariance.shape)
+        return original_cholesky(covariance)
+
+    monkeypatch.setattr(torch.linalg, "cholesky", record_cholesky)
+    score = guidance_score(x_t, 0.75 * x_t, torch.tensor(0.5), observation)
+
+    assert covariance_shapes == [torch.Size([2, 2])]
+    assert score.shape == x_t.shape
+    assert torch.all(torch.isfinite(score))
+
+
 def test_process_variance_is_linear_in_log_noise():
     noise_levels = torch.tensor([0.1, 1.0, 10.0])
     process_variance = torch.tensor([[1.0], [3.0], [7.0]])

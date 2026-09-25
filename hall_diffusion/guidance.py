@@ -129,8 +129,11 @@ def _corrected_mean(x_0, t, variance_model):
 
 def _projected_covariance(x_0, operator, t, variance_model):
     state_variance = _state_variance(x_0, t, variance_model)
-    jacobian = _operator_jacobians(operator, x_0)
     variance = state_variance.reshape(-1)
+    if isinstance(operator, torch.Tensor):
+        # A linear operator and q(t) are shared by every sample in the batch.
+        return (operator * variance) @ operator.T
+    jacobian = _operator_jacobians(operator, x_0)
     return (jacobian * variance) @ jacobian.transpose(-1, -2)
 
 
@@ -176,17 +179,35 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
 
     size = observed.numel()
     residual = measurement - observed
-    covariance = _noise_covariance(
-        observation["var"], size, dtype=measurement.dtype, device=measurement.device
-    )
-    covariance = covariance.unsqueeze(0) + _projected_covariance(
-        mean, observation["operator"], t, observation["variance_model"]
-    )
-    identity = torch.eye(size, dtype=measurement.dtype, device=measurement.device)
-    covariance = covariance + observation.get("covariance_jitter", 1e-6) * identity
-
-    factor = torch.linalg.cholesky(covariance)
-    solved = torch.cholesky_solve(residual.unsqueeze(-1), factor).squeeze(-1)
+    operator = observation["operator"]
+    noise = torch.as_tensor(observation["var"], dtype=measurement.dtype, device=measurement.device)
+    jitter = observation.get("covariance_jitter", 1e-6)
+    if (
+        observation.get("diagonal_covariance", False)
+        and isinstance(operator, torch.Tensor)
+        and noise.ndim <= 1
+    ):
+        if noise.ndim == 1 and noise.numel() != size:
+            raise ValueError("observation variance has the wrong length")
+        state_variance = _state_variance(mean, t, observation["variance_model"]).reshape(-1)
+        projected_variance = operator.square() @ state_variance
+        solved = residual / (noise + projected_variance + jitter)
+    else:
+        covariance = _noise_covariance(
+            noise, size, dtype=measurement.dtype, device=measurement.device
+        )
+        projected_covariance = _projected_covariance(
+            mean, operator, t, observation["variance_model"]
+        )
+        identity = torch.eye(size, dtype=measurement.dtype, device=measurement.device)
+        if projected_covariance.ndim == 2:
+            covariance = covariance + projected_covariance + jitter * identity
+            factor = torch.linalg.cholesky(covariance)
+            solved = torch.cholesky_solve(residual.T, factor).T
+        else:
+            covariance = covariance.unsqueeze(0) + projected_covariance + jitter * identity
+            factor = torch.linalg.cholesky(covariance)
+            solved = torch.cholesky_solve(residual.unsqueeze(-1), factor).squeeze(-1)
     loss = 0.5 * torch.sum(residual * solved)
     return -torch.autograd.grad(loss, x_t, retain_graph=retain_graph)[0]
 

@@ -347,6 +347,10 @@ def parse_observation(
             var=obs_var,
             covariance_jitter=args.get("covariance_jitter", 1e-6),
             variance_model=variance_model,
+            diagonal_covariance=bool(
+                obs_operator is not None
+                and torch.all(torch.count_nonzero(obs_operator, dim=0) <= 1).item()
+            ),
         )
     else:
         if param_vec is None or unconditional_dataset is None:
