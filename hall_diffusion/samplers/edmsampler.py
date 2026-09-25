@@ -1,4 +1,5 @@
 import math
+from contextlib import nullcontext
 import torch
 from typing import Literal
 from tqdm import tqdm
@@ -33,16 +34,20 @@ class RK2Integrator:
             S_tmax: float = float('inf'),
             S_noise: float = 1.003,
             guidance_second_order_below: float = float('inf'),
+            use_amp: bool = False,
         ):
         if method is not None:
             rk_alpha = RK_METHODS[method]
         if guidance_second_order_below < 0:
             raise ValueError("guidance_second_order_below must be nonnegative")
+        if not isinstance(use_amp, bool):
+            raise TypeError("use_amp must be a boolean")
 
         self.model = model
         self.guidance_score_fn = guidance_score_fn
         self.rk_alpha = rk_alpha
         self.guidance_second_order_below = guidance_second_order_below
+        self.use_amp = use_amp
 
         # Stochasticity parameters
         self.S_churn = S_churn
@@ -54,7 +59,13 @@ class RK2Integrator:
     def eval_deriv(self, x, t, model_args=None, guidance_override=None, compute_guidance=True):
         model_args = {} if model_args is None else model_args
         ones = torch.ones((x.shape[0], 1, 1), device=x.device)
-        x0 = self.model(x, t * ones, **model_args)
+        amp_context = (
+            torch.amp.autocast("cuda", dtype=torch.float16)
+            if self.use_amp and x.device.type == "cuda"
+            else nullcontext()
+        )
+        with amp_context:
+            x0 = self.model(x, t * ones, **model_args)
         score = (x0 - x) / t**2
         guidance_score = None
         if self.guidance_score_fn is not None and \
@@ -125,7 +136,7 @@ class RK2Integrator:
         # Add stochasticity if required
         if self.S_churn > 0 and self.S_tmin <= t1 <= self.S_tmax:
             t1, t1_old = (1 + self.gamma) * t1 , t1
-            noise_std = (t1**2 - t1_old**2).sqrt() * self.S_noise
+            noise_std = math.sqrt(t1**2 - t1_old**2) * self.S_noise
             eps = torch.randn_like(x)
             x = x + noise_std * eps
 
@@ -158,13 +169,25 @@ class EDMSampler():
         timesteps[-1] = 0
         return timesteps
 
-    def sample(self, integrator, showprogress=True, device=None, model_args=None, record_trajectory=False):
+    def sample(
+        self,
+        integrator,
+        showprogress=True,
+        device=None,
+        model_args=None,
+        record_trajectory=False,
+        finite_check_interval=0,
+    ):
+        if isinstance(finite_check_interval, bool) or not isinstance(finite_check_interval, int):
+            raise TypeError("finite_check_interval must be an integer")
+        if finite_check_interval < 0:
+            raise ValueError("finite_check_interval must be nonnegative")
         model_args = {} if model_args is None else model_args
         # Generate initial noise and timesteps
         x = self.noise_max * torch.randn(self.shape, device=device)
-        # Move the schedule once instead of repeatedly copying CPU scalars into
-        # CUDA kernels throughout the denoiser and integration arithmetic.
-        timesteps = self.noise_steps.to(device)
+        # Python scalars keep loop control, progress reporting, and comparisons
+        # from synchronizing the accelerator at every step.
+        timesteps = self.noise_steps.tolist()
 
         (b, c, w) = x.shape
         num_steps = len(timesteps)
@@ -178,21 +201,23 @@ class EDMSampler():
                 continue
 
             t_prev = timesteps[step_idx - 1]
-            if x.device.type == "mps":
-                t_prev = t_prev.clone()  # Work around pytorch/pytorch#193057.
             pbar.set_description(f"Noise level: {t_prev:.4f}->{t:.4f}")
 
             x = integrator.step_with_guidance(x, t_prev, t, model_args=model_args)
 
-            # Check for NaN or Inf
-            if not torch.all(torch.isfinite(x)):
-                print("NaN/Inf detected during sampling. Exiting")
-                exit(1)
+            if finite_check_interval and step_idx % finite_check_interval == 0:
+                if not torch.all(torch.isfinite(x)):
+                    raise FloatingPointError("NaN/Inf detected during sampling")
 
             if record_trajectory:
                 output[step_idx] = x
 
         if record_trajectory:
             output[-1] = x
+            if not torch.all(torch.isfinite(output[-1])):
+                raise FloatingPointError("NaN/Inf detected during sampling")
             return output
-        return x.detach().cpu().unsqueeze(0)
+        output = x.detach().cpu()
+        if not torch.all(torch.isfinite(output)):
+            raise FloatingPointError("NaN/Inf detected during sampling")
+        return output.unsqueeze(0)

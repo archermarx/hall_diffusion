@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from hall_diffusion.samplers.edmsampler import EDMSampler, ObservationGuidance, RK2Integrator
@@ -25,6 +26,15 @@ class CountingGuidance:
     def __call__(self, x, x_0, t, observation):
         self.calls += 1
         return torch.ones_like(x)
+
+
+class TimeRecordingIntegrator:
+    def __init__(self):
+        self.times = []
+
+    def step_with_guidance(self, x, t1, t2, model_args=None):
+        self.times.append((t1, t2))
+        return x
 
 
 def make_integrator(threshold, model=None):
@@ -77,3 +87,24 @@ def test_trajectory_recording_is_disabled_by_default():
     output = sampler.sample(RK2Integrator(IdentityDenoiser()), showprogress=False)
 
     assert output.shape == (1, 1, 1, 2)
+
+
+def test_sampler_keeps_timestep_control_flow_on_cpu():
+    sampler = EDMSampler((1, 1, 2), num_steps=4, noise_min=0.01, noise_max=1.0, exponent=2.0)
+    integrator = TimeRecordingIntegrator()
+
+    sampler.sample(integrator, showprogress=False)
+
+    assert integrator.times
+    assert all(isinstance(t, float) for times in integrator.times for t in times)
+
+
+def test_final_finite_check_still_rejects_invalid_samples():
+    class InvalidIntegrator:
+        def step_with_guidance(self, x, t1, t2, model_args=None):
+            return torch.full_like(x, torch.nan)
+
+    sampler = EDMSampler((1, 1, 2), num_steps=4, noise_min=0.01, noise_max=1.0, exponent=2.0)
+
+    with torch.no_grad(), pytest.raises(FloatingPointError, match="NaN/Inf"):
+        sampler.sample(InvalidIntegrator(), showprogress=False)

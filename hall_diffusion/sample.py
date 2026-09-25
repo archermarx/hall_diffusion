@@ -399,6 +399,10 @@ def sample(
         raise ValueError("sampling_mode must be 'dps' or 'constant'")
     score_function = legacy_guidance_score if sampling_mode == "constant" else guidance_score
 
+    use_amp = args.get("use_amp", False)
+    if not isinstance(use_amp, bool):
+        raise TypeError("use_amp must be a boolean")
+
     # Set up sampler
     integrator = RK2Integrator(
         model,
@@ -415,6 +419,7 @@ def sample(
         S_tmax=args.get("S_tmax", float("inf")),
         S_noise=args.get("S_noise", 1.003),
         guidance_second_order_below=args.get("guidance_second_order_below", 0.1),
+        use_amp=use_amp,
     )
     sampler = EDMSampler(shape, num_steps, noise_min, noise_max, exponent)
 
@@ -425,10 +430,11 @@ def sample(
         model_args["adapter_scales"] = adapter_scales
     output = sampler.sample(
         integrator,
-        showprogress=True,
+        showprogress=args.get("show_progress", True),
         device=device,
         model_args=model_args,
         record_trajectory=record_trajectory,
+        finite_check_interval=args.get("finite_check_interval", 0),
     )
 
     final = output[-1, ...]
@@ -813,6 +819,9 @@ def infer(
 
     # Switch model to evalution mode and sample
     model.eval()
+    prepare_for_inference = getattr(base_model, "prepare_for_inference", None)
+    if prepare_for_inference is not None:
+        prepare_for_inference()
 
     num_samples = sampling_config.get("num_samples", 64)
     batch_size = sampling_config.get("batch_size", num_samples)

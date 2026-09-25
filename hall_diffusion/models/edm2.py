@@ -108,14 +108,36 @@ class MPConv(nn.Module):
         super().__init__()
         self.out_channels = out_channels
         self.weight = nn.Parameter(torch.randn(out_channels, in_channels, *kernel))
+        self._inference_prepared = False
+
+    @torch.no_grad()
+    def prepare_for_inference(self):
+        """Materialize the normalized, magnitude-preserving inference weight."""
+        if self.training:
+            raise RuntimeError("MPConv must be in eval mode before preparing it for inference")
+        if not self._inference_prepared:
+            w = normalize(self.weight.to(torch.float32))
+            w = w / np.sqrt(w[0].numel())
+            self.weight.copy_(w.to(self.weight.dtype))
+            self._inference_prepared = True
+        return self
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode:
+            self._inference_prepared = False
+        return self
 
     def forward(self, x, gain=1):
         w = self.weight.to(torch.float32)
         if self.training:
             with torch.no_grad():
                 self.weight.copy_(normalize(w))  # forced weight normalization
-        w = normalize(w)  # traditional weight normalization
-        w = w * (gain / np.sqrt(w[0].numel()))  # magnitude-preserving scaling
+        if self._inference_prepared:
+            w = w * gain if not isinstance(gain, (int, float)) or gain != 1 else w
+        else:
+            w = normalize(w)  # traditional weight normalization
+            w = w * (gain / np.sqrt(w[0].numel()))  # magnitude-preserving scaling
         w = w.to(x.dtype)
         if w.ndim == 2:
             return x @ w.t()
@@ -434,6 +456,15 @@ class EDM2Denoiser(nn.Module):
 
     def get_trainable_params(self):
         return self.parameters()
+
+    def prepare_for_inference(self):
+        """Prepare static layer weights once instead of on every denoiser call."""
+        if self.training:
+            raise RuntimeError("EDM2Denoiser must be in eval mode before preparing it for inference")
+        for module in self.modules():
+            if isinstance(module, MPConv):
+                module.prepare_for_inference()
+        return self
 
     def forward(self, x, noise_std, condition_vector=None, **unet_kwargs):
         x = x.to(torch.float32)

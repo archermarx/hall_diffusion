@@ -7,7 +7,7 @@ import pytest
 import torch
 import numpy as np
 
-from hall_diffusion.models.edm2 import EDM2Denoiser, UNet
+from hall_diffusion.models.edm2 import EDM2Denoiser, MPConv, UNet
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -171,3 +171,35 @@ def test_output_is_float32(denoiser, inputs):
             condition_vector=inputs["condition_vector"].float(),
         )
     assert out.dtype == torch.float32, f"Expected float32, got {out.dtype}"
+
+
+def test_prepared_inference_weights_preserve_output_and_input_gradient(denoiser, inputs):
+    """Inference preparation must only remove repeated weight normalization work."""
+    denoiser.unet.out_gain.data.fill_(0.5)
+    x = inputs["x"].clone().requires_grad_(True)
+    kwargs = dict(
+        noise_std=inputs["noise_std"],
+        condition_vector=inputs["condition_vector"],
+    )
+    expected = denoiser(x, **kwargs)
+    expected_grad = torch.autograd.grad(expected.square().mean(), x)[0]
+
+    denoiser.prepare_for_inference()
+    prepared_x = inputs["x"].clone().requires_grad_(True)
+    actual = denoiser(prepared_x, **kwargs)
+    actual_grad = torch.autograd.grad(actual.square().mean(), prepared_x)[0]
+
+    assert all(
+        module._inference_prepared
+        for module in denoiser.modules()
+        if isinstance(module, MPConv)
+    )
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=2e-5, atol=2e-6)
+
+
+def test_inference_preparation_requires_eval_mode(arch_kwargs):
+    model = EDM2Denoiser(**arch_kwargs)
+
+    with pytest.raises(RuntimeError, match="eval mode"):
+        model.prepare_for_inference()
