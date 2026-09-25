@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from hall_diffusion.models.ema import EMA
@@ -10,6 +12,18 @@ def set_weight(model, value):
 
 def test_ema_start_epoch_is_converted_to_optimizer_steps():
     assert EMA.calculate_start_step(batch_size=3, dataset_size=5, start_epochs=4) == 8
+    assert EMA.calculate_start_step(batch_size=3, dataset_size=5, start_epochs=1.5) == 3
+
+
+def test_fractional_ema_epochs_preserve_example_based_decay():
+    factor = EMA.calculate_ema_factor(
+        batch_size=10,
+        dataset_size=40,
+        max_epochs=100.0,
+        ema_epochs=6.25,
+    )
+
+    assert math.isclose(factor, math.exp(-10 / 250))
 
 
 def test_ema_skips_prestart_copies_then_initializes_once_and_averages():

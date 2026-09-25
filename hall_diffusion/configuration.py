@@ -5,6 +5,8 @@ persisted in its checkpoint.
 """
 
 from copy import deepcopy
+import math
+from numbers import Real
 
 
 EDM2_DEFAULTS = {
@@ -98,6 +100,65 @@ def resolve_training_config(config: dict) -> dict:
         _apply_defaults(resolved["optimizer"], OPTIMIZER_DEFAULTS)
 
     return resolved
+
+
+def duration_in_epochs(
+    config: dict,
+    dataset_size: int,
+    epochs_key: str,
+    examples_key: str,
+    *,
+    required: bool = True,
+    allow_zero: bool = False,
+) -> float | None:
+    """Resolve an epoch or example duration to one floating-point epoch value."""
+    if dataset_size <= 0:
+        raise ValueError("training dataset must contain at least one example")
+
+    examples = config.get(examples_key)
+    if examples is not None:
+        minimum = 0 if allow_zero else 1
+        if (
+            isinstance(examples, bool)
+            or not isinstance(examples, int)
+            or examples < minimum
+        ):
+            qualifier = "nonnegative" if allow_zero else "positive"
+            raise ValueError(f"training {examples_key} must be a {qualifier} integer")
+        return float(examples / dataset_size)
+
+    epochs = config.get(epochs_key)
+    if epochs is None:
+        if required:
+            raise ValueError(
+                f"training requires either {epochs_key!r} or {examples_key!r}"
+            )
+        return None
+    if (
+        isinstance(epochs, bool)
+        or not isinstance(epochs, Real)
+        or not math.isfinite(epochs)
+        or epochs < 0
+        or (not allow_zero and epochs <= 0)
+    ):
+        qualifier = "nonnegative" if allow_zero else "positive"
+        raise ValueError(f"training {epochs_key} must be a finite {qualifier} number")
+    return float(epochs)
+
+
+def training_duration(config: dict, dataset_size: int) -> float:
+    """Resolve total training duration to floating-point epochs."""
+    return duration_in_epochs(config, dataset_size, "epochs", "max_examples")
+
+
+def training_example_target(epochs: float, dataset_size: int) -> int:
+    """Convert a possibly fractional epoch duration to its nearest whole example."""
+    return max(1, round(epochs * dataset_size))
+
+
+def limited_batch_size(processed_examples: int, target_examples: int, batch_size: int) -> int:
+    """Return how many examples from the next batch fit in the training budget."""
+    return max(0, min(batch_size, target_examples - processed_examples))
 
 
 def resolve_config(config: dict) -> dict:

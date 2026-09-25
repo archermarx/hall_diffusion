@@ -16,7 +16,8 @@ class EMA:
     def calculate_ema_factor(batch_size, dataset_size, max_epochs, ema_epochs = None):
         total_images = max_epochs * dataset_size
         if ema_epochs is None:
-            ema_decay_time = round(0.05 * total_images) # EDM2 heuristic: 5% of total training images
+            # EDM2 heuristic: 5% of the total training examples.
+            ema_decay_time = max(1, round(0.05 * total_images))
         else:
             ema_decay_time = ema_epochs * dataset_size
 

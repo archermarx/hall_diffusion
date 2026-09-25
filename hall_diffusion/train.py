@@ -29,7 +29,14 @@ from models.ema import EMA
 from loss import EDM2Loss
 from utils import utils, thruster_data, visualization
 from utils.timing import StepTimer, format_timedelta
-from configuration import resolve_config, resolve_model_config
+from configuration import (
+    duration_in_epochs,
+    limited_batch_size,
+    resolve_config,
+    resolve_model_config,
+    training_duration,
+    training_example_target,
+)
 
 DEVICE = utils.get_device()
 AMP_DTYPE = (
@@ -61,7 +68,7 @@ class TrainingState:
     outlier_losses: list = field(default_factory=list)
     outliers: dict = field(default_factory=dict)
     batch_idx: int = -1
-    example_idx: int = -1
+    example_idx: int = 0
     training_model: Any = None
 
 
@@ -280,7 +287,6 @@ def train(args):
     # ---------------------------------------------
     # Training configuration
     train_args = config["training"]
-    max_epochs = train_args["epochs"]
     batch_size = train_args["batch_size"]
     condition_dropout = train_args["condition_dropout"]
     evaluation_iters = train_args["eval_freq"]
@@ -320,6 +326,10 @@ def train(args):
 
     # Check that normalization is the same between training and test datasets
     assert train_dataset.norm == test_dataset.norm
+    epochs = training_duration(train_args, len(train_dataset))
+    target_examples = training_example_target(epochs, len(train_dataset))
+    train_args["epochs"] = epochs
+    logger.info(f"Training for {epochs:g} epochs ({target_examples:,} examples).")
 
     pin = DEVICE.type == "cuda"
     loader_kwargs = {
@@ -375,9 +385,19 @@ def train(args):
 
     # ---------------------------------------------
     # Set up the exponential moving average model
-    ema_epochs = train_args["ema_epochs"]
-    ema_start = train_args["ema_start_epochs"]
-    ema_factor = EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, ema_epochs)
+    ema_epochs = duration_in_epochs(
+        train_args, len(train_dataset), "ema_epochs", "ema_examples", required=False
+    )
+    ema_start = duration_in_epochs(
+        train_args,
+        len(train_dataset),
+        "ema_start_epochs",
+        "ema_start_examples",
+        allow_zero=True,
+    )
+    train_args["ema_epochs"] = ema_epochs
+    train_args["ema_start_epochs"] = ema_start
+    ema_factor = EMA.calculate_ema_factor(batch_size, len(train_dataset), epochs, ema_epochs)
     logger.info(
         f"Set EMA factor to {ema_factor:.8f} based on a decay time of {ema_epochs} epochs and a batch size of {batch_size}."
     )
@@ -399,7 +419,9 @@ def train(args):
     lr_decay_batches = lr_decay_epochs * len(train_dataset) // batch_size
 
     weight_decay_epochs = opt_args["weight_decay_epochs"]
-    weight_decay = 1 - EMA.calculate_ema_factor(batch_size, len(train_dataset), max_epochs, weight_decay_epochs)
+    weight_decay = 1 - EMA.calculate_ema_factor(
+        batch_size, len(train_dataset), epochs, weight_decay_epochs
+    )
 
     optimizer = optim.AdamW(
         model.get_trainable_params(), lr=ref_lr, weight_decay=weight_decay, betas=betas
@@ -523,7 +545,8 @@ def train(args):
     state.training_model = utils.compile_model(state.model, use_torch_compile)
     logger.info(f"torch.compile: {'enabled' if use_torch_compile else 'disabled'}.")
 
-    epoch_range = range(start_epoch, max_epochs + 1) if max_epochs > 0 else itertools.count(start_epoch)
+    epoch_range = itertools.count(start_epoch) if state.example_idx < target_examples else ()
+    stop_training = False
     for epoch_idx in epoch_range:
         with timer.section("epoch_setup"):
             epoch_start_time = datetime.now()
@@ -540,12 +563,23 @@ def train(args):
                 except StopIteration:
                     break
 
+            batch_examples = limited_batch_size(state.example_idx, target_examples, y.shape[0])
+            if batch_examples == 0:
+                stop_training = True
+                break
+            if y.shape[0] > batch_examples:
+                record_ids = record_ids[:batch_examples]
+                vec = vec[:batch_examples]
+                y = y[:batch_examples]
+
             # Condition vector dropout
             if np.random.rand() < condition_dropout:
                 vec = None
 
             state.batch_idx += 1
-            state.example_idx += batch_size
+            state.example_idx += y.shape[0]
+            if state.example_idx >= target_examples:
+                stop_training = True
 
             progress.set_description(description(epoch_idx, state.batch_idx, "Training"))
 
@@ -639,6 +673,9 @@ def train(args):
                             evaluation_iters,
                         )
 
+            if stop_training:
+                break
+
         with timer.section("epoch finish"):
             epoch_stop_time = datetime.now()
             time_delta = format_timedelta((epoch_stop_time - epoch_start_time).total_seconds())
@@ -651,6 +688,9 @@ def train(args):
                 avg_val_loss, avg_ema_loss = np.mean(val_losses), np.mean(ema_losses)
                 logger.info(f"\tAvg val loss: {avg_val_loss:.3e}")
                 logger.info(f"\tAvg ema loss: {avg_ema_loss:.3e}")
+
+        if stop_training:
+            break
 
 
 if __name__ == "__main__":

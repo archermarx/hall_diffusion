@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import copy
+import itertools
 import math
 from pathlib import Path
 import shutil
@@ -27,7 +28,13 @@ from hall_diffusion.adapter_data import (
     collate_condition_batch,
     condition_artifact_config,
 )
-from hall_diffusion.configuration import resolve_training_config
+from hall_diffusion.configuration import (
+    duration_in_epochs,
+    limited_batch_size,
+    resolve_training_config,
+    training_duration,
+    training_example_target,
+)
 from hall_diffusion.loss import EDM2Loss
 from hall_diffusion.models.adapter_io import load_adapter, save_adapter
 from hall_diffusion.models.conditioning import (
@@ -312,6 +319,23 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
     test_source = _condition_source(source, "test")
     train_data = ConditionDataset(train_base, train_source)
     test_data = ConditionDataset(test_base, test_source)
+    epochs = training_duration(training, len(train_data))
+    target_examples = training_example_target(epochs, len(train_data))
+    ema_epochs = duration_in_epochs(
+        training, len(train_data), "ema_epochs", "ema_examples", required=False
+    )
+    ema_start_epochs = duration_in_epochs(
+        training,
+        len(train_data),
+        "ema_start_epochs",
+        "ema_start_examples",
+        allow_zero=True,
+    )
+    training["epochs"] = epochs
+    training["ema_epochs"] = ema_epochs
+    training["ema_start_epochs"] = ema_start_epochs
+    config["training"] = training
+    print(f"Training for {epochs:g} epochs ({target_examples:,} examples).")
 
     batch_size = training["batch_size"]
     loss_fn = EDM2Loss(**training["loss"])
@@ -397,8 +421,8 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
     if artifact is not None and artifact.get("optimizer") is not None:
         optimizer.load_state_dict(artifact["optimizer"])
     ema = EMA(
-        EMA.calculate_ema_factor(batch_size, len(train_data), training["epochs"], training["ema_epochs"]),
-        step_start=EMA.calculate_start_step(batch_size, len(train_data), training["ema_start_epochs"]),
+        EMA.calculate_ema_factor(batch_size, len(train_data), epochs, ema_epochs),
+        step_start=EMA.calculate_start_step(batch_size, len(train_data), ema_start_epochs),
     )
     restored_state = artifact.get("training_state") if artifact is not None else None
     restored_state = restored_state or {}
@@ -432,11 +456,21 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
         log_writer = csv.DictWriter(log_handle, fieldnames=log_fields)
         if write_log_header:
             log_writer.writeheader()
-        for epoch in range(start_epoch, training["epochs"]):
+        epoch_range = itertools.count(start_epoch) if example_index < target_examples else ()
+        stop_training = False
+        for epoch in epoch_range:
             training_model.train()
             batch_losses = []
             progress = tqdm(train_loader, desc=f"adapter epoch {epoch + 1}")
             for _, vector, target, condition in progress:
+                batch_examples = limited_batch_size(example_index, target_examples, target.shape[0])
+                if batch_examples == 0:
+                    stop_training = True
+                    break
+                if target.shape[0] > batch_examples:
+                    vector = vector[:batch_examples]
+                    target = target[:batch_examples]
+                    condition = condition[:batch_examples]
                 target = target.to(device, non_blocking=device.type == "cuda")
                 vector = vector.to(device, non_blocking=device.type == "cuda") if base.condition_dim else None
                 conditions = {name: condition.to(device, non_blocking=device.type == "cuda")}
@@ -470,6 +504,8 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
 
                 batch_index += 1
                 example_index += target.shape[0]
+                if example_index >= target_examples:
+                    stop_training = True
                 batch_losses.append(loss_value)
                 learning_rate = optimizer.param_groups[0]["lr"]
                 log_writer.writerow(
@@ -573,11 +609,16 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
                     )
                     progress.set_description(f"adapter epoch {epoch + 1}")
 
+                if stop_training:
+                    break
+
             mean_train_loss = float(np.mean(batch_losses))
             print(
                 f"epoch {epoch + 1}: train loss {mean_train_loss:.6g}, "
                 f"validation loss {last_validation_loss:.6g}, EMA loss {last_ema_loss:.6g}"
             )
+            if stop_training:
+                break
 
 
 if __name__ == "__main__":
