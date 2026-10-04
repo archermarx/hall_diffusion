@@ -190,5 +190,6 @@ def test_adapter_artifact_transfers_to_a_different_base_with_the_same_architectu
         load_adapter(path, other_base, incompatible_config)
     except ValueError as exc:
         assert "architecture does not match" in str(exc)
+        assert "'in_channels': {'adapter': 2, 'base': 3}" in str(exc)
     else:
         raise AssertionError("architecture mismatch should fail")

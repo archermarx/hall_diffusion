@@ -21,6 +21,22 @@ def base_signature(model_config: dict) -> dict:
     return {key: deepcopy(value) for key, value in config.items() if key not in ignored}
 
 
+def signature_differences(adapter_signature: dict, base_model_config: dict) -> dict:
+    """Return differing fields from a stored adapter and supplied base config."""
+    supplied_signature = base_signature(base_model_config)
+    missing = object()
+    differences = {}
+    for key in sorted(adapter_signature.keys() | supplied_signature.keys()):
+        adapter_value = adapter_signature.get(key, missing)
+        base_value = supplied_signature.get(key, missing)
+        if adapter_value != base_value:
+            differences[key] = {
+                "adapter": "<missing>" if adapter_value is missing else adapter_value,
+                "base": "<missing>" if base_value is missing else base_value,
+            }
+    return differences
+
+
 def make_adapter_artifact(name: str, adapter: ConditionAdapter, adapter_config: dict, base_model_config: dict, *,
                           ema_state: dict | None = None, optimizer_state: dict | None = None,
                           train_config: dict | None = None, training_state: dict | None = None,
@@ -51,8 +67,12 @@ def load_adapter(path: str | Path, base, base_model_config: dict, *, weights: st
         raise ValueError(f"{path} is not a condition-adapter artifact")
     if artifact.get("format_version") != ADAPTER_FORMAT_VERSION:
         raise ValueError(f"unsupported adapter format {artifact.get('format_version')!r}")
-    if artifact["base_signature"] != base_signature(base_model_config):
-        raise ValueError("adapter architecture does not match the supplied EDM2 base")
+    differences = signature_differences(artifact["base_signature"], base_model_config)
+    if differences:
+        raise ValueError(
+            "adapter architecture does not match the supplied EDM2 base; "
+            f"differing fields: {differences!r}"
+        )
     config = artifact["adapter_config"]
     adapter = ConditionAdapter(
         base,
