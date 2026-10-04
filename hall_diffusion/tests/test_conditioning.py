@@ -185,6 +185,11 @@ def test_adapter_artifact_transfers_to_a_different_base_with_the_same_architectu
     assert name == "scalar"
     assert isinstance(loaded.encoder, MLPConditionEncoder)
 
+    legacy_base_config = {**base_config, "fourier_features": False}
+    name, loaded, _ = load_adapter(path, other_base, legacy_base_config)
+    assert name == "scalar"
+    assert isinstance(loaded.encoder, MLPConditionEncoder)
+
     incompatible_config = {**base_config, "in_channels": 3}
     try:
         load_adapter(path, other_base, incompatible_config)

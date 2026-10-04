@@ -17,7 +17,15 @@ ADAPTER_FORMAT_VERSION = 1
 def base_signature(model_config: dict) -> dict:
     """Architecture fields that must agree before an adapter can attach."""
     config = resolve_model_config(model_config)
-    ignored = {"architecture", "scalars_in_tensor", "downsample_res", "base_conditioning"}
+    ignored = {
+        "architecture",
+        "scalars_in_tensor",
+        "downsample_res",
+        "base_conditioning",
+        # Dataset metadata stored by older base checkpoints, never part of the
+        # EDM2 architecture to which an adapter attaches.
+        "fourier_features",
+    }
     return {key: deepcopy(value) for key, value in config.items() if key not in ignored}
 
 
