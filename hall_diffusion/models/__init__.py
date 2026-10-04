@@ -39,6 +39,9 @@ def from_config(config: dict, device):
     arch = config.get("architecture", "edm2")
     assert arch == "edm2"
 
+    # Historical checkpoints stored this dataset setting alongside constructor
+    # arguments. It is no longer used, but must not reach EDM2Denoiser.
+    config.pop("fourier_features", None)
     config.pop("architecture", None)
     config.pop("scalars_in_tensor", None)
     config.pop("downsample_res", None)

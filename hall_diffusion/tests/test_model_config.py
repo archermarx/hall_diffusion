@@ -121,6 +121,7 @@ def test_old_sparse_checkpoint_model_config_remains_constructible():
         "resolution": 8,
         "in_channels": 1,
         "label_dim": 0,
+        "fourier_features": False,
         "base_channels": 4,
         "channel_mult": [1],
         "num_blocks": 1,
@@ -132,3 +133,4 @@ def test_old_sparse_checkpoint_model_config_remains_constructible():
     assert model.condition_dim == 0
     assert model.unet.enc["8x8_block0"].num_heads == 0
     assert "channels_per_head" not in legacy_config
+    assert legacy_config["fourier_features"] is False
