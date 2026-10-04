@@ -1,5 +1,4 @@
 import os
-import warnings
 
 import h5py
 import numpy as np
@@ -15,44 +14,6 @@ if __name__ == "__main__":
     from normalization import Normalizer
 else:
     from .normalization import Normalizer
-
-def binned_psd(t, signal, n_bins=50, fmin=None, fmax=None, pow_min=1e-6):
-    fs = 1 / np.mean(np.diff(t))
-
-    freqs = np.fft.rfftfreq(len(signal), d=1 / fs)
-    psd = (np.abs(np.fft.rfft(signal)) ** 2) / (len(signal) * fs)
-
-    freqs, psd = freqs[1:], psd[1:]  # drop DC
-
-    fmin = fmin or freqs[0]
-    fmax = fmax or freqs[-1]
-
-    mask = (freqs >= fmin) & (freqs <= fmax)
-    freqs, psd = freqs[mask], psd[mask]
-
-    bin_edges = np.logspace(np.log10(fmin), np.log10(fmax), n_bins + 1)
-    bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
-    bin_power = np.full(n_bins, np.nan)
-
-    for i in range(n_bins):
-        mask = (freqs >= bin_edges[i]) & (freqs < bin_edges[i + 1])
-        if mask.any():
-            bin_power[i] = psd[mask].mean()
-
-    if np.all(np.isnan(bin_power)):
-        bin_power[:] = pow_min
-    else:
-        with np.errstate(divide="ignore"):
-            # Interpolate NaNs in log-space
-            valid = ~np.isnan(bin_power)
-            bin_power[~valid] = np.exp(
-                np.interp(np.log(bin_centers[~valid]), np.log(bin_centers[valid]), np.log(bin_power[valid]))
-            )
-
-    bin_power = np.maximum(pow_min, bin_power)
-
-    return bin_centers, bin_power
-
 
 class HDF5ChunkBatchSampler(Sampler[list[int]]):
     """Shuffle HDF5 chunks while keeping records from each chunk adjacent."""
@@ -111,23 +72,14 @@ class ThrusterDataset(Dataset):
         subset_size: int | None = None,
         start_index: int = 0,
         scalars_in_tensor=False,
-        fourier_features=False,
         uuids=None,
         downsample_res=None,
-        max_freqs=64,
     ):
         super().__init__()
         self.dir = Path(dir)
         self._h5 = None
         self._h5_pid = None
         self.is_hdf5 = self.dir.is_file() and self.dir.suffix.lower() in {".h5", ".hdf5"}
-
-        if fourier_features:
-            warnings.warn(
-                "fourier_features is deprecated and is ignored",
-                DeprecationWarning,
-                stacklevel=2,
-            )
 
         if self.is_hdf5:
             self._init_hdf5(uuids, subset_size, start_index, scalars_in_tensor)
@@ -147,16 +99,6 @@ class ThrusterDataset(Dataset):
         self.scalars_in_tensor = scalars_in_tensor
         self.resolution = len(self.grid)
 
-        # Frequencies to analyze in fourier spectrum
-        self.fourier_features = False
-        self.max_freqs = max_freqs
-        self.min_freq = 5e3
-        self.max_freq = 5e5
-        # Minimum power spectral density
-        self.min_pow = 1e-6
-        # Factor used to normalize power spectra
-        self.power_norm_factor = np.abs(np.log(self.min_pow))
-
     def _init_directory(self, subset_size, start_index, scalars_in_tensor):
         self.data_dir = self.dir / "data"
         self.files = os.listdir(self.data_dir)
@@ -174,6 +116,7 @@ class ThrusterDataset(Dataset):
             "fields",
             "parameters",
             "performance",
+            "time",
             "grid",
             "UUID",
             "field_names",
@@ -185,6 +128,7 @@ class ThrusterDataset(Dataset):
             "performance_names",
             "performance_means",
             "performance_stds",
+            "time_names",
         }
         with h5py.File(self.dir, "r") as handle:
             missing = sorted(required.difference(handle.keys()))
@@ -197,7 +141,7 @@ class ThrusterDataset(Dataset):
             record_count = fields_shape[0]
             chunks = handle["fields"].chunks
             self.hdf5_chunk_size = chunks[0] if chunks is not None else 1
-            for name in ("parameters", "performance", "UUID"):
+            for name in ("parameters", "performance", "time", "UUID"):
                 if handle[name].shape[0] != record_count:
                     raise ValueError(f"HDF5 '{name}' record count does not match 'fields'")
             if fields_shape[1] != len(handle["field_names"]):
@@ -210,7 +154,13 @@ class ThrusterDataset(Dataset):
                 handle["performance_names"]
             ):
                 raise ValueError("HDF5 performance count does not match 'performance_names'")
+            if handle["time"].ndim != 3 or handle["time"].shape[2] != len(handle["time_names"]):
+                raise ValueError("HDF5 time quantity count does not match 'time_names'")
 
+            time_names = handle["time_names"].asstr()[:].tolist()
+            if len(set(time_names)) != len(time_names):
+                raise ValueError(f"HDF5 dataset {self.dir} contains duplicate time names")
+            self._time_variables = {name: index for index, name in enumerate(time_names)}
             self.grid = np.asarray(handle["grid"], dtype=float)
             self.metadata_grid = pd.DataFrame({"z (m)": self.grid})
             all_uuids = handle["UUID"].asstr()[:].tolist()
@@ -277,6 +227,14 @@ class ThrusterDataset(Dataset):
     def tensor_channels(self):
         return self.norm.tensor_channels()
 
+    def times(self):
+        return self.time_variables()
+
+    def time_variables(self):
+        if not self.is_hdf5:
+            raise ValueError("Named time-variable access is only available for HDF5 datasets")
+        return self._time_variables
+
     def get_field(self, tens, name, action=None):
         row = tens[:, self.fields()[name], :]
         if action == "normalize":
@@ -302,6 +260,10 @@ class ThrusterDataset(Dataset):
         else:
             raise NameError(f"Action '{name}' not allowed. Action must be 'normalize', 'denormalize' or `None`.")
 
+    def get_time(self, time, name):
+        """Return one named variable from an individual or batched time tensor."""
+        return time[..., self.time_variables()[name]]
+
     def sample_params(self, num_samples, device):
         param_vec_inds = random.choices(range(len(self)), k=num_samples)
         param_vecs = torch.tensor(np.array([self[i][1] for i in param_vec_inds]), device=device)
@@ -309,25 +271,6 @@ class ThrusterDataset(Dataset):
 
     def __len__(self):
         return len(self._indices) if self.is_hdf5 else len(self.files)
-
-    def _signal_to_vec(self, t, signal, truncate=True):
-        if truncate:
-            num_pts = len(t)
-            t = t[num_pts // 2 :]
-            signal = signal[num_pts // 2 :]
-
-        mean = signal.mean()
-        rms = torch.maximum(signal.std(), torch.tensor([1e-2]))
-        signal_norm = (signal - mean) / rms
-        rms_norm = rms / mean
-        mean_norm = self.norm.normalize(mean, "discharge_current_A")
-
-        _, bin_powers = binned_psd(
-            t, signal_norm, n_bins=self.max_freqs, fmin=self.min_freq, fmax=self.max_freq, pow_min=self.min_pow
-        )
-        bin_powers = torch.tensor(bin_powers).log() / self.power_norm_factor
-
-        return torch.concat([torch.tensor([mean_norm, rms_norm]), bin_powers])
 
     def __getitem__(self, idx):
         if self.is_hdf5:
@@ -339,13 +282,14 @@ class ThrusterDataset(Dataset):
                 data["parameters"][record_index],
                 data["fields"][record_index],
                 perf,
+                data["time"][record_index],
             )
         else:
             sample_name = self.files[idx]
             filename = self.data_dir / sample_name
             data = np.load(filename)
             perf = data["perf"] if self.scalars_in_tensor else None
-            return self._format_sample(sample_name, data["params"], data["data"], perf)
+            return self._format_sample(sample_name, data["params"], data["data"], perf, data["time"])
 
     def __getitems__(self, indices):
         """Read a DataLoader batch in contiguous HDF5 runs."""
@@ -373,12 +317,14 @@ class ThrusterDataset(Dataset):
             parameters = data["parameters"][record_slice]
             fields = data["fields"][record_slice]
             performance = data["performance"][record_slice] if self.scalars_in_tensor else None
+            time = data["time"][record_slice]
             for offset, sorted_position in enumerate(sorted_positions[run_start:run_end]):
                 samples[sorted_position] = self._format_sample(
                     record_ids[sorted_position],
                     parameters[offset],
                     fields[offset],
                     performance[offset] if performance is not None else None,
+                    time[offset],
                 )
             run_start = run_end
         return samples
@@ -391,10 +337,11 @@ class ThrusterDataset(Dataset):
             else str(raw_identifier)
         )
 
-    def _format_sample(self, raw_identifier, raw_params, raw_tensor, raw_perf=None):
+    def _format_sample(self, raw_identifier, raw_params, raw_tensor, raw_perf, raw_time):
         record_id = self._decode_identifier(raw_identifier)
         tensor = torch.as_tensor(np.asarray(raw_tensor), dtype=torch.float32)
         params = torch.as_tensor(np.asarray(raw_params), dtype=torch.float32)
+        time = torch.as_tensor(np.asarray(raw_time), dtype=torch.float32)
 
         if self.scalars_in_tensor:
             resolution = tensor.shape[1]
@@ -422,7 +369,7 @@ class ThrusterDataset(Dataset):
 
             assert tensor.shape[1] == 128
 
-        return record_id, params, tensor
+        return record_id, params, tensor, time
 
 
 class ThrusterPlotter1D:

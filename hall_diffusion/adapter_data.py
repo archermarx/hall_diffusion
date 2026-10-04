@@ -361,7 +361,7 @@ class ConditionDataset(Dataset):
         return conditions
 
     def __getitem__(self, index):
-        record_id, params, target = self.base[index]
+        record_id, params, target = self.base[index][:3]
         if self._condition_cache is None:
             value = self._hdf5_handle()[self.key][self._condition_rows[index]]
             condition = self._format_condition(value, record_id)
@@ -377,7 +377,7 @@ class ConditionDataset(Dataset):
             conditions = self._read_hdf5_conditions(indices, record_ids)
         else:
             conditions = [self._condition_cache[int(index)] for index in indices]
-        return [(*sample, condition) for sample, condition in zip(samples, conditions, strict=True)]
+        return [(*sample[:3], condition) for sample, condition in zip(samples, conditions, strict=True)]
 
 
 def collate_condition_batch(batch):

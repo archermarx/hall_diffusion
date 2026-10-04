@@ -260,12 +260,11 @@ def _plot_validation(
         logical_indices = rng.choice(len(dataset), size=example_count, replace=False).tolist()
         raw_conditions = np.stack([dataset.raw_condition(index) for index in logical_indices])
         base_handle = dataset.base._hdf5_handle()
-        time_names = base_handle["time_names"].asstr()[:].tolist()
         time_traces = np.stack(
             [np.asarray(base_handle["time"][dataset.base._indices[index]]) for index in logical_indices]
         )
-        time_s = time_traces[:, :, time_names.index("time_s")]
-        discharge_current = time_traces[:, :, time_names.index("discharge_current_A")]
+        time_s = dataset.base.get_time(time_traces, "time_s")
+        discharge_current = dataset.base.get_time(time_traces, "discharge_current_A")
         selected_record_ids = [dataset.base.record_ids[index] for index in logical_indices]
         condition_attrs = dataset._hdf5_handle().attrs
         current_range = (

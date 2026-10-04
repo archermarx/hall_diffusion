@@ -104,7 +104,7 @@ def validation_loss(
     if seed is not None:
         torch.manual_seed(seed)
     losses = []
-    for record_ids, vec, x in val_loader:
+    for record_ids, vec, x, _ in val_loader:
         with torch.no_grad():
             x = x.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
             vec = vec.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
@@ -117,7 +117,7 @@ def validation_loss(
     if visualize:
         # Load first batch with fixed noise to visualize results
         with torch.no_grad():
-            record_ids, vec, y = next(iter(val_loader))
+            record_ids, vec, y, _ = next(iter(val_loader))
             vec = vec.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
             y = y.float().to(DEVICE, non_blocking=DEVICE.type == "cuda")
             conditions = condition_fn(record_ids, y, vec) if condition_fn is not None else None
@@ -559,7 +559,7 @@ def train(args):
         while True:
             with timer.section("data_load"):
                 try:
-                    record_ids, vec, y = next(data_iter)
+                    record_ids, vec, y, _ = next(data_iter)
                 except StopIteration:
                     break
 

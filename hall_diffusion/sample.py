@@ -172,7 +172,7 @@ def build_observation(
     verbose=False,
 ):
     _validate_observation_interface(observations)
-    _, data_params, data_tensor = dataset[0]
+    _, data_params, data_tensor = dataset[0][:3]
     data_tensor = data_tensor.to(device)
 
     noise_std_scale = LEGACY_MEASUREMENT_NOISE_SCALE if sampling_mode == "constant" else 1.0
