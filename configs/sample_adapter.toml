@@ -1,7 +1,7 @@
 num_samples = 32
 batch_size = 32
 num_steps = 64
-model_type = "ema"
+base_weights = "ema"
 out_dir = "samples/image_adapter"
 replace_samples = true
 method = "midpoint"

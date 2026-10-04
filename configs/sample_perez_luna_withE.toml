@@ -5,8 +5,8 @@ batch_size = 256
 # Number of sampling steps to take
 num_steps = 2048
 
-# Which model to load (ema, best, last) 
-model_type = "ema"
+# Which base-model checkpoint weights to load (ema, best, last).
+base_weights = "ema"
 # Output directory for generations.
 out_dir = "samples/noTe"
 # Whether samples in out_dir should be replaced or added to

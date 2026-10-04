@@ -381,7 +381,7 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     result = sample_module.infer(
         checkpoint,
         {
-            "model_type": "ema",
+            "base_weights": "ema",
             "num_samples": 3,
             "batch_size": 2,
             "adapters": [{"name": "tlpp", "checkpoint": "unused.pth.tar"}],
@@ -400,7 +400,7 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     sample_module.infer(
         checkpoint,
         {
-            "model_type": "ema",
+            "base_weights": "ema",
             "num_samples": 3,
             "batch_size": 2,
             "adapters": [{"name": "tlpp", "checkpoint": "unused.pth.tar"}],
@@ -415,7 +415,7 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     sample_module.infer(
         checkpoint,
         {
-            "model_type": "ema",
+            "base_weights": "ema",
             "num_samples": 3,
             "batch_size": 2,
             "adapters": [{"checkpoint": "unused.pth.tar"}],
@@ -432,7 +432,7 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
     sample_module.infer(
         checkpoint,
         {
-            "model_type": "ema",
+            "base_weights": "ema",
             "num_samples": 3,
             "batch_size": 2,
             "adapters": [{"name": "tlpp", "checkpoint": "unused.pth.tar"}],
@@ -449,7 +449,7 @@ def test_infer_accepts_direct_adapter_condition_batches(tmp_path, monkeypatch):
         sample_module.infer(
             checkpoint,
             {
-                "model_type": "ema",
+                "base_weights": "ema",
                 "num_samples": 3,
                 "batch_size": 2,
                 "adapters": [{"name": "renamed", "checkpoint": "unused.pth.tar"}],
@@ -501,7 +501,7 @@ def test_infer_rejects_incomplete_file_based_adapter_condition(tmp_path, monkeyp
         sample_module.infer(
             checkpoint,
             {
-                "model_type": "ema",
+                "base_weights": "ema",
                 "num_samples": 1,
                 "adapters": [
                     {

@@ -744,12 +744,13 @@ def infer(
 
     model = models.from_config(model_config.copy(), device=device)
 
-    # Determine which weights to load
-    model_type = sampling_config.get("model_type", "ema")
-    assert model_type in ["ema", "best", "last"]
-    model_type = "model" if model_type == "last" else model_type
+    # Select the base-model checkpoint weights independently of adapter weights.
+    base_weights = sampling_config.get("base_weights", "ema")
+    if base_weights not in {"ema", "best", "last"}:
+        raise ValueError("base_weights must be 'ema', 'best', or 'last'")
+    checkpoint_key = "model" if base_weights == "last" else base_weights
 
-    model.load_state_dict(model_dict[model_type], strict=False)
+    model.load_state_dict(model_dict[checkpoint_key], strict=False)
     model.requires_grad_(False)
     base_model = model
     train_config = model_dict.get("train_config", {})
