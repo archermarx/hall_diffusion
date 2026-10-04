@@ -301,7 +301,7 @@ def train(config_path: str | Path, device_name: str = "auto", restart: bool = Fa
     settings = models.dataset_settings(base_config)
     directories = training["directories"]
     dataset_kwargs = dict(
-        scalars_in_tensor=settings["scalars_in_tensor"], fourier_features=settings["fourier_features"],
+        scalars_in_tensor=settings["scalars_in_tensor"],
         downsample_res=settings["downsample_res"],
     )
     train_base = thruster_data.ThrusterDataset(directories["train_data_dir"], **dataset_kwargs)

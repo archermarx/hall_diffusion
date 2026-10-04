@@ -9,51 +9,25 @@ using Statistics
 using NPZ
 using ProgressMeter
 using DelimitedFiles
-using FFTW: fft, fftfreq
 
 """
 Specified the variables which should be saved in log form.
 Note that we take the natural logarithm (base-e), not the base ten logarithm.
 """
-const LOG_VARS = Set([:B, :nu_e, :nu_an, :nn, :ne, :ni_1, :ni_2, :ni_3, :pe, :background_pressure_torr, :frequency])
+const LOG_VARS = Set([:B, :nu_e, :nu_an, :nn, :ne, :ni_1, :ni_2, :ni_3, :pe, :background_pressure_torr])
 
-function calc_fourier_features(sample, k = nothing)
-    time = Float64.(sample[:time][:time_s])
+function calc_performance(sample)
     current = Float64.(sample[:time][:discharge_current_A])
     thrust = Float64.(sample[:time][:thrust_mN])
 
-    # Calculate Fourier transform of second half of time series (converged region)
-    # Keep only frequencies > 0 and calculate mean seperately
-    M = length(time)
-    time = time[M÷2+1:end]
+    # Calculate time-averaged performance over the converged half of the trace.
+    M = length(current)
     current = current[M÷2+1:end]
     thrust = thrust[M÷2+1:end]
-    dt = time[end]-time[end-1]
 
-    N = length(time)
+    N = length(current)
     mean_current = sum(current) / N
     mean_thrust = sum(thrust) / N
-    freqs = fftfreq(N, 1 / dt)[2:N÷2+1]
-    ampls = 2 * fft(current)[2:N÷2+1] ./ N
-
-    # Sort complex amplitudes and frequencies by descending signal amplitude
-    inds_sorted = sortperm(-abs.(ampls))
-
-    if k !== nothing
-        inds_sorted = inds_sorted[1:k]
-    end
-
-    freqs_sorted = freqs[inds_sorted]
-
-    # divide amplitudes by mean for normalization
-    ampls_sorted = ampls[inds_sorted] ./ mean_current
-
-    # Save frequency components to dictionary
-    sample[:fourier] = OrderedDict(
-        :frequency => freqs_sorted,
-        :real => real.(ampls_sorted),
-        :imag => imag.(ampls_sorted),
-    )
 
     # Save time-averaged performance features
     sample[:performance] = OrderedDict(
@@ -86,7 +60,7 @@ Otherwise, returns the following:
 - tensor: tensor containing data for above variables, laid out one quantity per row.
 """
 function load_single_sim(sim_dict; include_timevarying=false)
-    sim_dict = calc_fourier_features(sim_dict)
+    sim_dict = calc_performance(sim_dict)
 
 	grid = collect(sim_dict[:sim]["grid"])[2:end-1]
     resolution = length(grid)
@@ -228,10 +202,6 @@ function load_single_sim(sim_dict; include_timevarying=false)
 
     param_vec = [sim_dict[:params][param] for param in param_names]
 
-    fourier_data = sim_dict[:fourier]
-    fourier_names = collect(keys(fourier_data))
-    fourier_tensor = hcat([fourier_data[n] for n in fourier_names]...)
-
     performance_data = sim_dict[:performance]
     performance_names = collect(keys(performance_data))
     performance_vec = [performance_data[n] for n in performance_names]
@@ -243,7 +213,6 @@ function load_single_sim(sim_dict; include_timevarying=false)
     return (;
         params = (param_names, param_vec),
         fields = (field_names, field_tensor),
-        fourier = (fourier_names, fourier_tensor),
         performance = (performance_names, performance_vec),
         time = (time_names, time_tens),
         grid = grid
@@ -268,10 +237,6 @@ function take_log(sim)
             param_vec[i] = log(param_vec[i])
         end
     end
-
-    # Frequencies are in log-space
-    fourier_tensor = sim.fourier[2]
-    sim.fourier[2][:, 1] = log.(fourier_tensor[:, 1])
 
     return sim
 end
@@ -305,35 +270,30 @@ end
 get_data_normalization(sims; target_std = 1.0)
 
 Computes mean and std-dev across all simulation tensors per-quantity, as well as per-parameter for each input param.
-Returns these as two named tuples with keys (:names, :means, :stds) for later use in z-score normalization.
+Returns three named tuples with keys (:names, :means, :stds) for later use in z-score normalization.
 These can then be saved to disk for future reconstruction.
 """
 function get_data_normalization(sims; target_std = 1.0)
     s = sims[1]
     param_names, param_vec = s.params
     tensor_row_names, tensor = s.fields
-    fourier_names, fourier_tensor = s.fourier
     perf_names, perf_vec = s.performance
     
     num_sims = length(sims)
     num_cells, num_rows = size(tensor)
     num_params = length(param_vec)
-    num_freqs = size(fourier_tensor, 1)
     num_perf = length(perf_vec)
 
     tensor_block = zeros(num_cells, num_rows, num_sims)
     param_mat = zeros(num_params, num_sims)
-    frequencies = zeros(num_freqs, num_sims)
     perf_mat = zeros(num_perf, num_sims)
 
     @showprogress for (i, sim) in enumerate(sims)
         _, p = sim.params
         _, t = sim.fields
-        _, f = sim.fourier
         _, pf = sim.performance
         param_mat[:, i] .= p
         tensor_block[:, :, i] .= t
-        frequencies[:, i] .= f[:, 1]
         perf_mat[:, i] .= pf
     end
 
@@ -347,19 +307,11 @@ function get_data_normalization(sims; target_std = 1.0)
     tensor_stds = [std(tensor_block[:, i, :]) for i in 1:num_rows] ./ target_std
     perf_stds = [std(perf_mat[i, :]) for i in 1:num_perf] ./ target_std
 
-    # Fourier feature normalization: normalize means and log(freqs)
-    frequency_mean = mean(frequencies)
-    frequency_std = std(frequencies) ./ target_std
-
-    # Real and imaginary component of amplitudes are already normalized by the mean value and do not get additional normalization
-    fourier_means, fourier_stds = [frequency_mean, 0.0, 0.0], [frequency_std, 1.0, 1.0]
-
     param_info = (;names = param_names, means = param_means, stds = param_stds)
     field_info = (;names = tensor_row_names, means = tensor_means, stds = tensor_stds)
-    fourier_info = (;names = fourier_names, means = fourier_means, stds = fourier_stds)
     perf_info = (;names = perf_names, means = perf_means, stds = perf_stds)
 
-    return param_info, field_info, fourier_info, perf_info
+    return param_info, field_info, perf_info
 end
 
 function read_normalization_file(file)
@@ -399,13 +351,12 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         end
 
         println("Calculating normalization factors")
-        param_norm, tensor_norm, fourier_norm, perf_norm = get_data_normalization(load_data(subset_files); target_std = target_std)
+        param_norm, tensor_norm, perf_norm = get_data_normalization(load_data(subset_files); target_std = target_std)
     else
         # Load normalization info from file
         println("Reading normalization data from files")
         param_norm = read_normalization_file(joinpath(norm_file_dir, "norm_params.csv"))
         tensor_norm = read_normalization_file(joinpath(norm_file_dir, "norm_data.csv"))
-        fourier_norm = read_normalization_file(joinpath(norm_file_dir, "norm_fourier.csv"))
         perf_norm = read_normalization_file(joinpath(norm_file_dir, "norm_perf.csv"))
     end
 
@@ -431,12 +382,11 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
 
     param_labels, _ = s.params
     row_labels, _ = s.fields
-    fourier_labels, _ = s.fourier
     perf_labels, _ = s.performance
     grid = s.grid
-    labels = [param_labels, row_labels, fourier_labels, perf_labels]
-    norms = [param_norm, tensor_norm, fourier_norm, perf_norm]
-    cases = ["params", "data", "fourier", "perf"]
+    labels = [param_labels, row_labels, perf_labels]
+    norms = [param_norm, tensor_norm, perf_norm]
+    cases = ["params", "data", "perf"]
 
     # Write normalization factors to disk for both params and data.
     # These have CSV format and the filenames are `norm_params.csv` and `norm_data.csv`
@@ -475,7 +425,6 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         else
             _, p = _s.params
             _, t = _s.fields
-            _, f = _s.fourier
             _, pf = _s.performance
             _, time_data = _s.time
         end
@@ -490,14 +439,10 @@ function normalize_data(files::Vector{String}, out_dir; target_std = 1.0, subset
         t_norm = @. (t' - tensor_norm.means) / tensor_norm.stds
         pf_norm = @. (pf - perf_norm.means) / perf_norm.stds
 
-        # Normalize fourier frequencies
-        f[:, 1] = @. (f[:, 1] - fourier_norm.means[1]) / fourier_norm.stds[1]
-        
         # Write to file
         out_dict = Dict(
             "params" => Float32.(p_norm),
             "data" => Float32.(t_norm),
-            "fourier" => Float32.(f),
             "perf" => Float32.(pf_norm),
             "time" => Float32.(time_data),
         )

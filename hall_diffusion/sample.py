@@ -294,7 +294,6 @@ def parse_observation(
     shape,
     args,
     scalars_in_tensor,
-    fourier_features,
     variance_model=None,
     condition_vec=None,
     device="cpu",
@@ -311,7 +310,6 @@ def parse_observation(
             uncond_dir,
             downsample_res=resolution,
             scalars_in_tensor=scalars_in_tensor,
-            fourier_features=fourier_features,
         )
         param_vec = unconditional_dataset.sample_params(num_samples=num_samples, device=device)
     else:
@@ -335,7 +333,6 @@ def parse_observation(
             obs_file,
             downsample_res=resolution,
             scalars_in_tensor=scalars_in_tensor,
-            fourier_features=fourier_features,
         )
 
         obs_operator, obs_data, obs_var, param_vec = build_observation(
@@ -371,7 +368,6 @@ def sample(
     model,
     shape,
     scalars_in_tensor,
-    fourier_features,
     args,
     variance_model=None,
     condition_vec=None,
@@ -388,7 +384,6 @@ def sample(
         shape,
         args,
         scalars_in_tensor,
-        fourier_features,
         variance_model,
         condition_vec,
         device,
@@ -737,7 +732,6 @@ def infer(
     model_config = models.resolve_model_config(model_dict["model_config"])
     dataset_settings = models.dataset_settings(model_config)
     scalars_in_tensor = dataset_settings["scalars_in_tensor"]
-    fourier_features = dataset_settings["fourier_features"]
 
     if verbose:
         print(f"{model_config=}")
@@ -925,7 +919,6 @@ def infer(
             model,
             size,
             scalars_in_tensor,
-            fourier_features,
             batch_config,
             variance_model=variance_model,
             condition_vec=condition_vec,

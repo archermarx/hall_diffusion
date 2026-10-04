@@ -285,7 +285,5 @@ def test_log_normalized_uncertainty_uses_local_reference_value():
     }
     normalizer.norm_params = {"names": {}, "mean": np.array([]), "std": np.array([]), "log": np.array([])}
     normalizer.norm_perf = {"names": {}, "mean": np.array([]), "std": np.array([]), "log": np.array([])}
-    normalizer.norm_fourier = {"names": {}, "mean": np.array([]), "std": np.array([]), "log": np.array([])}
-
     result = normalizer.normalize_stddev(torch.tensor([1.0]), "field", reference=torch.tensor([4.0]))
     torch.testing.assert_close(result, torch.tensor([0.125]))

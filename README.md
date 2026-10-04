@@ -153,8 +153,7 @@ $ uv run python/train.py config_small.toml
 `train_data_dir` and `test_data_dir` may each point either to the legacy dataset
 directory described above or to a packed `.h5`/`.hdf5` file using the schema in
 `h9_val_small.h5`. Packed datasets are read lazily, so their full field arrays
-are not loaded into memory. Fourier-derived conditioning features are deprecated
-and are ignored when reading either format.
+are not loaded into memory.
 
 ## Sampling
 
@@ -206,7 +205,7 @@ measurement standard deviation by 40.
 Parameter measurements reject spatial `locations`, array-valued `values`, and
 array-valued errors. The former `[observation.fields]` and `[params]` tables and
 the `x`, `y`, `normalized`, and flat error keys are intentionally unsupported.
-Sampling derives scalar and Fourier layout settings from the model checkpoint.
+Sampling derives the scalar layout settings from the model checkpoint.
 
 ## Evaluating model quality
 We use the maximum mean discrepancy to evaluate the distance between two distributions, i.e. generated samples and a test set. We apply it here by first compressing the data into a latent representation using the Hierarchical Tucker method. This can be done in `compress.py`. Once the data have been compressed, we use `mmd.py` to compute the discrepancy.

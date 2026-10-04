@@ -308,19 +308,16 @@ def train(args):
     dataset_settings = models.dataset_settings(config["model"])
     print(dataset_settings)
     scalars_in_tensor = dataset_settings["scalars_in_tensor"]
-    fourier_features = dataset_settings["fourier_features"]
     downsample_res = dataset_settings["downsample_res"]
 
     train_dataset = thruster_data.ThrusterDataset(
         train_data_dir,
         scalars_in_tensor=scalars_in_tensor,
-        fourier_features=fourier_features,
         downsample_res=downsample_res,
     )
     test_dataset = thruster_data.ThrusterDataset(
         test_data_dir,
         scalars_in_tensor=scalars_in_tensor,
-        fourier_features=fourier_features,
         downsample_res=downsample_res,
     )
 

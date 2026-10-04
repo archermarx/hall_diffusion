@@ -17,7 +17,6 @@ import torch
 def test_dataset_settings_are_inferred_from_checkpoint_config():
     config = {
         "scalars_in_tensor": True,
-        "fourier_features": True,
         "downsample_res": 64,
         "condition_dim": 0,
     }
@@ -25,16 +24,8 @@ def test_dataset_settings_are_inferred_from_checkpoint_config():
 
     assert settings == {
         "scalars_in_tensor": True,
-        "fourier_features": False,
         "downsample_res": 64,
     }
-    assert config["fourier_features"] is True
-
-
-def test_explicit_legacy_fourier_setting_is_disabled():
-    config = resolve_model_config({"fourier_features": True})
-
-    assert config["fourier_features"] is False
 
 
 def test_legacy_checkpoint_infers_tensorized_scalars_from_zero_condition_dimension():
@@ -56,7 +47,6 @@ def test_model_config_populates_defaults_without_overwriting_explicit_values():
 
     assert resolved["channels_per_head"] == 8
     assert resolved["base_channels"] == EDM2_DEFAULTS["base_channels"]
-    assert resolved["fourier_features"] is False
     assert resolved["scalars_in_tensor"] is False
     assert resolved["downsample_res"] == 16
     assert "base_channels" not in original

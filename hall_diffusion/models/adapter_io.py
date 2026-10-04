@@ -17,7 +17,7 @@ ADAPTER_FORMAT_VERSION = 1
 def base_signature(model_config: dict) -> dict:
     """Architecture fields that must agree before an adapter can attach."""
     config = resolve_model_config(model_config)
-    ignored = {"architecture", "scalars_in_tensor", "fourier_features", "downsample_res", "base_conditioning"}
+    ignored = {"architecture", "scalars_in_tensor", "downsample_res", "base_conditioning"}
     return {key: deepcopy(value) for key, value in config.items() if key not in ignored}
 
 

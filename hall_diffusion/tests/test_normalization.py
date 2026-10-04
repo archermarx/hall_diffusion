@@ -20,7 +20,7 @@ def test_normalizer_keeps_categories_separate_and_builds_active_tensor_channels(
     assert normalizer.tensor_channels() == {"field": 0, "parameter": 1, "performance": 2}
 
 
-def test_writing_tensor_metadata_preserves_performance_normalization_without_fourier_features(tmp_path):
+def test_writing_tensor_metadata_preserves_performance_normalization(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "output"
     source.mkdir()

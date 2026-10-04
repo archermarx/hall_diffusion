@@ -33,9 +33,8 @@ def concat_norm_info(*infos: NormInfo) -> NormInfo:
 
 
 class Normalizer:
-    def __init__(self, dir, scalars_in_tensor=False, fourier_features=False):
+    def __init__(self, dir, scalars_in_tensor=False):
         self.dir = Path(dir)
-        self.fourier_features = False
         self.scalars_in_tensor = scalars_in_tensor
         self.norm_spatial, self.metadata_tensor = Normalizer.read_normalization_info(self.dir / "norm_data.csv")
         self.norm_params, self.metadata_params = Normalizer.read_normalization_info(self.dir / "norm_params.csv")
@@ -53,8 +52,6 @@ class Normalizer:
             self.norm_tensor = concat_norm_info(self.norm_spatial, self.norm_params, self.norm_perf)
         else:
             self.norm_tensor = concat_norm_info(self.norm_spatial)
-
-        self.norm_fourier = empty_norm_info()
 
     @classmethod
     def from_hdf5(cls, path: Path | str, scalars_in_tensor: bool = False):
@@ -86,7 +83,6 @@ class Normalizer:
 
         normalizer = cls.__new__(cls)
         normalizer.dir = Path(path)
-        normalizer.fourier_features = False
         normalizer.scalars_in_tensor = scalars_in_tensor
         with h5py.File(path, "r") as handle:
             normalizer.norm_spatial, normalizer.metadata_tensor = read_info(
@@ -102,7 +98,6 @@ class Normalizer:
             if scalars_in_tensor
             else concat_norm_info(normalizer.norm_spatial)
         )
-        normalizer.norm_fourier = empty_norm_info()
         return normalizer
 
     @staticmethod
@@ -121,8 +116,6 @@ class Normalizer:
         self.metadata_tensor.to_csv(path / "norm_data.csv", index=False)
         if self.norm_perf["names"]:
             self.metadata_perf.to_csv(path / "norm_perf.csv", index=False)
-        if self.fourier_features:
-            self.metadata_fourier.to_csv(path / "norm_fourier.csv", index=False)
     
     def find_name(self, name: str):
         if name in self.spatial_fields():
@@ -131,8 +124,6 @@ class Normalizer:
             norm = self.norm_params
         elif name in self.performance_scalars():
             norm = self.norm_perf
-        elif name in self.norm_fourier["names"]:
-            norm = self.norm_fourier
         else:
             raise KeyError(f"{name} is not a valid field, parameter, or performance scalar in the dataset.")
 

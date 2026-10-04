@@ -29,7 +29,6 @@ def dataset_settings(config: dict) -> dict:
     scalars_in_tensor = data_config.get("scalars_in_tensor", data_config.get("condition_dim") == 0)
     return {
         "scalars_in_tensor": scalars_in_tensor,
-        "fourier_features": data_config["fourier_features"],
         "downsample_res": data_config.get("downsample_res", data_config.get("resolution")),
     }
 
@@ -43,7 +42,6 @@ def from_config(config: dict, device):
     config.pop("architecture", None)
     config.pop("scalars_in_tensor", None)
     config.pop("downsample_res", None)
-    config.pop("fourier_features", None)
     config.pop("base_conditioning", None)
     model = edm2.EDM2Denoiser(**config).to(device)
 
