@@ -63,6 +63,18 @@ class IonCurrentObservation:
         self.output_order = self.current.indices.new_tensor(linear_positions + [self.current_position]).argsort()
         self.linear_endpoint_weights = self.linear.index_select(1, self.current.indices)
         self.linear_is_diagonal = bool(torch.all(torch.count_nonzero(self.linear, dim=0) <= 1).item())
+        if self.linear_is_diagonal:
+            # Needed for a positive-sum conditional variance. Compute the
+            # contribution outside the endpoint directly, without subtracting
+            # endpoint variance from a potentially similar total variance.
+            self.linear_outside_endpoint_square = self.linear.square()
+            self.linear_outside_endpoint_square[:, self.current.indices] = 0
+            self.endpoint_covariance_is_diagonal = bool(
+                torch.all(torch.count_nonzero(self.linear_endpoint_weights, dim=1) <= 1).item()
+            )
+            if self.linear.shape[0] and self.endpoint_covariance_is_diagonal:
+                self.endpoint_linear_rows = self.linear_endpoint_weights.abs().argmax(dim=0)
+                self.endpoint_observed = torch.any(self.linear_endpoint_weights != 0, dim=0)
 
     def combine(self, linear_values, current_values):
         values = torch.cat((linear_values, current_values.unsqueeze(-1)), dim=-1)

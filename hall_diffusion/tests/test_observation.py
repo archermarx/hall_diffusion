@@ -3,7 +3,12 @@ import pytest
 import torch
 
 from hall_diffusion import sample
-from hall_diffusion.guidance import DPSCovarianceCache, guidance_score, legacy_guidance_score
+from hall_diffusion.guidance import (
+    DPSCovarianceCache,
+    _solve_ion_current_covariance,
+    guidance_score,
+    legacy_guidance_score,
+)
 from hall_diffusion.observation_operators import IonCurrentDensity, IonCurrentObservation
 from hall_diffusion.utils.normalization import Normalizer
 
@@ -449,6 +454,11 @@ def current_operator_pair(layout, dtype=torch.float64, current_position=0):
         row[current.indices[3]] = 0.5
         row[current.indices[0]] = 0.25
         rows.append(row)
+    if layout == "mixed_endpoint_row":
+        row = torch.zeros(tensor.numel(), dtype=dtype)
+        row[current.indices[3]] = 0.5
+        row[current.indices[0]] = 0.25
+        rows.append(row)
     rows.insert(current_position, current)
     operator = IonCurrentObservation(rows)
 
@@ -466,7 +476,7 @@ def current_operator_pair(layout, dtype=torch.float64, current_position=0):
     return tensor, operator, reference
 
 
-@pytest.mark.parametrize("layout", ["current_only", "disjoint", "overlap_diagonal", "overlap_dense"])
+@pytest.mark.parametrize("layout", ["current_only", "disjoint", "overlap_diagonal", "overlap_dense", "mixed_endpoint_row"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("noise_kind", ["scalar", "vector", "full"])
 def test_fast_current_guidance_matches_original_dense_autograd(layout, dtype, noise_kind):
@@ -551,3 +561,54 @@ def test_fast_current_guidance_avoids_autograd_jacobians_and_caches_linear_facto
         assert torch.all(torch.isfinite(result))
     expected_shapes = [operator.linear.shape[:1] * 2] if layout == "overlap_dense" else []
     assert factorization_shapes == expected_shapes
+
+
+@pytest.mark.parametrize("linear_noise", [1e-10, 1e-14])
+@pytest.mark.parametrize("jitter", [0.0, 1e-6])
+@pytest.mark.parametrize("average", [False, True])
+def test_tight_endpoint_current_variance_remains_positive_in_float32(linear_noise, jitter, average):
+    dataset = CurrentDataset()
+    current = IonCurrentDensity(dataset.norm, dataset.tensor_channels(), dataset.tensor)
+    weights = dataset.tensor.new_tensor([1.0, 2.0, -0.5, 1.5, -1.0, 0.25])
+    rows = []
+    for index, weight in zip(current.indices.tolist(), weights):
+        row = torch.zeros(dataset.tensor.numel())
+        if average:
+            start = index - dataset.tensor.shape[-1] + 1
+            row[start:index + 1] = weight / dataset.tensor.shape[-1]
+        else:
+            row[index] = weight
+        rows.append(row)
+    rows.insert(3, current)
+    operator = IonCurrentObservation(rows)
+    noise = torch.full((7,), linear_noise)
+    noise[operator.current_position] = 0.0
+    obs = {
+        "operator": operator, "var": noise, "covariance_jitter": jitter,
+        "variance_model": {
+            "noise_levels": torch.tensor([0.1, 1.0]),
+            "process_variance": torch.full((2, *dataset.tensor.shape), 0.2),
+        },
+        "covariance_cache": DPSCovarianceCache(),
+    }
+    for offset in (0.0, 0.1):
+        mean = dataset.tensor.unsqueeze(0).repeat(2, 1, 1) + offset
+        residual = torch.zeros(2, 7)
+        residual[:, operator.current_position] = 1.0
+        solved = _solve_ion_current_covariance(mean, residual, noise, 0.5, obs)
+        assert torch.all(torch.isfinite(solved))
+        actual_variance = 1.0 / solved[:, operator.current_position]
+        assert torch.all(actual_variance > 0)
+
+        # Independent scalar Gaussian-conditioning formula for each endpoint.
+        # Use double precision for the reference without subtracting similar
+        # quantities, including the variance from unobserved grid points.
+        q = obs["variance_model"]["process_variance"][0, 0, 0].double()
+        effective_noise = noise[0].double() + jitter
+        coefficient = operator.linear_endpoint_weights.diagonal().double()
+        outside_variance = (operator.linear_outside_endpoint_square.double() * q).sum(dim=1)
+        posterior_variance = q * (outside_variance + effective_noise) / (
+            q * coefficient.square() + outside_variance + effective_noise
+        )
+        expected_variance = (current.derivatives(mean).double().square() * posterior_variance).sum(dim=1) + jitter
+        torch.testing.assert_close(actual_variance.double(), expected_variance, rtol=2e-6, atol=0.0)

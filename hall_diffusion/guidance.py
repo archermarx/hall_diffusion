@@ -215,7 +215,8 @@ def _solve_ion_current_covariance(mean, residual, noise, t, observation):
     jitter = observation.get("covariance_jitter", 1e-6)
     state_variance = _state_variance(mean, t, observation["variance_model"]).reshape(-1)
     derivatives = operator.current.derivatives(mean)
-    weighted = derivatives * state_variance.index_select(0, operator.current.indices)
+    endpoint_variance = state_variance.index_select(0, operator.current.indices)
+    weighted = derivatives * endpoint_variance
     current_variance = (derivatives * weighted).sum(dim=-1) + noise[operator.current_position] + jitter
     current_residual = residual[:, operator.current_position]
     if operator.linear.shape[0] == 0:
@@ -229,7 +230,9 @@ def _solve_ion_current_covariance(mean, residual, noise, t, observation):
 
     def linear_covariance():
         if operator.linear_is_diagonal:
-            return operator.linear.square() @ state_variance + linear_noise + jitter
+            outside_variance = operator.linear_outside_endpoint_square @ state_variance + linear_noise + jitter
+            diagonal = operator.linear_endpoint_weights.square() @ endpoint_variance + outside_variance
+            return torch.stack((diagonal, outside_variance))
         covariance = (operator.linear * state_variance) @ operator.linear.T
         covariance = covariance + torch.diag(linear_noise + jitter)
         return torch.linalg.cholesky(covariance)
@@ -238,14 +241,38 @@ def _solve_ion_current_covariance(mean, residual, noise, t, observation):
         linear_covariance() if cache is None else cache.get_or_compute(cache_key, linear_covariance)
     )
     if operator.linear_is_diagonal:
-        solved_linear = linear_residual / linear_factor
-        solved_cross = cross / linear_factor
+        diagonal, outside_variance = linear_factor
+        solved_linear = linear_residual / diagonal
+        solved_cross = cross / diagonal
     else:
         # Both right-hand sides use the same factor for every batch member.
         solved = torch.cholesky_solve(torch.cat((linear_residual.T, cross.T), dim=1), linear_factor).T
         solved_linear, solved_cross = solved.split(mean.shape[0])
 
-    conditional_variance = current_variance - (cross * solved_cross).sum(dim=-1)
+    # Joseph form: Var(j - v L x) + Var(v epsilon_L) + R_j,
+    # where v = Cov(j, L x) C_LL^-1. This is the same Schur
+    # complement expressed as nonnegative sums, avoiding cancellation when
+    # tight linear measurements nearly determine the endpoint current.
+    if operator.linear_is_diagonal and operator.endpoint_covariance_is_diagonal:
+        # Each linear row involves at most one of the six endpoint values.
+        # Condition each value using q * R_eff / (a² q + R_eff), which stays
+        # accurate even when R_eff is far below float32 epsilon times q.
+        rows = operator.endpoint_linear_rows
+        remaining_variance = endpoint_variance * (
+            outside_variance.index_select(0, rows) / diagonal.index_select(0, rows)
+        )
+        remaining_variance = torch.where(operator.endpoint_observed, remaining_variance, endpoint_variance)
+        conditional_variance = (derivatives.square() * remaining_variance).sum(dim=-1)
+    elif operator.linear_is_diagonal:
+        remaining_endpoint = derivatives - solved_cross @ operator.linear_endpoint_weights
+        conditional_variance = (remaining_endpoint.square() * endpoint_variance).sum(dim=-1)
+        conditional_variance += solved_cross.square() @ outside_variance
+    else:
+        remaining_state = -(solved_cross @ operator.linear)
+        remaining_state[:, operator.current.indices] += derivatives
+        conditional_variance = (remaining_state.square() * state_variance).sum(dim=-1)
+        conditional_variance += (solved_cross.square() * (linear_noise + jitter)).sum(dim=-1)
+    conditional_variance += noise[operator.current_position] + jitter
     solved_current = (current_residual - (cross * solved_linear).sum(dim=-1)) / conditional_variance
     solved_linear = solved_linear - solved_cross * solved_current.unsqueeze(-1)
     return operator.combine(solved_linear, solved_current)
