@@ -17,6 +17,7 @@ from hall_diffusion import models
 from hall_diffusion.adapter_data import condition_artifact_config, preprocess_condition
 from hall_diffusion.models.adapter_io import load_adapter
 from hall_diffusion.models.conditioning import ConditionedEDM2
+from hall_diffusion.observation_operators import IonCurrentDensity, IonCurrentObservation
 from hall_diffusion.guidance import (
     DPSCovarianceCache,
     guidance_score,
@@ -43,7 +44,6 @@ parser.add_argument(
 )
 
 LEGACY_MEASUREMENT_NOISE_SCALE = 40.0
-ELEMENTARY_CHARGE = 1.602176634e-19  # C
 ERROR_TYPES = {"absolute", "relative"}
 ERROR_SPACES = {"normalized", "unnormalized"}
 
@@ -168,23 +168,12 @@ def _validate_scalar_error(name, error):
         raise ValueError(f"Scalar measurement '{name}' requires one error.stddev, not per-cell uncertainties.")
 
 
-def _ion_current_density_operator(dataset):
+def _ion_current_density_operator(dataset, reference):
     """Measure e * sum(Z * ni_Z * ui_Z) at the right-most grid point in A/m²."""
     fields = {f"{quantity}_{charge}" for charge in range(1, 4) for quantity in ("ni", "ui")}
     if missing := fields.difference(dataset.spatial_fields()):
         raise ValueError(f"ion_current_density requires spatial fields {sorted(missing)}.")
-    channels = dataset.tensor_channels()
-    normalizer = dataset.norm
-
-    def measure(state):
-        return sum(
-            charge * ELEMENTARY_CHARGE
-            * normalizer.denormalize(state[channels[f"ni_{charge}"], -1], f"ni_{charge}")
-            * normalizer.denormalize(state[channels[f"ui_{charge}"], -1], f"ui_{charge}")
-            for charge in range(1, 4)
-        )
-
-    return measure
+    return IonCurrentDensity(dataset.norm, dataset.tensor_channels(), reference)
 
 
 def build_observation(
@@ -229,7 +218,7 @@ def build_observation(
             _validate_scalar_error(name, error)
             if error["space"] != "unnormalized":
                 raise ValueError("ion_current_density requires error.space = 'unnormalized' (A/m²).")
-            measure_current = _ion_current_density_operator(dataset)
+            measure_current = _ion_current_density_operator(dataset, data_tensor)
             if "value" in measurement:
                 if measurement.get("value_space") != "unnormalized":
                     raise ValueError("ion_current_density requires value_space = 'unnormalized' (A/m²).")
@@ -330,11 +319,7 @@ def build_observation(
         if all(isinstance(row, torch.Tensor) for row in operator_rows):
             operator = torch.stack(operator_rows)
         else:
-            def operator(state):
-                return torch.stack([
-                    row @ state.flatten() if isinstance(row, torch.Tensor) else row(state)
-                    for row in operator_rows
-                ])
+            operator = IonCurrentObservation(operator_rows)
         obs_y = torch.cat(observed_values)
         obs_var = torch.cat(observed_variances)
     else:

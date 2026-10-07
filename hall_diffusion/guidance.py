@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from hall_diffusion.observation_operators import IonCurrentObservation
+
 
 @dataclass
 class DPSCovarianceCache:
@@ -102,6 +104,8 @@ def load_variance_model(path, sampling_config, state_shape, device):
 def _apply_operator(operator, x):
     if isinstance(operator, torch.Tensor):
         return x.flatten(start_dim=1) @ operator.T
+    if isinstance(operator, IonCurrentObservation):
+        return operator.batch_apply(x)
     if isinstance(operator, Callable):
         return torch.stack([operator(sample).reshape(-1) for sample in x])
     raise TypeError("observation operator must be a tensor or callable")
@@ -110,6 +114,8 @@ def _apply_operator(operator, x):
 def _operator_jacobians(operator, x):
     if isinstance(operator, torch.Tensor):
         return operator.unsqueeze(0).expand(x.shape[0], -1, -1)
+    if isinstance(operator, IonCurrentObservation):
+        return operator.jacobians(x)
 
     def jacobian(sample):
         sample = sample.detach().requires_grad_(True)
@@ -195,6 +201,56 @@ def _covariance_cache_key(observation, kind, t, reference):
     return cache, (kind, float(t), reference.dtype, str(reference.device))
 
 
+def _solve_ion_current_covariance(mean, residual, noise, t, observation):
+    """Solve the linear/current covariance using its scalar Schur complement.
+
+    The linear block is shared across samples and timesteps can be cached.
+    Only the six endpoint derivatives, their cross-covariances with linear
+    rows, and one conditional current variance depend on each sample.
+    """
+    operator = observation["operator"]
+    if noise.ndim == 1 and noise.numel() != residual.shape[1]:
+        raise ValueError("observation variance has the wrong length")
+    noise = noise.expand(residual.shape[1])
+    jitter = observation.get("covariance_jitter", 1e-6)
+    state_variance = _state_variance(mean, t, observation["variance_model"]).reshape(-1)
+    derivatives = operator.current.derivatives(mean)
+    weighted = derivatives * state_variance.index_select(0, operator.current.indices)
+    current_variance = (derivatives * weighted).sum(dim=-1) + noise[operator.current_position] + jitter
+    current_residual = residual[:, operator.current_position]
+    if operator.linear.shape[0] == 0:
+        return (current_residual / current_variance).unsqueeze(-1)
+
+    linear_noise = noise.index_select(0, operator.linear_positions)
+    linear_residual = residual.index_select(1, operator.linear_positions)
+    cross = weighted @ operator.linear_endpoint_weights.T
+    kind = "ion_linear_diagonal" if operator.linear_is_diagonal else "ion_linear_dense"
+    cache, cache_key = _covariance_cache_key(observation, kind, t, residual)
+
+    def linear_covariance():
+        if operator.linear_is_diagonal:
+            return operator.linear.square() @ state_variance + linear_noise + jitter
+        covariance = (operator.linear * state_variance) @ operator.linear.T
+        covariance = covariance + torch.diag(linear_noise + jitter)
+        return torch.linalg.cholesky(covariance)
+
+    linear_factor = (
+        linear_covariance() if cache is None else cache.get_or_compute(cache_key, linear_covariance)
+    )
+    if operator.linear_is_diagonal:
+        solved_linear = linear_residual / linear_factor
+        solved_cross = cross / linear_factor
+    else:
+        # Both right-hand sides use the same factor for every batch member.
+        solved = torch.cholesky_solve(torch.cat((linear_residual.T, cross.T), dim=1), linear_factor).T
+        solved_linear, solved_cross = solved.split(mean.shape[0])
+
+    conditional_variance = current_variance - (cross * solved_cross).sum(dim=-1)
+    solved_current = (current_residual - (cross * solved_linear).sum(dim=-1)) / conditional_variance
+    solved_linear = solved_linear - solved_cross * solved_current.unsqueeze(-1)
+    return operator.combine(solved_linear, solved_current)
+
+
 def guidance_score(x_t, x_0, t, observation, retain_graph=False):
     """Differentiate the locally Gaussian measurement log likelihood."""
     if observation["data"] is None:
@@ -213,7 +269,9 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
     operator = observation["operator"]
     noise = torch.as_tensor(observation["var"], dtype=measurement.dtype, device=measurement.device)
     jitter = observation.get("covariance_jitter", 1e-6)
-    if (
+    if isinstance(operator, IonCurrentObservation) and noise.ndim <= 1:
+        solved = _solve_ion_current_covariance(mean, residual, noise, t, observation)
+    elif (
         observation.get("diagonal_covariance", False)
         and isinstance(operator, torch.Tensor)
         and noise.ndim <= 1

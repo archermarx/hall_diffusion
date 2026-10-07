@@ -3,7 +3,8 @@ import pytest
 import torch
 
 from hall_diffusion import sample
-from hall_diffusion.guidance import guidance_score, legacy_guidance_score
+from hall_diffusion.guidance import DPSCovarianceCache, guidance_score, legacy_guidance_score
+from hall_diffusion.observation_operators import IonCurrentDensity, IonCurrentObservation
 from hall_diffusion.utils.normalization import Normalizer
 
 
@@ -428,3 +429,125 @@ def test_parse_ion_current_density_observation_supports_callable_operator(monkey
     assert callable(obs["operator"])
     assert not obs["diagonal_covariance"]
     torch.testing.assert_close(obs["var"], torch.zeros(1))
+
+
+def current_operator_pair(layout, dtype=torch.float64, current_position=0):
+    dataset = CurrentDataset(scalars_in_tensor=True)
+    tensor = dataset.tensor.to(dtype)
+    current = IonCurrentDensity(dataset.norm, dataset.tensor_channels(), tensor)
+    rows = []
+    if layout != "current_only":
+        row = torch.zeros(tensor.numel(), dtype=dtype)
+        row[0] = 1.0
+        rows.append(row)
+    if layout.startswith("overlap"):
+        row = torch.zeros(tensor.numel(), dtype=dtype)
+        row[current.indices[3]] = 1.0
+        rows.append(row)
+    if layout == "overlap_dense":
+        row = torch.zeros(tensor.numel(), dtype=dtype)
+        row[current.indices[3]] = 0.5
+        row[current.indices[0]] = 0.25
+        rows.append(row)
+    rows.insert(current_position, current)
+    operator = IonCurrentObservation(rows)
+
+    def reference(state):
+        # Reproduce the original unbatched operator independently of the
+        # analytic derivatives and structured covariance implementation.
+        value = sum(
+            charge * 1.602176634e-19
+            * dataset.norm.denormalize(state[dataset.tensor_channels()[f"ni_{charge}"], -1], f"ni_{charge}")
+            * dataset.norm.denormalize(state[dataset.tensor_channels()[f"ui_{charge}"], -1], f"ui_{charge}")
+            for charge in range(1, 4)
+        )
+        return torch.stack([value if isinstance(row, IonCurrentDensity) else row @ state.flatten() for row in rows])
+
+    return tensor, operator, reference
+
+
+@pytest.mark.parametrize("layout", ["current_only", "disjoint", "overlap_diagonal", "overlap_dense"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("noise_kind", ["scalar", "vector", "full"])
+def test_fast_current_guidance_matches_original_dense_autograd(layout, dtype, noise_kind):
+    tensor, operator, reference = current_operator_pair(layout, dtype, current_position=0)
+    size = operator.linear.shape[0] + 1
+    noise = torch.full((size,), 0.1, dtype=dtype)
+    noise[operator.current_position] = 2500.0
+    if noise_kind == "scalar":
+        noise = torch.tensor(2500.0, dtype=dtype)
+    elif noise_kind == "full":
+        noise = torch.diag(noise) + 0.01 * torch.ones(size, size, dtype=dtype)
+    variance = torch.linspace(0.01, 0.2, tensor.numel(), dtype=dtype).reshape_as(tensor)
+    obs = {
+        "operator": operator, "data": reference(tensor) * 0.85, "var": noise,
+        "variance_model": {
+            "noise_levels": torch.tensor([0.1, 1.0], dtype=dtype),
+            "process_variance": torch.stack((variance, 1.5 * variance)),
+            "bias_correction": True,
+            "mean_residual": torch.full((2, *tensor.shape), 0.03, dtype=dtype),
+            "channel_average": True,
+        },
+        "covariance_cache": DPSCovarianceCache(),
+    }
+    # Reuse the cache with different states and a smaller final batch. The
+    # nonlinear and cross-covariance terms must still be recomputed each time.
+    for batch_size, offset in ((3, 0.01), (1, -0.02)):
+        def score(measurement):
+            state = tensor.unsqueeze(0).repeat(batch_size, 1, 1).add(offset).requires_grad_()
+            denoised = 0.8 * state + 0.03 * state.square()
+            return guidance_score(state, denoised, 0.5, {**obs, "operator": measurement})
+
+        torch.testing.assert_close(
+            score(operator), score(reference),
+            rtol=1e-4 if dtype == torch.float32 else 1e-10,
+            atol=1e-6 if dtype == torch.float32 else 1e-10,
+        )
+
+
+def test_fast_current_derivatives_match_autograd_with_mixed_log_metadata():
+    dataset = CurrentDataset()
+    # Exercise linear density and log velocity, as well as the usual reverse.
+    for name, mean, std, log in (("ni_2", 1e17, 1e17, False), ("ui_2", 9.0, 0.5, True)):
+        index = dataset.norm.norm_spatial["names"][name]
+        dataset.norm.norm_spatial["mean"][index] = mean
+        dataset.norm.norm_spatial["std"][index] = std
+        dataset.norm.norm_spatial["log"][index] = log
+    tensor = dataset.tensor.double()
+    current = IonCurrentDensity(dataset.norm, dataset.tensor_channels(), tensor)
+    operator = IonCurrentObservation([current])
+    state = tensor.unsqueeze(0).repeat(2, 1, 1)
+    state[1] += 0.1
+    expected = torch.stack([torch.autograd.functional.jacobian(operator, value).reshape(1, -1) for value in state])
+    torch.testing.assert_close(operator.jacobians(state), expected)
+
+
+@pytest.mark.parametrize("layout", ["current_only", "disjoint", "overlap_diagonal", "overlap_dense"])
+def test_fast_current_guidance_avoids_autograd_jacobians_and_caches_linear_factor(layout, monkeypatch):
+    tensor, operator, reference = current_operator_pair(layout, current_position=1 if layout != "current_only" else 0)
+    obs = {
+        "operator": operator, "data": reference(tensor) * 0.9, "var": 0.1,
+        "variance_model": {
+            "noise_levels": torch.tensor([0.1, 1.0], dtype=tensor.dtype),
+            "process_variance": torch.full((2, *tensor.shape), 0.02, dtype=tensor.dtype),
+        },
+        "covariance_cache": DPSCovarianceCache(),
+    }
+    original_cholesky = torch.linalg.cholesky
+    factorization_shapes = []
+
+    def record_cholesky(value):
+        factorization_shapes.append(value.shape)
+        return original_cholesky(value)
+
+    def unexpected_jacobian(*args, **kwargs):
+        raise AssertionError("endpoint current guidance should use analytic derivatives")
+
+    monkeypatch.setattr(torch.autograd.functional, "jacobian", unexpected_jacobian)
+    monkeypatch.setattr(torch.linalg, "cholesky", record_cholesky)
+    for batch_size in (3, 1):
+        state = tensor.unsqueeze(0).repeat(batch_size, 1, 1).requires_grad_()
+        result = guidance_score(state, 0.8 * state, 0.5, obs)
+        assert torch.all(torch.isfinite(result))
+    expected_shapes = [operator.linear.shape[:1] * 2] if layout == "overlap_dense" else []
+    assert factorization_shapes == expected_shapes
