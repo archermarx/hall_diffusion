@@ -3,6 +3,7 @@ import pytest
 import torch
 
 from hall_diffusion import sample
+from hall_diffusion.guidance import guidance_score, legacy_guidance_score
 from hall_diffusion.utils.normalization import Normalizer
 
 
@@ -287,3 +288,143 @@ def test_log_normalized_uncertainty_uses_local_reference_value():
     normalizer.norm_perf = {"names": {}, "mean": np.array([]), "std": np.array([]), "log": np.array([])}
     result = normalizer.normalize_stddev(torch.tensor([1.0]), "field", reference=torch.tensor([4.0]))
     torch.testing.assert_close(result, torch.tensor([0.125]))
+
+
+class CurrentDataset(Dataset):
+    def __init__(self, scalars_in_tensor=False):
+        super().__init__(scalars_in_tensor=scalars_in_tensor, resolution=3)
+        normalizer = Normalizer.__new__(Normalizer)
+        normalizer.norm_spatial = {
+            "names": {"field": 0},
+            "mean": np.array([10.0]),
+            "std": np.array([2.0]),
+            "log": np.array([False]),
+        }
+        for category, name, mean, std in (("params", "voltage", 10.0, 2.0), ("perf", "thrust", 100.0, 10.0)):
+            setattr(normalizer, f"norm_{category}", {
+                "names": {name: 0}, "mean": np.array([mean]),
+                "std": np.array([std]), "log": np.array([False]),
+            })
+        self.norm = normalizer
+        # Deliberately put velocities before densities to test metadata lookup.
+        for quantity in ("ui", "ni"):
+            for charge in range(1, 4):
+                name = f"{quantity}_{charge}"
+                info = normalizer.norm_spatial
+                index = len(info["names"])
+                info["names"][name] = index
+                self._spatial[name] = index
+                self._channels[name] = self.tensor.shape[0]
+                is_density = quantity == "ni"
+                info["mean"] = np.append(info["mean"], np.log(1e17) if is_density else 2000.0)
+                info["std"] = np.append(info["std"], 0.5 if is_density else 5000.0)
+                info["log"] = np.append(info["log"], is_density)
+                physical = torch.tensor([5e17, 3e17, charge * 1e17] if is_density else [1e5, 5e4, charge * 1e4])
+                self.tensor = torch.cat((self.tensor, normalizer.normalize(physical, name).unsqueeze(0)))
+
+
+@pytest.mark.parametrize("scalars_in_tensor", [False, True])
+def test_ion_current_density_uses_all_charge_states_at_right_boundary(scalars_in_tensor):
+    dataset = CurrentDataset(scalars_in_tensor)
+    operator, data, variance, _ = sample.build_observation(
+        dataset,
+        observation("ion_current_density", {}, {"type": "relative", "space": "unnormalized", "stddev": 0.05}),
+        num_samples=1,
+    )
+    expected = torch.tensor([1.602176634e-19 * 1e21 * (1 + 8 + 27)])
+    torch.testing.assert_close(data, expected)
+    torch.testing.assert_close(operator(dataset.tensor), expected)
+    torch.testing.assert_close(variance, (0.05 * data).square())
+    state = dataset.tensor.clone().requires_grad_()
+    gradient = torch.autograd.grad(operator(state).sum(), state)[0]
+    torch.testing.assert_close(gradient[:, :-1], torch.zeros_like(gradient[:, :-1]))
+    for charge in range(1, 4):
+        density_gradient = gradient[dataset.tensor_channels()[f"ni_{charge}"], -1]
+        velocity_gradient = gradient[dataset.tensor_channels()[f"ui_{charge}"], -1]
+        torch.testing.assert_close(
+            density_gradient, torch.tensor(0.5 * 1.602176634e-19 * charge**3 * 1e21), rtol=5e-6, atol=0.0,
+        )
+        torch.testing.assert_close(
+            velocity_gradient, torch.tensor(1.602176634e-19 * charge**2 * 1e17 * 5000.0), rtol=5e-6, atol=0.0,
+        )
+
+
+@pytest.mark.parametrize(("sampling_mode", "scale"), [("dps", 1.0), ("constant", 40.0)])
+def test_explicit_ion_current_density_combines_with_linear_measurements_and_guides(sampling_mode, scale):
+    dataset = CurrentDataset(scalars_in_tensor=True)
+    operator, data, variance, _ = sample.build_observation(
+        dataset,
+        {"measurements": {
+            "field": {"locations": [0.0], "error": {"type": "absolute", "space": "normalized", "stddev": 0.1}},
+            "ion_current_density": {
+                "value": 1000.0, "value_space": "unnormalized",
+                "error": {"type": "absolute", "space": "unnormalized", "stddev": 50.0},
+            },
+            "thrust": {"error": {"type": "absolute", "space": "normalized", "stddev": 0.2}},
+        }},
+        num_samples=2,
+        sampling_mode=sampling_mode,
+    )
+    torch.testing.assert_close(data, torch.tensor([1.0, 1000.0, 0.5]))
+    torch.testing.assert_close(variance, (scale * torch.tensor([0.1, 50.0, 0.2])).square())
+    expected_current = 1.602176634e-19 * 1e21 * 36
+    torch.testing.assert_close(operator(dataset.tensor), torch.tensor([1.0, expected_current, 0.5]))
+    state = dataset.tensor.unsqueeze(0).expand(2, -1, -1).clone().requires_grad_()
+    obs = {
+        "operator": operator, "data": data, "var": variance,
+        "variance_model": {
+            "noise_levels": torch.tensor([0.1, 1.0]),
+            "process_variance": torch.full((2, *dataset.tensor.shape), 0.01),
+        },
+    }
+    score_fn = legacy_guidance_score if sampling_mode == "constant" else guidance_score
+    score = score_fn(state, state, torch.tensor(0.5), obs)
+    assert torch.all(torch.isfinite(score))
+    assert torch.linalg.vector_norm(score) > 0
+    torch.testing.assert_close(score[:, :, :-1], torch.zeros_like(score[:, :, :-1]))
+    for charge in range(1, 4):
+        for quantity in ("ni", "ui"):
+            assert torch.all(score[:, dataset.tensor_channels()[f"{quantity}_{charge}"], -1] < 0)
+
+
+@pytest.mark.parametrize(("measurement", "error", "message"), [
+    ({"locations": [1.0]}, {"type": "absolute", "space": "unnormalized", "stddev": 1.0}, "unsupported key"),
+    ({"values": [1000.0]}, {"type": "absolute", "space": "unnormalized", "stddev": 1.0}, "unsupported key"),
+    ({"value": [1000.0], "value_space": "unnormalized"}, None, "one value"),
+    ({"value": 1000.0}, {"type": "absolute", "space": "unnormalized", "stddev": 1.0}, "value_space"),
+    ({"value": 1000.0, "value_space": "normalized"}, {"type": "absolute", "space": "unnormalized", "stddev": 1.0}, "value_space"),
+    ({}, None, "requires an error specification"),
+    ({}, {"type": "absolute", "space": "normalized", "stddev": 1.0}, "error.space"),
+    ({}, {"type": "absolute", "space": "unnormalized", "stddev": [1.0]}, "one error.stddev"),
+    ({}, {"type": "absolute", "space": "unnormalized", "stddev": -1.0}, "finite and nonnegative"),
+])
+def test_ion_current_density_rejects_invalid_scalar_configuration(measurement, error, message):
+    with pytest.raises(ValueError, match=message):
+        sample.build_observation(CurrentDataset(), observation("ion_current_density", measurement, error), num_samples=1)
+
+
+def test_ion_current_density_requires_all_six_spatial_fields():
+    dataset = CurrentDataset()
+    del dataset._spatial["ni_3"]
+    with pytest.raises(ValueError, match="requires spatial fields.*ni_3"):
+        sample.build_observation(
+            dataset,
+            observation("ion_current_density", {}, {"type": "absolute", "space": "unnormalized", "stddev": 0.0}),
+            num_samples=1,
+        )
+
+
+def test_parse_ion_current_density_observation_supports_callable_operator(monkeypatch):
+    dataset = CurrentDataset()
+    monkeypatch.setattr(sample, "ThrusterDataset", lambda *args, **kwargs: dataset)
+    obs, _, _ = sample.parse_observation(
+        (1, dataset.tensor.shape[0], 3),
+        {"observation": {
+            "base_sim": "reference",
+            **observation("ion_current_density", {}, {"type": "absolute", "space": "unnormalized", "stddev": 0.0}),
+        }},
+        scalars_in_tensor=False,
+    )
+    assert callable(obs["operator"])
+    assert not obs["diagonal_covariance"]
+    torch.testing.assert_close(obs["var"], torch.zeros(1))

@@ -43,6 +43,7 @@ parser.add_argument(
 )
 
 LEGACY_MEASUREMENT_NOISE_SCALE = 40.0
+ELEMENTARY_CHARGE = 1.602176634e-19  # C
 ERROR_TYPES = {"absolute", "relative"}
 ERROR_SPACES = {"normalized", "unnormalized"}
 
@@ -102,13 +103,18 @@ def _error_spec(observations, measurement, name, required):
     return error
 
 
-def _normalized_error_stddev(error, normalized_values, field, normalizer):
-    """Convert absolute/relative uncertainty in either space to model space."""
-    stddev = torch.as_tensor(error["stddev"], dtype=normalized_values.dtype, device=normalized_values.device)
-    if stddev.ndim > 1 or (stddev.ndim == 1 and stddev.numel() not in {1, normalized_values.numel()}):
+def _error_stddev(error, values):
+    stddev = torch.as_tensor(error["stddev"], dtype=values.dtype, device=values.device)
+    if stddev.ndim > 1 or (stddev.ndim == 1 and stddev.numel() not in {1, values.numel()}):
         raise ValueError("error.stddev must be a scalar or have one value per observation")
     if not torch.all(torch.isfinite(stddev)) or torch.any(stddev < 0):
         raise ValueError("error.stddev must be finite and nonnegative")
+    return stddev
+
+
+def _normalized_error_stddev(error, normalized_values, field, normalizer):
+    """Convert absolute/relative uncertainty in either space to model space."""
+    stddev = _error_stddev(error, normalized_values)
 
     if error["space"] == "normalized":
         reference = normalized_values
@@ -162,6 +168,25 @@ def _validate_scalar_error(name, error):
         raise ValueError(f"Scalar measurement '{name}' requires one error.stddev, not per-cell uncertainties.")
 
 
+def _ion_current_density_operator(dataset):
+    """Measure e * sum(Z * ni_Z * ui_Z) at the right-most grid point in A/m²."""
+    fields = {f"{quantity}_{charge}" for charge in range(1, 4) for quantity in ("ni", "ui")}
+    if missing := fields.difference(dataset.spatial_fields()):
+        raise ValueError(f"ion_current_density requires spatial fields {sorted(missing)}.")
+    channels = dataset.tensor_channels()
+    normalizer = dataset.norm
+
+    def measure(state):
+        return sum(
+            charge * ELEMENTARY_CHARGE
+            * normalizer.denormalize(state[channels[f"ni_{charge}"], -1], f"ni_{charge}")
+            * normalizer.denormalize(state[channels[f"ui_{charge}"], -1], f"ui_{charge}")
+            for charge in range(1, 4)
+        )
+
+    return measure
+
+
 def build_observation(
     dataset,
     observations,
@@ -197,6 +222,29 @@ def build_observation(
     for name, measurement in measurements.items():
         if not isinstance(measurement, dict):
             raise ValueError(f"Measurement '{name}' must be a table.")
+
+        if name == "ion_current_density":
+            _validate_scalar_measurement(name, measurement)
+            error = _error_spec(observations, measurement, name, required=True)
+            _validate_scalar_error(name, error)
+            if error["space"] != "unnormalized":
+                raise ValueError("ion_current_density requires error.space = 'unnormalized' (A/m²).")
+            measure_current = _ion_current_density_operator(dataset)
+            if "value" in measurement:
+                if measurement.get("value_space") != "unnormalized":
+                    raise ValueError("ion_current_density requires value_space = 'unnormalized' (A/m²).")
+                value = torch.as_tensor(measurement["value"], dtype=data_tensor.dtype, device=device)
+                if value.ndim != 0:
+                    raise ValueError(f"Scalar measurement '{name}' requires a scalar value.")
+            else:
+                value = measure_current(data_tensor)
+            stddev = _error_stddev(error, value)
+            if error["type"] == "relative":
+                stddev = stddev * value.abs()
+            operator_rows.append(measure_current)
+            observed_values.append(value.reshape(1))
+            observed_variances.append((noise_std_scale * stddev).square().reshape(1))
+            continue
 
         if name in input_params and not dataset.scalars_in_tensor:
             _validate_scalar_measurement(name, measurement)
@@ -279,7 +327,14 @@ def build_observation(
         )
 
     if operator_rows:
-        operator = torch.stack(operator_rows)
+        if all(isinstance(row, torch.Tensor) for row in operator_rows):
+            operator = torch.stack(operator_rows)
+        else:
+            def operator(state):
+                return torch.stack([
+                    row @ state.flatten() if isinstance(row, torch.Tensor) else row(state)
+                    for row in operator_rows
+                ])
         obs_y = torch.cat(observed_values)
         obs_var = torch.cat(observed_variances)
     else:
@@ -350,7 +405,7 @@ def parse_observation(
             covariance_jitter=args.get("covariance_jitter", 1e-6),
             variance_model=variance_model,
             diagonal_covariance=bool(
-                obs_operator is not None
+                isinstance(obs_operator, torch.Tensor)
                 and torch.all(torch.count_nonzero(obs_operator, dim=0) <= 1).item()
             ),
         )
