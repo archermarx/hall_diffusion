@@ -417,18 +417,16 @@ def sample(
     adapter_contexts=None,
     adapter_scales=None,
     guidance_cache=None,
+    prepared_observation=None,
 ):
     num_samples, _, _ = shape
 
-    obs, dataset, param_vec = parse_observation(
-        shape,
-        args,
-        scalars_in_tensor,
-        variance_model,
-        condition_vec,
-        device,
-        verbose=verbose,
-    )
+    if prepared_observation is None:
+        obs, dataset, param_vec = parse_observation(
+            shape, args, scalars_in_tensor, variance_model, condition_vec, device, verbose=verbose,
+        )
+    else:
+        obs, dataset, param_vec = prepared_observation
     if guidance_cache is not None:
         obs["covariance_cache"] = guidance_cache
 
@@ -761,8 +759,14 @@ def infer(
     verbose=False,
     device="auto",
     adapter_conditions=None,
+    observation_groups=None,
 ):
-    """Load a checkpoint and sample, optionally using raw tensors keyed by adapter name."""
+    """Sample with optional adapter tensors and groups of {measurements, num_samples}.
+
+    Groups occupy consecutive rows in the returned ensemble and may cross batch
+    boundaries. They share the model and adapters, but have separate likelihoods.
+    Grouped inference requires tensorized scalars.
+    """
     device = utils.get_device(device) if isinstance(device, str) else device
     print(f"Selected device: {device}")
 
@@ -772,6 +776,17 @@ def infer(
     model_config = models.resolve_model_config(model_dict["model_config"])
     dataset_settings = models.dataset_settings(model_config)
     scalars_in_tensor = dataset_settings["scalars_in_tensor"]
+    if observation_groups is not None:
+        if not scalars_in_tensor or condition_vec is not None:
+            raise ValueError("Grouped observations require tensorized scalars and no condition_vec")
+        if not observation_groups or any(
+            isinstance(group["num_samples"], bool)
+            or not isinstance(group["num_samples"], int) or group["num_samples"] < 1
+            for group in observation_groups
+        ):
+            raise ValueError("Observation groups require positive integer sample counts")
+        if sum(group["num_samples"] for group in observation_groups) != sampling_config.get("num_samples", 64):
+            raise ValueError("Observation group counts must sum to num_samples")
 
     if verbose:
         print(f"{model_config=}")
@@ -868,6 +883,8 @@ def infer(
 
     num_samples = sampling_config.get("num_samples", 64)
     batch_size = sampling_config.get("batch_size", num_samples)
+    if num_samples < 1 or batch_size < 1:
+        raise ValueError("num_samples and batch_size must be positive")
 
     full_batches, remainder = divmod(num_samples, batch_size)
     batches = [batch_size] * full_batches
@@ -912,6 +929,26 @@ def infer(
     sampling_adapters = [
         adapter for adapter in loaded_adapters if adapter_scales[adapter[0]] != 0
     ]
+    prepared_groups = []
+    group_dataset = None
+    group_start = 0
+    for group in observation_groups or []:
+        count = group["num_samples"]
+        group_config = {**sampling_config, "observation": {
+            **sampling_config["observation"], "measurements": group["measurements"],
+        }}
+        obs, group_dataset, _ = parse_observation(
+            (count, channels, resolution), group_config, scalars_in_tensor,
+            variance_model, device=device,
+        )
+        if guidance_cache is not None:
+            # The covariance depends on this group's operator and noise. Keep
+            # separate caches while retaining the configured total memory cap.
+            obs["covariance_cache"] = DPSCovarianceCache(
+                max_bytes=guidance_cache.max_bytes // len(observation_groups)
+            )
+        prepared_groups.append((group_start, group_start + count, obs))
+        group_start += count
     singleton_conditions = {}
     for name, _, condition, encoder_type in sampling_adapters:
         expected_ndim = _expected_condition_ndim(encoder_type)
@@ -935,6 +972,18 @@ def infer(
             "replace_samples": sampling_config.get("replace_samples", False) and batch_index == 0,
         }
         adapter_contexts = None
+        prepared_observation = None
+        if prepared_groups:
+            groups = []
+            for start, stop, obs in prepared_groups:
+                left = max(start, batch_start)
+                right = min(stop, batch_start + batch_num_samples)
+                if left < right:
+                    groups.append((slice(left - batch_start, right - batch_start), obs))
+            prepared_observation = (
+                {"groups": groups}, group_dataset,
+                torch.empty((batch_num_samples, 0), device=device),
+            )
         if sampling_adapters:
             raw_conditions = {
                 name: _adapter_condition_batch(
@@ -968,6 +1017,7 @@ def infer(
             adapter_contexts=adapter_contexts,
             adapter_scales=adapter_scales,
             guidance_cache=guidance_cache,
+            prepared_observation=prepared_observation,
         )
         samples.append(batch_samples)
         batch_start += batch_num_samples

@@ -278,10 +278,10 @@ def _solve_ion_current_covariance(mean, residual, noise, t, observation):
     return operator.combine(solved_linear, solved_current)
 
 
-def guidance_score(x_t, x_0, t, observation, retain_graph=False):
-    """Differentiate the locally Gaussian measurement log likelihood."""
+def _guidance_loss(x_0, t, observation):
+    """Locally Gaussian negative log likelihood for one observation group."""
     if observation["data"] is None:
-        return torch.zeros_like(x_t)
+        return x_0.sum() * 0
 
     mean = _corrected_mean(x_0, t, observation["variance_model"])
     measurement = _apply_operator(observation["operator"], mean)
@@ -349,14 +349,12 @@ def guidance_score(x_t, x_0, t, observation, retain_graph=False):
             covariance = covariance.unsqueeze(0) + projected_covariance + jitter * identity
             factor = torch.linalg.cholesky(covariance)
             solved = torch.cholesky_solve(residual.unsqueeze(-1), factor).squeeze(-1)
-    loss = 0.5 * torch.sum(residual * solved)
-    return -torch.autograd.grad(loss, x_t, retain_graph=retain_graph)[0]
+    return 0.5 * torch.sum(residual * solved)
 
 
-def legacy_guidance_score(x_t, x_0, t, observation, retain_graph=False):
-    """Reproduce the constant-guidance likelihood used for the paper."""
+def _legacy_guidance_loss(x_0, t, observation):
     if observation["data"] is None:
-        return torch.zeros_like(x_t)
+        return x_0.sum() * 0
 
     measurement = _apply_operator(observation["operator"], x_0)
     observed = torch.as_tensor(
@@ -366,5 +364,29 @@ def legacy_guidance_score(x_t, x_0, t, observation, retain_graph=False):
         observation["var"], dtype=measurement.dtype, device=measurement.device
     )
     process_variance = 0.25 * t**2 / (1 + t**2)
-    loss = torch.sum((measurement - observed) ** 2 / (measurement_variance + process_variance))
+    return torch.sum((measurement - observed) ** 2 / (measurement_variance + process_variance))
+
+
+def _guidance_gradient(loss_fn, x_t, x_0, t, observation, retain_graph):
+    groups = observation.get("groups")
+    if groups is None:
+        if observation["data"] is None:
+            return torch.zeros_like(x_t)
+        loss = loss_fn(x_0, t, observation)
+    else:
+        # Slice the denoiser output, but differentiate against its original input.
+        # A slice created after the forward pass is not an ancestor of x_0.
+        if all(obs["data"] is None for _, obs in groups):
+            return torch.zeros_like(x_t)
+        loss = sum(loss_fn(x_0[rows], t, obs) for rows, obs in groups)
     return -torch.autograd.grad(loss, x_t, retain_graph=retain_graph)[0]
+
+
+def guidance_score(x_t, x_0, t, observation, retain_graph=False):
+    """Differentiate the likelihood, optionally with different observation groups."""
+    return _guidance_gradient(_guidance_loss, x_t, x_0, t, observation, retain_graph)
+
+
+def legacy_guidance_score(x_t, x_0, t, observation, retain_graph=False):
+    """Reproduce the constant-guidance likelihood used for the paper."""
+    return _guidance_gradient(_legacy_guidance_loss, x_t, x_0, t, observation, retain_graph)

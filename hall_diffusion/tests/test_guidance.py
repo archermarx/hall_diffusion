@@ -8,7 +8,32 @@ from hall_diffusion.guidance import (
     _interpolate,
     guidance_score,
     load_variance_model,
+    legacy_guidance_score,
 )
+
+
+def test_grouped_guidance_matches_independent_groups():
+    """Different operators/caches and nonlinear measurements share one backward pass."""
+    initial = torch.linspace(0.2, 1.2, 12).reshape(6, 1, 2)
+    groups = [
+        (slice(0, 2), {"operator": torch.tensor([[1., 0.]]), "data": torch.tensor([0.3]),
+                       "var": torch.tensor([0.1]), "diagonal_covariance": True}),
+        (slice(2, 5), {"operator": torch.tensor([[0.2, 1.]]), "data": torch.tensor([0.7]),
+                       "var": torch.tensor([0.4])}),
+        (slice(5, 6), {"operator": lambda state: state.square().sum(), "data": torch.tensor([0.5]),
+                       "var": torch.tensor([0.2])}),
+    ]
+    for _, obs in groups:
+        obs.update(variance_model=variance_model(2), covariance_cache=DPSCovarianceCache())
+    for score_fn in (guidance_score, legacy_guidance_score):
+        for _ in range(2):  # Exercise reuse of each group's covariance cache.
+            x = initial.clone().requires_grad_(True)
+            combined = score_fn(x, 0.75 * x.square(), 0.5, {"groups": groups})
+            independent = []
+            for rows, obs in groups:
+                group_x = initial[rows].clone().requires_grad_(True)
+                independent.append(score_fn(group_x, 0.75 * group_x.square(), 0.5, obs))
+            torch.testing.assert_close(combined, torch.cat(independent))
 
 
 def variance_model(num_channels, variance=0.3):
