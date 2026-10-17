@@ -26,7 +26,7 @@ from hall_diffusion.guidance import (
 )
 from hall_diffusion.utils import utils
 from hall_diffusion.utils.thruster_data import ThrusterDataset
-from hall_diffusion.samplers.edmsampler import EDMSampler, RK2Integrator, ObservationGuidance
+from hall_diffusion.samplers.edmsampler import EDMSampler, RK2Integrator, ObservationGuidance, noise_generators
 
 parser = argparse.ArgumentParser()
 parser.add_argument("model", type=str, nargs="?")
@@ -35,6 +35,7 @@ parser.add_argument("-o", "--out-dir", type=str)
 parser.add_argument("-n", "--num-samples", type=int)
 parser.add_argument("-b", "--batch-size", type=int)
 parser.add_argument("-s", "--num-steps", type=int)
+parser.add_argument("--noise-seed", type=int, help="Reset initial and stochastic noise on each inference call")
 parser.add_argument("--test-dir", type=Path)
 parser.add_argument(
     "--device",
@@ -418,8 +419,12 @@ def sample(
     adapter_scales=None,
     guidance_cache=None,
     prepared_observation=None,
+    generators=None,
 ):
     num_samples, _, _ = shape
+    initial_generator, churn_generator = (
+        noise_generators(args.get("noise_seed"), device) if generators is None else generators
+    )
 
     if prepared_observation is None:
         obs, dataset, param_vec = parse_observation(
@@ -461,6 +466,7 @@ def sample(
         S_noise=args.get("S_noise", 1.003),
         guidance_second_order_below=args.get("guidance_second_order_below", 0.1),
         use_amp=use_amp,
+        noise_generator=churn_generator,
     )
     sampler = EDMSampler(shape, num_steps, noise_min, noise_max, exponent)
 
@@ -476,6 +482,7 @@ def sample(
         model_args=model_args,
         record_trajectory=record_trajectory,
         finite_check_interval=args.get("finite_check_interval", 0),
+        generator=initial_generator,
     )
 
     final = output[-1, ...]
@@ -766,8 +773,14 @@ def infer(
     Groups occupy consecutive rows in the returned ensemble and may cross batch
     boundaries. They share the model and adapters, but have separate likelihoods.
     Grouped inference requires tensorized scalars.
+
+    Set sampling_config['noise_seed'] to reuse initial and stochastic churn noise
+    on every call. Streams are local to inference and continue across batches.
+    Reproducibility assumes the same device, batch layout and group order. Initial
+    noise uses a separate stream so changing churn/steps does not shift it.
     """
     device = utils.get_device(device) if isinstance(device, str) else device
+    generators = noise_generators(sampling_config.get("noise_seed"), device)
     print(f"Selected device: {device}")
 
     # Load model and config from checkpoint
@@ -1018,6 +1031,7 @@ def infer(
             adapter_scales=adapter_scales,
             guidance_cache=guidance_cache,
             prepared_observation=prepared_observation,
+            generators=generators,
         )
         samples.append(batch_samples)
         batch_start += batch_num_samples
@@ -1040,6 +1054,9 @@ if __name__ == "__main__":
 
     if args.num_steps is not None:
         sampling_config["num_steps"] = args.num_steps
+
+    if args.noise_seed is not None:
+        sampling_config["noise_seed"] = args.noise_seed
 
     if args.num_samples is not None:
         sampling_config["num_samples"] = args.num_samples

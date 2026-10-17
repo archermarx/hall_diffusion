@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from hall_diffusion.samplers.edmsampler import EDMSampler, ObservationGuidance, RK2Integrator
+from hall_diffusion.samplers.edmsampler import EDMSampler, ObservationGuidance, RK2Integrator, noise_generators
 
 
 class IdentityDenoiser(torch.nn.Module):
@@ -108,3 +108,29 @@ def test_final_finite_check_still_rejects_invalid_samples():
 
     with torch.no_grad(), pytest.raises(FloatingPointError, match="NaN/Inf"):
         sampler.sample(InvalidIntegrator(), showprogress=False)
+
+
+@pytest.mark.parametrize("churn", [0., .2])
+def test_seed_repeats_initial_and_stochastic_noise_without_consuming_global_rng(churn):
+    def run(seed, steps=5):
+        initial, stochastic = noise_generators(seed, "cpu")
+        return EDMSampler((3, 2, 4), steps, .01, 1., 2.).sample(
+            RK2Integrator(IdentityDenoiser(), S_churn=churn, noise_generator=stochastic),
+            showprogress=False, generator=initial, record_trajectory=True,
+        )
+
+    state = torch.random.get_rng_state()
+    first = run(42)
+    assert torch.equal(state, torch.random.get_rng_state())
+    torch.randn(100)
+    assert torch.equal(first, run(42))
+    assert not torch.equal(first, run(43))
+    assert torch.equal(first[0], run(42, steps=7)[0])
+    assert not torch.equal(first[0, 0], first[0, 1])
+    assert torch.equal(first[0], first[-1]) == (churn == 0.)
+
+
+@pytest.mark.parametrize("seed", [True, -1, 2**63, 1.5])
+def test_noise_seed_must_be_a_nonnegative_integer(seed):
+    with pytest.raises(ValueError, match="noise_seed"):
+        noise_generators(seed, "cpu")

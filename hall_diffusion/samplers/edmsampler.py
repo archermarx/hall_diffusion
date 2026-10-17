@@ -12,6 +12,17 @@ RK_METHODS = {
     "heun": 1.0,
 }
 
+
+def noise_generators(seed, device):
+    """Independent initial/churn streams; None preserves ordinary random sampling."""
+    if seed is None:
+        return None, None
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**63:
+        raise ValueError("noise_seed must be an integer from 0 through 2**63 - 1")
+    return (torch.Generator(device=device).manual_seed(seed),
+            torch.Generator(device=device).manual_seed((seed + 1) % 2**63))
+
+
 class ObservationGuidance:
     def __init__(self, type, obs_score, observation, guidance_start_time=float('inf')):
         self.type = type
@@ -35,6 +46,7 @@ class RK2Integrator:
             S_noise: float = 1.003,
             guidance_second_order_below: float = float('inf'),
             use_amp: bool = False,
+            noise_generator=None,
         ):
         if method is not None:
             rk_alpha = RK_METHODS[method]
@@ -48,6 +60,7 @@ class RK2Integrator:
         self.rk_alpha = rk_alpha
         self.guidance_second_order_below = guidance_second_order_below
         self.use_amp = use_amp
+        self.noise_generator = noise_generator
 
         # Stochasticity parameters
         self.S_churn = S_churn
@@ -137,7 +150,7 @@ class RK2Integrator:
         if self.S_churn > 0 and self.S_tmin <= t1 <= self.S_tmax:
             t1, t1_old = (1 + self.gamma) * t1 , t1
             noise_std = math.sqrt(t1**2 - t1_old**2) * self.S_noise
-            eps = torch.randn_like(x)
+            eps = torch.randn(x.shape, dtype=x.dtype, device=x.device, generator=self.noise_generator)
             x = x + noise_std * eps
 
         x_pred, x_denoised = self.step(x, t1, t2, model_args=model_args)
@@ -177,6 +190,7 @@ class EDMSampler():
         model_args=None,
         record_trajectory=False,
         finite_check_interval=0,
+        generator=None,
     ):
         if isinstance(finite_check_interval, bool) or not isinstance(finite_check_interval, int):
             raise TypeError("finite_check_interval must be an integer")
@@ -184,7 +198,7 @@ class EDMSampler():
             raise ValueError("finite_check_interval must be nonnegative")
         model_args = {} if model_args is None else model_args
         # Generate initial noise and timesteps
-        x = self.noise_max * torch.randn(self.shape, device=device)
+        x = self.noise_max * torch.randn(self.shape, device=device, generator=generator)
         # Python scalars keep loop control, progress reporting, and comparisons
         # from synchronizing the accelerator at every step.
         timesteps = self.noise_steps.tolist()
